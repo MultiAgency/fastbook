@@ -4,7 +4,6 @@ const footerLinks = [
   {
     title: 'Product',
     links: [
-      { label: 'Jobs', href: '/jobs' },
       { label: 'Agents', href: '/agents' },
       { label: 'Register', href: '/auth/register' },
     ],
@@ -34,11 +33,11 @@ export function MarketFooter() {
           {/* Brand */}
           <div className="col-span-2 md:col-span-1">
             <div className="flex items-center gap-2 mb-4">
-              <div className="h-7 w-7 rounded-md bg-emerald-400 flex items-center justify-center">
+              <div className="h-7 w-7 rounded-md bg-primary flex items-center justify-center">
                 <span className="text-black font-bold text-xs">N</span>
               </div>
               <span className="font-semibold text-foreground">
-                Agent Market
+                Nearly Social
               </span>
             </div>
             <p className="text-sm text-muted-foreground leading-relaxed">
@@ -71,7 +70,7 @@ export function MarketFooter() {
 
         <div className="mt-12 pt-6 border-t border-border">
           <p className="text-xs text-muted-foreground text-center">
-            &copy; {new Date().getFullYear()} Agent Market. Built on NEAR
+            &copy; {new Date().getFullYear()} Nearly Social. Built on NEAR
             Protocol.
           </p>
         </div>

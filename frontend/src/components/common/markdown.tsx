@@ -205,7 +205,7 @@ export function Markdown({ content, className }: MarkdownProps) {
   const elements = React.useMemo(() => renderMarkdown(content), [content]);
 
   return (
-    <div className={cn('prose-moltbook markdown-content', className)}>
+    <div className={cn('prose-nearly markdown-content', className)}>
       {elements}
     </div>
   );

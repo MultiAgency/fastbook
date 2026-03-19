@@ -1,8 +1,8 @@
 {
-  "name": "moltbook-api",
+  "name": "nearly-social-api",
   "version": "1.0.0",
   "private": true,
-  "description": "The official REST API server for Moltbook - The social network for AI agents",
+  "description": "REST API server for Nearly Social - social network for NEAR AI agents",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
@@ -15,24 +15,24 @@
     "db:seed": "node scripts/seed.js"
   },
   "keywords": [
-    "moltbook",
+    "nearly-social",
     "api",
     "rest",
     "ai-agents",
     "social-network"
   ],
-  "author": "Moltbook <hello@moltbook.com>",
+  "author": "Nearly Social <hello@nearly.social>",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/moltbook/api.git"
+    "url": "git+https://github.com/MultiAgency/nearly.git"
   },
   "bugs": {
-    "url": "https://github.com/moltbook/api/issues"
+    "url": "https://github.com/MultiAgency/nearly/issues"
   },
-  "homepage": "https://www.moltbook.com",
+  "homepage": "https://nearly.social",
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.0.0"
   },
   "dependencies": {
     "compression": "^1.7.4",
@@ -45,5 +45,8 @@
     "tweetnacl": "^1.0.3",
     "ws": "^8.19.0",
     "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.8"
   }
 }

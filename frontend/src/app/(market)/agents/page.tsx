@@ -5,41 +5,17 @@ import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { GlowCard } from '@/components/market';
 import { getProfiles } from '@/lib/near-social';
+import { formatRelativeTime } from '@/lib/utils';
+import type { Agent } from '@/types';
 
-interface AgentResponse {
-  name: string;
-  displayName?: string;
-  description?: string;
-  karma: number;
-  followerCount: number;
-  followingCount?: number;
-  isClaimed: boolean;
-  nearAccountId?: string;
-  createdAt: string;
-  lastActive?: string;
-}
-
-interface Agent {
-  name: string;
-  displayName: string;
-  description: string;
-  karma: number;
-  followerCount: number;
-  followingCount: number;
-  isClaimed: boolean;
-  nearAccountId?: string;
-  createdAt: string;
-  lastActive?: string;
-}
-
-type SortKey = 'karma' | 'followers' | 'newest' | 'active';
+type SortKey = 'trust' | 'followers' | 'newest' | 'active';
 
 export default function AgentsPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
-  const [sortBy, setSortBy] = useState<SortKey>('karma');
+  const [sortBy, setSortBy] = useState<SortKey>('trust');
   const [view, setView] = useState<'table' | 'cards'>('cards');
 
   useEffect(() => {
@@ -47,25 +23,25 @@ export default function AgentsPage() {
       setLoading(true);
       setError(null);
       try {
-        const res = await fetch(`/api/market/agents/verified?limit=50`);
+        const res = await fetch(`/api/social/agents/verified?limit=50`);
         if (!res.ok) {
           setAgents([]);
           setLoading(false);
           return;
         }
         const json = await res.json();
-        const data: AgentResponse[] = json.data || json.agents || [];
+        const data = (json.data || json.agents || []) as Partial<Agent & { name?: string }>[];
         const mapped: Agent[] = data.map((a) => ({
-          name: a.name || '',
-          displayName: a.displayName || '',
-          description: a.description || '',
-          karma: a.karma || 0,
-          followerCount: a.followerCount || 0,
-          followingCount: a.followingCount || 0,
-          isClaimed: !!a.isClaimed,
-          nearAccountId: a.nearAccountId || undefined,
-          createdAt: a.createdAt || '',
-          lastActive: a.lastActive || undefined,
+          handle: String(a.handle || a.name || ''),
+          displayName: String(a.displayName || ''),
+          description: String(a.description || ''),
+          tags: Array.isArray(a.tags) ? a.tags : [],
+          trustScore: Number(a.trustScore) || 0,
+          followerCount: Number(a.followerCount) || 0,
+          followingCount: Number(a.followingCount) || 0,
+          nearAccountId: a.nearAccountId ? String(a.nearAccountId) : undefined,
+          createdAt: a.createdAt ?? 0,
+          lastActive: a.lastActive ?? undefined,
         }));
 
         // Enrich with on-chain profile data from social.near
@@ -95,19 +71,10 @@ export default function AgentsPage() {
 
   const filtered = agents.filter(
     (a) =>
-      a.name.toLowerCase().includes(search.toLowerCase()) ||
+      a.handle.toLowerCase().includes(search.toLowerCase()) ||
       (a.description || '').toLowerCase().includes(search.toLowerCase()),
   );
 
-  function timeAgo(dateStr?: string) {
-    if (!dateStr) return '';
-    const diff = Date.now() - new Date(dateStr).getTime();
-    const mins = Math.floor(diff / 60000);
-    if (mins < 60) return `${mins}m ago`;
-    const hrs = Math.floor(mins / 60);
-    if (hrs < 24) return `${hrs}h ago`;
-    return `${Math.floor(hrs / 24)}d ago`;
-  }
 
   return (
     <div className="max-w-6xl mx-auto px-6 pt-24 pb-16">
@@ -146,7 +113,7 @@ export default function AgentsPage() {
               aria-label="Sort agents by"
               className="bg-transparent text-sm text-foreground focus:outline-none"
             >
-              <option value="karma">Karma</option>
+              <option value="trust">Trust Score</option>
               <option value="followers">Followers</option>
               <option value="newest">Newest</option>
               <option value="active">Active</option>
@@ -213,14 +180,14 @@ export default function AgentsPage() {
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {filtered.map((agent) => (
             <Link
-              key={agent.name}
+              key={agent.handle}
               href={agent.nearAccountId ? `/agent/${agent.nearAccountId}` : '#'}
             >
               <GlowCard className="p-5">
                 <div className="flex items-start justify-between mb-3">
                   <div>
                     <h3 className="font-semibold text-foreground">
-                      {agent.displayName || agent.name}
+                      {agent.displayName || agent.handle}
                     </h3>
                     {agent.nearAccountId && (
                       <p className="text-xs font-mono text-emerald-400 mt-0.5 truncate max-w-[200px]">
@@ -234,7 +201,7 @@ export default function AgentsPage() {
                   </div>
                   {agent.lastActive && (
                     <span className="text-xs text-muted-foreground">
-                      {timeAgo(agent.lastActive)}
+                      {agent.lastActive ? formatRelativeTime(agent.lastActive) : ''}
                     </span>
                   )}
                 </div>
@@ -249,10 +216,10 @@ export default function AgentsPage() {
                 <div className="grid grid-cols-3 gap-2 pt-3 border-t border-border">
                   <div className="text-center">
                     <div className="text-sm font-semibold text-foreground">
-                      {agent.karma}
+                      {agent.trustScore}
                     </div>
                     <div className="text-[10px] text-muted-foreground">
-                      karma
+                      trust
                     </div>
                   </div>
                   <div className="text-center">
@@ -265,10 +232,10 @@ export default function AgentsPage() {
                   </div>
                   <div className="text-center">
                     <div className="text-sm font-semibold text-foreground">
-                      {agent.isClaimed ? 'Yes' : 'No'}
+                      {agent.tags?.length ?? 0}
                     </div>
                     <div className="text-[10px] text-muted-foreground">
-                      verified
+                      tags
                     </div>
                   </div>
                 </div>
@@ -313,12 +280,12 @@ export default function AgentsPage() {
               <tbody>
                 {filtered.map((agent) => (
                   <tr
-                    key={agent.name}
+                    key={agent.handle}
                     className="border-b border-border last:border-0 hover:bg-muted/50 transition-colors"
                   >
                     <td className="px-6 py-4">
                       <div className="font-medium text-foreground">
-                        {agent.displayName || agent.name}
+                        {agent.displayName || agent.handle}
                       </div>
                       {agent.description && (
                         <div className="text-xs text-muted-foreground mt-0.5 truncate max-w-[200px]">
@@ -340,7 +307,7 @@ export default function AgentsPage() {
                       )}
                     </td>
                     <td className="px-4 py-4 text-right text-foreground">
-                      {agent.karma.toLocaleString()}
+                      {agent.trustScore}
                     </td>
                     <td className="px-4 py-4 text-right">
                       <div className="flex items-center justify-end gap-1">
@@ -351,18 +318,12 @@ export default function AgentsPage() {
                       </div>
                     </td>
                     <td className="px-4 py-4 text-right">
-                      {agent.isClaimed ? (
-                        <span className="text-emerald-400 text-xs">
-                          Verified
-                        </span>
-                      ) : (
-                        <span className="text-muted-foreground text-xs">
-                          Pending
-                        </span>
-                      )}
+                      <span className="text-emerald-400 text-xs">
+                        Verified
+                      </span>
                     </td>
                     <td className="px-6 py-4 text-right text-muted-foreground text-xs">
-                      {timeAgo(agent.lastActive)}
+                      {agent.lastActive ? formatRelativeTime(agent.lastActive) : ''}
                     </td>
                   </tr>
                 ))}

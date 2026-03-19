@@ -2,41 +2,31 @@
 
 import {
   Bell,
+  Briefcase,
   ChevronDown,
-  Clock,
-  Flame,
-  Hash,
   Home,
   LogOut,
   Menu,
-  Plus,
-  Search,
   Settings,
-  TrendingUp,
   User,
   Users,
   X,
-  Zap,
 } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import * as React from 'react';
 import { Avatar, AvatarFallback, AvatarImage, Button } from '@/components/ui';
-import { useAuth, useIsMobile, useKeyboardShortcut } from '@/hooks';
+import { useAuth, useIsMobile } from '@/hooks';
 import { cn, getInitials } from '@/lib/utils';
 import { useNotificationStore, useUIStore } from '@/store';
 
 // Header
 export function Header() {
   const { agent, isAuthenticated, logout } = useAuth();
-  const { toggleMobileMenu, mobileMenuOpen, openSearch, openCreatePost } =
-    useUIStore();
+  const { toggleMobileMenu, mobileMenuOpen } = useUIStore();
   const { unreadCount } = useNotificationStore();
   const isMobile = useIsMobile();
   const [showUserMenu, setShowUserMenu] = React.useState(false);
-
-  useKeyboardShortcut('k', openSearch, { ctrl: true });
-  useKeyboardShortcut('n', openCreatePost, { ctrl: true });
 
   return (
     <header className="sticky top-0 z-40 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
@@ -53,40 +43,18 @@ export function Header() {
             </Button>
           )}
           <Link href="/" className="flex items-center gap-2 font-bold text-xl">
-            <div className="h-8 w-8 rounded-lg bg-gradient-to-br from-primary to-moltbook-400 flex items-center justify-center">
-              <span className="text-white text-sm font-bold">M</span>
+            <div className="h-8 w-8 rounded-lg bg-gradient-to-br from-primary to-accent flex items-center justify-center">
+              <span className="text-white text-sm font-bold">N</span>
             </div>
-            {!isMobile && <span className="gradient-text">moltbook</span>}
+            {!isMobile && <span className="gradient-text">nearly</span>}
           </Link>
         </div>
 
-        {/* Search */}
-        {!isMobile && (
-          <div className="flex-1 max-w-md">
-            <button
-              onClick={openSearch}
-              className="w-full flex items-center gap-2 px-3 py-2 rounded-md border bg-muted/50 text-muted-foreground text-sm hover:bg-muted transition-colors"
-            >
-              <Search className="h-4 w-4" />
-              <span>Search moltbook...</span>
-              <kbd className="ml-auto text-xs bg-background px-1.5 py-0.5 rounded border">
-                ⌘K
-              </kbd>
-            </button>
-          </div>
-        )}
-
         {/* Actions */}
         <div className="flex items-center gap-2">
-          {isMobile && (
-            <Button variant="ghost" size="icon" onClick={openSearch}>
-              <Search className="h-5 w-5" />
-            </Button>
-          )}
-
           {isAuthenticated ? (
             <>
-              <Button variant="ghost" size="icon" className="relative">
+              <Button variant="ghost" size="icon" className="relative" aria-label="Notifications">
                 <Bell className="h-5 w-5" />
                 {unreadCount > 0 && (
                   <span className="absolute -top-1 -right-1 h-4 w-4 rounded-full bg-destructive text-destructive-foreground text-[10px] flex items-center justify-center">
@@ -95,20 +63,18 @@ export function Header() {
                 )}
               </Button>
 
-              <Button onClick={openCreatePost} size="sm" className="gap-1">
-                <Plus className="h-4 w-4" />
-                {!isMobile && 'Create'}
-              </Button>
-
               <div className="relative">
                 <button
                   onClick={() => setShowUserMenu(!showUserMenu)}
                   className="flex items-center gap-2 p-1 rounded-md hover:bg-muted transition-colors"
+                  aria-expanded={showUserMenu}
+                  aria-haspopup="menu"
+                  aria-label="User menu"
                 >
                   <Avatar className="h-8 w-8">
                     <AvatarImage src={agent?.avatarUrl} />
                     <AvatarFallback>
-                      {agent?.name ? getInitials(agent.name) : '?'}
+                      {agent?.handle ? getInitials(agent.handle) : '?'}
                     </AvatarFallback>
                   </Avatar>
                   {!isMobile && (
@@ -117,17 +83,17 @@ export function Header() {
                 </button>
 
                 {showUserMenu && (
-                  <div className="absolute right-0 top-full mt-2 w-56 rounded-md border bg-popover p-1 shadow-lg animate-in fade-in-0 zoom-in-95">
+                  <div role="menu" className="absolute right-0 top-full mt-2 w-56 rounded-md border bg-popover p-1 shadow-lg animate-in fade-in-0 zoom-in-95">
                     <div className="px-3 py-2 border-b mb-1">
                       <p className="font-medium">
-                        {agent?.displayName || agent?.name}
+                        {agent?.displayName || agent?.handle}
                       </p>
                       <p className="text-xs text-muted-foreground">
-                        u/{agent?.name}
+                        u/{agent?.handle}
                       </p>
                     </div>
                     <Link
-                      href={`/u/${agent?.name}`}
+                      href={`/u/${agent?.handle}`}
                       className="flex items-center gap-2 px-3 py-2 text-sm rounded hover:bg-muted"
                       onClick={() => setShowUserMenu(false)}
                     >
@@ -178,94 +144,34 @@ export function Sidebar() {
 
   const mainLinks = [
     { href: '/', label: 'Home', icon: Home },
-    { href: '/?sort=hot', label: 'Hot', icon: Flame },
-    { href: '/?sort=new', label: 'New', icon: Clock },
-    { href: '/?sort=rising', label: 'Rising', icon: TrendingUp },
-    { href: '/?sort=top', label: 'Top', icon: Zap },
-  ];
-
-  const popularSubmolts = [
-    { name: 'general', displayName: 'General' },
-    { name: 'announcements', displayName: 'Announcements' },
-    { name: 'showcase', displayName: 'Showcase' },
-    { name: 'help', displayName: 'Help' },
-    { name: 'meta', displayName: 'Meta' },
+    { href: '/agents', label: 'Agents', icon: Users },
+    { href: '/settings', label: 'Settings', icon: Settings },
   ];
 
   if (!sidebarOpen) return null;
 
   return (
     <aside className="sticky top-14 h-[calc(100vh-3.5rem)] w-64 shrink-0 border-r bg-background overflow-y-auto scrollbar-hide hidden lg:block">
-      <nav className="p-4 space-y-6">
-        {/* Main Links */}
-        <div className="space-y-1">
-          {mainLinks.map((link) => {
-            const Icon = link.icon;
-            const isActive =
-              pathname === link.href ||
-              (link.href !== '/' && pathname.startsWith(link.href));
-            return (
-              <Link
-                key={link.href}
-                href={link.href}
-                className={cn(
-                  'flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors',
-                  isActive ? 'bg-muted font-medium' : 'hover:bg-muted',
-                )}
-              >
-                <Icon className="h-4 w-4" />
-                {link.label}
-              </Link>
-            );
-          })}
-        </div>
-
-        {/* Popular Submolts */}
-        <div>
-          <h3 className="px-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">
-            Popular Submolts
-          </h3>
-          <div className="space-y-1">
-            {popularSubmolts.map((submolt) => (
-              <Link
-                key={submolt.name}
-                href={`/m/${submolt.name}`}
-                className={cn(
-                  'flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors',
-                  pathname === `/m/${submolt.name}`
-                    ? 'bg-muted font-medium'
-                    : 'hover:bg-muted',
-                )}
-              >
-                <Hash className="h-4 w-4" />
-                {submolt.displayName}
-              </Link>
-            ))}
-          </div>
-        </div>
-
-        {/* Explore */}
-        <div>
-          <h3 className="px-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">
-            Explore
-          </h3>
-          <div className="space-y-1">
+      <nav className="p-4 space-y-1">
+        {mainLinks.map((link) => {
+          const Icon = link.icon;
+          const isActive =
+            pathname === link.href ||
+            (link.href !== '/' && pathname.startsWith(link.href));
+          return (
             <Link
-              href="/submolts"
-              className="flex items-center gap-3 px-3 py-2 rounded-md text-sm hover:bg-muted transition-colors"
+              key={link.href}
+              href={link.href}
+              className={cn(
+                'flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors',
+                isActive ? 'bg-muted font-medium' : 'hover:bg-muted',
+              )}
             >
-              <Hash className="h-4 w-4" />
-              All Submolts
+              <Icon className="h-4 w-4" />
+              {link.label}
             </Link>
-            <Link
-              href="/agents"
-              className="flex items-center gap-3 px-3 py-2 rounded-md text-sm hover:bg-muted transition-colors"
-            >
-              <Users className="h-4 w-4" />
-              Agents
-            </Link>
-          </div>
-        </div>
+          );
+        })}
       </nav>
     </aside>
   );
@@ -289,14 +195,14 @@ export function MobileMenu() {
               <div className="flex items-center gap-3">
                 <Avatar className="h-10 w-10">
                   <AvatarImage src={agent.avatarUrl} />
-                  <AvatarFallback>{getInitials(agent.name)}</AvatarFallback>
+                  <AvatarFallback>{getInitials(agent.handle)}</AvatarFallback>
                 </Avatar>
                 <div>
                   <p className="font-medium">
-                    {agent.displayName || agent.name}
+                    {agent.displayName || agent.handle}
                   </p>
                   <p className="text-xs text-muted-foreground">
-                    {agent.karma} karma
+                    @{agent.handle}
                   </p>
                 </div>
               </div>
@@ -315,11 +221,11 @@ export function MobileMenu() {
               <Home className="h-4 w-4" /> Home
             </Link>
             <Link
-              href="/search"
+              href="/agents"
               onClick={toggleMobileMenu}
               className="flex items-center gap-3 px-3 py-2 rounded-md hover:bg-muted"
             >
-              <Search className="h-4 w-4" /> Search
+              <Users className="h-4 w-4" /> Agents
             </Link>
           </div>
         </nav>
@@ -335,34 +241,22 @@ export function Footer() {
       <div className="container-main">
         <div className="flex flex-col md:flex-row justify-between items-center gap-4">
           <div className="flex items-center gap-2">
-            <div className="h-6 w-6 rounded bg-gradient-to-br from-primary to-moltbook-400 flex items-center justify-center">
-              <span className="text-white text-xs font-bold">M</span>
+            <div className="h-6 w-6 rounded bg-gradient-to-br from-primary to-accent flex items-center justify-center">
+              <span className="text-white text-xs font-bold">N</span>
             </div>
             <span className="text-sm text-muted-foreground">
-              © 2025 Moltbook. The social network for AI agents.
+              © 2025 Nearly Social. The social network for AI agents.
             </span>
           </div>
           <div className="flex items-center gap-4 text-sm text-muted-foreground">
             <Link
-              href="/about"
+              href="/skill.md"
               className="hover:text-foreground transition-colors"
             >
-              About
+              Docs
             </Link>
             <Link
-              href="/terms"
-              className="hover:text-foreground transition-colors"
-            >
-              Terms
-            </Link>
-            <Link
-              href="/privacy"
-              className="hover:text-foreground transition-colors"
-            >
-              Privacy
-            </Link>
-            <Link
-              href="/api"
+              href="/openapi.json"
               className="hover:text-foreground transition-colors"
             >
               API

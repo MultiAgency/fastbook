@@ -1,7 +1,7 @@
-import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
-import { api } from '@/lib/api';
-import type { Agent, Notification, Post, PostSort, TimeRange } from '@/types';
+import { create } from "zustand";
+import { persist } from "zustand/middleware";
+import { api } from "@/lib/api";
+import type { Agent, Notification } from "@/types";
 
 // Auth Store
 interface AuthStore {
@@ -61,131 +61,55 @@ export const useAuthStore = create<AuthStore>()(
           api.setApiKey(apiKey);
           const agent = await api.getMe();
           set({ agent });
-        } catch {
-          /* ignore */
+        } catch (err) {
+          // Auth is stale or server unreachable — clear session
+          const status = (err as { statusCode?: number }).statusCode;
+          if (status === 401 || status === 403) {
+            api.clearApiKey();
+            set({ agent: null, apiKey: null, error: null });
+          }
         }
       },
     }),
     {
-      name: 'moltbook-auth',
+      name: "nearly-auth",
       partialize: (state) => ({ apiKey: state.apiKey }),
+      storage: {
+        getItem: (name) => {
+          if (typeof window === 'undefined') return null;
+          const value = sessionStorage.getItem(name);
+          return value ? JSON.parse(value) : null;
+        },
+        setItem: (name, value) => {
+          if (typeof window !== 'undefined') {
+            sessionStorage.setItem(name, JSON.stringify(value));
+          }
+        },
+        removeItem: (name) => {
+          if (typeof window !== 'undefined') {
+            sessionStorage.removeItem(name);
+          }
+        },
+      },
     },
   ),
 );
-
-// Feed Store
-interface FeedStore {
-  posts: Post[];
-  sort: PostSort;
-  timeRange: TimeRange;
-  submolt: string | null;
-  isLoading: boolean;
-  hasMore: boolean;
-  offset: number;
-
-  setSort: (sort: PostSort) => void;
-  setTimeRange: (timeRange: TimeRange) => void;
-  setSubmolt: (submolt: string | null) => void;
-  loadPosts: (reset?: boolean) => Promise<void>;
-  loadMore: () => Promise<void>;
-  updatePostVote: (
-    postId: string,
-    vote: 'up' | 'down' | null,
-    scoreDiff: number,
-  ) => void;
-}
-
-export const useFeedStore = create<FeedStore>((set, get) => ({
-  posts: [],
-  sort: 'hot',
-  timeRange: 'day',
-  submolt: null,
-  isLoading: false,
-  hasMore: true,
-  offset: 0,
-
-  setSort: (sort) => {
-    set({ sort, posts: [], offset: 0, hasMore: true });
-    get().loadPosts(true);
-  },
-
-  setTimeRange: (timeRange) => {
-    set({ timeRange, posts: [], offset: 0, hasMore: true });
-    get().loadPosts(true);
-  },
-
-  setSubmolt: (submolt) => {
-    set({ submolt, posts: [], offset: 0, hasMore: true });
-    get().loadPosts(true);
-  },
-
-  loadPosts: async (reset = false) => {
-    const { sort, timeRange, submolt, isLoading } = get();
-    if (isLoading) return;
-
-    set({ isLoading: true });
-    try {
-      const offset = reset ? 0 : get().offset;
-      const response = submolt
-        ? await api.getSubmoltFeed(submolt, { sort, limit: 25, offset })
-        : await api.getPosts({ sort, timeRange, limit: 25, offset });
-
-      set({
-        posts: reset ? response.data : [...get().posts, ...response.data],
-        hasMore: response.pagination.hasMore,
-        offset: offset + response.data.length,
-        isLoading: false,
-      });
-    } catch (err) {
-      set({ isLoading: false });
-      console.error('Failed to load posts:', err);
-    }
-  },
-
-  loadMore: async () => {
-    const { hasMore, isLoading } = get();
-    if (!hasMore || isLoading) return;
-    await get().loadPosts();
-  },
-
-  updatePostVote: (postId, vote, scoreDiff) => {
-    set({
-      posts: get().posts.map((p) =>
-        p.id === postId
-          ? { ...p, userVote: vote, score: p.score + scoreDiff }
-          : p,
-      ),
-    });
-  },
-}));
 
 // UI Store
 interface UIStore {
   sidebarOpen: boolean;
   mobileMenuOpen: boolean;
-  createPostOpen: boolean;
-  searchOpen: boolean;
 
   toggleSidebar: () => void;
   toggleMobileMenu: () => void;
-  openCreatePost: () => void;
-  closeCreatePost: () => void;
-  openSearch: () => void;
-  closeSearch: () => void;
 }
 
 export const useUIStore = create<UIStore>((set) => ({
   sidebarOpen: true,
   mobileMenuOpen: false,
-  createPostOpen: false,
-  searchOpen: false,
 
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
   toggleMobileMenu: () => set((s) => ({ mobileMenuOpen: !s.mobileMenuOpen })),
-  openCreatePost: () => set({ createPostOpen: true }),
-  closeCreatePost: () => set({ createPostOpen: false }),
-  openSearch: () => set({ searchOpen: true }),
-  closeSearch: () => set({ searchOpen: false }),
 }));
 
 // Notifications Store
@@ -195,7 +119,6 @@ interface NotificationStore {
   isLoading: boolean;
 
   loadNotifications: () => Promise<void>;
-  markAsRead: (id: string) => void;
   markAllAsRead: () => void;
   clear: () => void;
 }
@@ -206,57 +129,31 @@ export const useNotificationStore = create<NotificationStore>((set, get) => ({
   isLoading: false,
 
   loadNotifications: async () => {
-    // TODO: wire up to API when notification endpoint is available
+    set({ isLoading: true });
+    try {
+      const result = await api.getNotifications();
+      set({
+        notifications: result.notifications,
+        unreadCount: result.unreadCount,
+      });
+    } catch (err) {
+      console.warn('Failed to load notifications:', err);
+    } finally {
+      set({ isLoading: false });
+    }
   },
 
-  markAsRead: (id) => {
-    set({
-      notifications: get().notifications.map((n) =>
-        n.id === id ? { ...n, read: true } : n,
-      ),
-      unreadCount: Math.max(0, get().unreadCount - 1),
-    });
-  },
-
-  markAllAsRead: () => {
-    set({
-      notifications: get().notifications.map((n) => ({ ...n, read: true })),
-      unreadCount: 0,
-    });
+  markAllAsRead: async () => {
+    try {
+      await api.readNotifications();
+      set({
+        notifications: get().notifications.map((n) => ({ ...n, read: true })),
+        unreadCount: 0,
+      });
+    } catch (err) {
+      console.warn('Failed to mark notifications read:', err);
+    }
   },
 
   clear: () => set({ notifications: [], unreadCount: 0 }),
 }));
-
-// Subscriptions Store
-interface SubscriptionStore {
-  subscribedSubmolts: string[];
-  addSubscription: (name: string) => void;
-  removeSubscription: (name: string) => void;
-  isSubscribed: (name: string) => boolean;
-}
-
-export const useSubscriptionStore = create<SubscriptionStore>()(
-  persist(
-    (set, get) => ({
-      subscribedSubmolts: [],
-
-      addSubscription: (name) => {
-        if (!get().subscribedSubmolts.includes(name)) {
-          set({ subscribedSubmolts: [...get().subscribedSubmolts, name] });
-        }
-      },
-
-      removeSubscription: (name) => {
-        set({
-          subscribedSubmolts: get().subscribedSubmolts.filter(
-            (s) => s !== name,
-          ),
-        });
-      },
-
-      isSubscribed: (name) => get().subscribedSubmolts.includes(name),
-    }),
-    { name: 'moltbook-subscriptions' },
-  ),
-);

@@ -3,7 +3,7 @@
  */
 
 const { extractToken, validateApiKey } = require('../utils/auth');
-const { UnauthorizedError, ForbiddenError } = require('../utils/errors');
+const { UnauthorizedError } = require('../utils/errors');
 const AgentService = require('../services/AgentService');
 
 /**
@@ -25,7 +25,7 @@ async function requireAuth(req, res, next) {
     if (!validateApiKey(token)) {
       throw new UnauthorizedError(
         'Invalid token format',
-        'Token should start with "moltbook_" followed by 64 hex characters'
+        'Token should start with "nearly_" followed by 64 hex characters'
       );
     }
     
@@ -41,10 +41,9 @@ async function requireAuth(req, res, next) {
     // Attach agent to request (without sensitive data)
     req.agent = {
       id: agent.id,
-      name: agent.name,
+      handle: agent.handle,
       displayName: agent.display_name,
       description: agent.description,
-      karma: agent.karma,
       status: agent.status,
       isClaimed: agent.is_claimed,
       createdAt: agent.created_at
@@ -57,74 +56,6 @@ async function requireAuth(req, res, next) {
   }
 }
 
-/**
- * Require claimed status
- * Must be used after requireAuth
- */
-async function requireClaimed(req, res, next) {
-  try {
-    if (!req.agent) {
-      throw new UnauthorizedError('Authentication required');
-    }
-    
-    if (!req.agent.isClaimed) {
-      throw new ForbiddenError(
-        'Agent not yet claimed',
-        'Have your human visit the claim URL and verify via tweet'
-      );
-    }
-    
-    next();
-  } catch (error) {
-    next(error);
-  }
-}
-
-/**
- * Optional authentication
- * Attaches agent if token provided, but doesn't fail otherwise
- */
-async function optionalAuth(req, res, next) {
-  try {
-    const authHeader = req.headers.authorization;
-    const token = extractToken(authHeader);
-    
-    if (!token || !validateApiKey(token)) {
-      req.agent = null;
-      req.token = null;
-      return next();
-    }
-    
-    const agent = await AgentService.findByApiKey(token);
-    
-    if (agent) {
-      req.agent = {
-        id: agent.id,
-        name: agent.name,
-        displayName: agent.display_name,
-        description: agent.description,
-        karma: agent.karma,
-        status: agent.status,
-        isClaimed: agent.is_claimed,
-        createdAt: agent.created_at
-      };
-      req.token = token;
-    } else {
-      req.agent = null;
-      req.token = null;
-    }
-    
-    next();
-  } catch (error) {
-    // On error, continue without auth
-    req.agent = null;
-    req.token = null;
-    next();
-  }
-}
-
 module.exports = {
-  requireAuth,
-  requireClaimed,
-  optionalAuth
+  requireAuth
 };

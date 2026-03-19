@@ -4,53 +4,71 @@
 
 const { z } = require('zod');
 
+// Strip HTML tags to prevent stored XSS
+const stripHtml = (str) => str.replace(/<[^>]*>/g, '');
+
+const tagSchema = z.string()
+  .max(30, 'Tag must be at most 30 characters')
+  .regex(/^[a-z0-9-]+$/, 'Tags must be lowercase alphanumeric with hyphens');
+
 const registerAgentSchema = z.object({
-  name: z
-    .string({ required_error: 'Name is required' })
-    .min(2, 'Name must be at least 2 characters')
-    .max(32, 'Name must be at most 32 characters')
-    .regex(/^[a-z0-9_]+$/i, 'Name can only contain letters, numbers, and underscores'),
-  description: z.string().max(500).optional().default(''),
+  handle: z
+    .string({ required_error: 'Handle is required' })
+    .min(2, 'Handle must be at least 2 characters')
+    .max(32, 'Handle must be at most 32 characters')
+    .regex(/^[a-z0-9_]+$/i, 'Handle can only contain letters, numbers, and underscores'),
+  description: z.string().max(500).transform(stripHtml).optional().default(''),
+  tags: z.array(tagSchema).max(10).optional().default([]),
+  capabilities: z.object({
+    skills: z.array(z.string().max(50)).max(20).optional(),
+    languages: z.array(z.string().max(30)).max(10).optional(),
+  }).passthrough().optional().default({}),
   verifiable_claim: z.object({
     near_account_id: z.string(),
     public_key: z.string(),
     signature: z.string(),
     nonce: z.string(),
     message: z.string(),
-  }).optional(),
+  }),
 });
 
-const createPostSchema = z.object({
-  submolt: z.string({ required_error: 'Submolt is required' }).min(1),
-  title: z
-    .string({ required_error: 'Title is required' })
-    .min(1, 'Title is required')
-    .max(300, 'Title must be at most 300 characters'),
-  content: z.string().max(40000).optional(),
-  url: z.string().url('Invalid URL').optional(),
+const updateAgentSchema = z.object({
+  description: z.string().max(500).transform(stripHtml).optional(),
+  displayName: z.string().max(64).transform(stripHtml).optional(),
+  avatarUrl: z.string().url().refine(
+    (url) => url.startsWith('https://'),
+    { message: 'Avatar URL must use HTTPS' }
+  ).optional(),
+  tags: z.array(tagSchema).max(10).optional(),
+  capabilities: z.object({
+    skills: z.array(z.string().max(50)).max(20).optional(),
+    languages: z.array(z.string().max(30)).max(10).optional(),
+  }).passthrough().optional(),
 });
 
-const createSubmoltSchema = z.object({
-  name: z
-    .string({ required_error: 'Name is required' })
-    .min(2, 'Name must be at least 2 characters')
-    .max(24, 'Name must be at most 24 characters')
-    .regex(/^[a-z0-9_]+$/i, 'Name can only contain letters, numbers, and underscores'),
-  display_name: z.string().max(50).optional(),
-  description: z.string().max(500).optional(),
-});
+const followSchema = z.object({
+  reason: z.string().max(200).transform(stripHtml).optional(),
+}).optional().default({});
 
-const createCommentSchema = z.object({
-  content: z
-    .string({ required_error: 'Content is required' })
-    .min(1, 'Content is required')
-    .max(10000, 'Content must be at most 10000 characters'),
-  parent_id: z.string().uuid().optional(),
-});
+const unfollowSchema = z.object({
+  reason: z.string().max(200).transform(stripHtml).optional(),
+}).optional().default({});
+
+const edgesQuerySchema = z.object({
+  direction: z.enum(['incoming', 'outgoing', 'both']).optional().default('both'),
+  include_history: z.preprocess(v => v === 'true' || v === true, z.boolean()).optional().default(false),
+  limit: z.coerce.number().int().min(1).max(100).optional().default(25),
+  offset: z.coerce.number().int().min(0).optional().default(0),
+  cursor: z.coerce.number().int().min(0).optional(),
+}).transform(data => ({
+  ...data,
+  offset: data.cursor ?? data.offset,
+}));
 
 module.exports = {
   registerAgentSchema,
-  createPostSchema,
-  createSubmoltSchema,
-  createCommentSchema,
+  updateAgentSchema,
+  followSchema,
+  unfollowSchema,
+  edgesQuerySchema,
 };

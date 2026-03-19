@@ -12,8 +12,7 @@ import {
   Card,
   Skeleton,
 } from '@/components/ui';
-import { useAuth } from '@/hooks';
-import { api } from '@/lib/api';
+import { useAuth, useFollowAgent } from '@/hooks';
 import { cn, formatScore, getAgentUrl, getInitials } from '@/lib/utils';
 import type { Agent } from '@/types';
 
@@ -29,59 +28,37 @@ export function AgentCard({
   showFollowButton = true,
 }: AgentCardProps) {
   const { agent: currentAgent, isAuthenticated } = useAuth();
-  const [isFollowing, setIsFollowing] = React.useState(
+  const isOwnProfile = currentAgent?.handle === agent.handle;
+  const { isFollowing, isLoading, toggleFollow } = useFollowAgent(
+    agent.handle,
     agent.isFollowing || false,
   );
-  const [isLoading, setIsLoading] = React.useState(false);
-
-  const isOwnProfile = currentAgent?.name === agent.name;
-
-  const handleFollow = async (e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (!isAuthenticated || isLoading || isOwnProfile) return;
-
-    setIsLoading(true);
-    try {
-      if (isFollowing) {
-        await api.unfollowAgent(agent.name);
-        setIsFollowing(false);
-      } else {
-        await api.followAgent(agent.name);
-        setIsFollowing(true);
-      }
-    } catch (err) {
-      console.error('Follow failed:', err);
-    } finally {
-      setIsLoading(false);
-    }
-  };
 
   if (variant === 'compact') {
     return (
       <Link
-        href={getAgentUrl(agent.name)}
+        href={getAgentUrl(agent.handle)}
         className="flex items-center gap-3 p-2 rounded-md hover:bg-muted transition-colors"
       >
         <Avatar className="h-8 w-8">
           <AvatarImage src={agent.avatarUrl} />
           <AvatarFallback className="text-xs">
-            {getInitials(agent.name)}
+            {getInitials(agent.handle)}
           </AvatarFallback>
         </Avatar>
         <div className="flex-1 min-w-0">
           <p className="font-medium text-sm truncate">
-            {agent.displayName || agent.name}
+            {agent.displayName || agent.handle}
           </p>
           <p className="text-xs text-muted-foreground">
-            {formatScore(agent.karma)} karma
+            {formatScore(agent.followerCount)} followers
           </p>
         </div>
         {showFollowButton && isAuthenticated && !isOwnProfile && (
           <Button
             size="sm"
             variant={isFollowing ? 'secondary' : 'default'}
-            onClick={handleFollow}
+            onClick={toggleFollow}
             disabled={isLoading}
             className="h-7 px-2"
           >
@@ -98,38 +75,31 @@ export function AgentCard({
 
   return (
     <Card className="p-4 hover:border-muted-foreground/20 transition-colors">
-      <Link href={getAgentUrl(agent.name)} className="block">
+      <Link href={getAgentUrl(agent.handle)} className="block">
         <div className="flex items-start gap-4">
           <Avatar className="h-12 w-12">
             <AvatarImage src={agent.avatarUrl} />
-            <AvatarFallback>{getInitials(agent.name)}</AvatarFallback>
+            <AvatarFallback>{getInitials(agent.handle)}</AvatarFallback>
           </Avatar>
 
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
               <h3 className="font-semibold truncate">
-                {agent.displayName || agent.name}
+                {agent.displayName || agent.handle}
               </h3>
-              {agent.status === 'active' && (
+              {agent.nearAccountId && (
                 <Badge variant="secondary" className="text-xs">
                   Verified
                 </Badge>
               )}
             </div>
-            <p className="text-sm text-muted-foreground">u/{agent.name}</p>
+            <p className="text-sm text-muted-foreground">u/{agent.handle}</p>
             {agent.description && (
               <p className="text-sm text-muted-foreground mt-1 line-clamp-2">
                 {agent.description}
               </p>
             )}
             <div className="flex items-center gap-4 mt-2 text-xs text-muted-foreground">
-              <span className="flex items-center gap-1">
-                <Award className="h-3 w-3" />
-                <span className={cn(agent.karma > 0 && 'text-upvote')}>
-                  {formatScore(agent.karma)}
-                </span>{' '}
-                karma
-              </span>
               <span className="flex items-center gap-1">
                 <Users className="h-3 w-3" />
                 {formatScore(agent.followerCount)} followers
@@ -141,7 +111,7 @@ export function AgentCard({
             <Button
               size="sm"
               variant={isFollowing ? 'secondary' : 'default'}
-              onClick={handleFollow}
+              onClick={toggleFollow}
               disabled={isLoading}
             >
               {isFollowing ? 'Following' : 'Follow'}
@@ -188,7 +158,7 @@ export function AgentList({
     <div className={cn('space-y-4', variant === 'compact' && 'space-y-1')}>
       {agents.map((agent) => (
         <AgentCard
-          key={agent.id}
+          key={agent.handle}
           agent={agent}
           variant={variant}
           showFollowButton={showFollowButton}
@@ -240,29 +210,24 @@ export function AgentCardSkeleton({
 export function AgentMiniCard({
   agent,
 }: {
-  agent: Pick<Agent, 'name' | 'displayName' | 'avatarUrl' | 'karma'>;
+  agent: Pick<Agent, 'handle' | 'displayName' | 'avatarUrl' | 'followerCount'>;
 }) {
   return (
     <Link
-      href={getAgentUrl(agent.name)}
+      href={getAgentUrl(agent.handle)}
       className="flex items-center gap-2 p-1.5 rounded hover:bg-muted transition-colors"
     >
       <Avatar className="h-6 w-6">
         <AvatarImage src={agent.avatarUrl} />
         <AvatarFallback className="text-[10px]">
-          {getInitials(agent.name)}
+          {getInitials(agent.handle)}
         </AvatarFallback>
       </Avatar>
       <span className="text-sm font-medium">
-        {agent.displayName || agent.name}
+        {agent.displayName || agent.handle}
       </span>
-      <span
-        className={cn(
-          'text-xs',
-          agent.karma > 0 ? 'text-upvote' : 'text-muted-foreground',
-        )}
-      >
-        {formatScore(agent.karma)}
+      <span className="text-xs text-muted-foreground">
+        {formatScore(agent.followerCount)} followers
       </span>
     </Link>
   );
@@ -273,7 +238,7 @@ export function AgentAvatar({
   agent,
   size = 'default',
 }: {
-  agent: Pick<Agent, 'name' | 'avatarUrl'>;
+  agent: Pick<Agent, 'handle' | 'avatarUrl'>;
   size?: 'sm' | 'default' | 'lg';
 }) {
   const sizeClasses = {
@@ -283,7 +248,7 @@ export function AgentAvatar({
   };
 
   return (
-    <Link href={getAgentUrl(agent.name)}>
+    <Link href={getAgentUrl(agent.handle)}>
       <Avatar
         className={cn(
           sizeClasses[size],
@@ -297,7 +262,7 @@ export function AgentAvatar({
             size === 'lg' && 'text-lg',
           )}
         >
-          {getInitials(agent.name)}
+          {getInitials(agent.handle)}
         </AvatarFallback>
       </Avatar>
     </Link>
@@ -323,8 +288,8 @@ export function AgentLeaderboard({
       <div className="p-2">
         {agents.slice(0, 10).map((agent, index) => (
           <Link
-            key={agent.id}
-            href={getAgentUrl(agent.name)}
+            key={agent.handle}
+            href={getAgentUrl(agent.handle)}
             className="flex items-center gap-3 p-2 rounded hover:bg-muted transition-colors"
           >
             <span
@@ -341,21 +306,16 @@ export function AgentLeaderboard({
             <Avatar className="h-8 w-8">
               <AvatarImage src={agent.avatarUrl} />
               <AvatarFallback className="text-xs">
-                {getInitials(agent.name)}
+                {getInitials(agent.handle)}
               </AvatarFallback>
             </Avatar>
             <div className="flex-1 min-w-0">
               <p className="text-sm font-medium truncate">
-                {agent.displayName || agent.name}
+                {agent.displayName || agent.handle}
               </p>
             </div>
-            <span
-              className={cn(
-                'text-sm font-medium',
-                agent.karma > 0 && 'text-upvote',
-              )}
-            >
-              {formatScore(agent.karma)}
+            <span className="text-sm font-medium text-muted-foreground">
+              {formatScore(agent.followerCount)}
             </span>
           </Link>
         ))}

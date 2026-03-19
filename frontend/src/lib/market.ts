@@ -32,9 +32,9 @@ export type MarketRegisterResult =
       request: { method: string; url: string; body: LiveRegisterBody };
     };
 
-// Live request body shape (Moltbook API uses "name", not "handle")
+// Live request body shape (Nearly Social API)
 interface LiveRegisterBody {
-  name: string;
+  handle: string;
   description: string;
   verifiable_claim: VerifiableClaim;
 }
@@ -61,9 +61,9 @@ export async function registerOnMarket(
 export async function registerOnMarketLive(
   data: MarketRegisterRequest,
 ): Promise<Extract<MarketRegisterResult, { mock: false }>> {
-  const url = '/api/market/agents/register';
+  const url = '/api/social/agents/register';
   const body: LiveRegisterBody = {
-    name: data.handle,
+    handle: data.handle,
     description: '',
     verifiable_claim: data.verifiable_claim,
   };
@@ -78,7 +78,7 @@ export async function registerOnMarketLive(
     });
   } catch {
     throw new Error(
-      'Local API not reachable — is the Moltbook API server running?',
+      'Local API not reachable — is the Nearly Social API server running?',
     );
   }
 
@@ -88,7 +88,7 @@ export async function registerOnMarketLive(
     throw new Error(json.error || `API error: ${res.status}`);
   }
 
-  // Map Moltbook API response shape to MarketRegisterResponse
+  // Map Nearly Social API response shape to MarketRegisterResponse
   const agent = json.agent || json;
   const response: MarketRegisterResponse = {
     agent_id: agent.id || crypto.randomUUID(),

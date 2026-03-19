@@ -9,17 +9,33 @@
 
 const crypto = require('crypto');
 const nacl = require('tweetnacl');
-const { queryOne } = require('../config/database');
+const { queryOne, query } = require('../config/database');
 const { BadRequestError, ConflictError, ApiError } = require('../utils/errors');
 const { NEAR_DOMAIN } = require('../utils/constants');
 
 const NEAR_RPC_URL = process.env.NEAR_RPC_URL || 'https://free.rpc.fastnear.com';
 const TIMESTAMP_WINDOW_MS = parseInt(process.env.TIMESTAMP_WINDOW_MS, 10) || 5 * 60 * 1000;
+const NEAR_RPC_REQUIRED = process.env.NEAR_RPC_REQUIRED === 'true';
 const NEP413_TAG = 2147484061; // 2^31 + 413
 
-// Nonce replay protection — track used nonces within the timestamp window
-const usedNonces = new Set();
-setInterval(() => usedNonces.clear(), TIMESTAMP_WINDOW_MS);
+// Cleanup window = 2x timestamp window (default 10 minutes)
+const NONCE_CLEANUP_MINUTES = Math.ceil((TIMESTAMP_WINDOW_MS * 2) / 60000);
+
+// Clean up expired nonces periodically (started explicitly to avoid side effects in tests)
+let nonceCleanupInterval = null;
+
+function startNonceCleanup() {
+  if (nonceCleanupInterval) return;
+  nonceCleanupInterval = setInterval(async () => {
+    try {
+      await query(
+        `DELETE FROM used_nonces WHERE used_at < NOW() - INTERVAL '${NONCE_CLEANUP_MINUTES} minutes'`
+      );
+    } catch (err) {
+      console.warn('Nonce cleanup failed:', err.message);
+    }
+  }, TIMESTAMP_WINDOW_MS);
+}
 
 class NearVerificationService {
   /**
@@ -45,8 +61,8 @@ class NearVerificationService {
       }
     }
 
-    // Step 1: Verify message format and timestamp
-    const parsedMessage = this.verifyMessageFormat(claim.message);
+    // Step 1: Verify message format, account binding, and timestamp
+    const parsedMessage = this.verifyMessageFormat(claim.message, claim.near_account_id);
     this.verifyTimestamp(parsedMessage.timestamp);
 
     // Step 1b: Validate nonce format before replay check
@@ -55,11 +71,18 @@ class NearVerificationService {
       throw new BadRequestError('Nonce must be 32 bytes', 'INVALID_MESSAGE_FORMAT');
     }
 
-    // Step 1c: Nonce replay protection
-    if (usedNonces.has(claim.nonce)) {
+    // Step 1c: Nonce replay protection (persistent — survives restarts)
+    const existingNonce = await queryOne(
+      'SELECT 1 FROM used_nonces WHERE nonce = $1',
+      [claim.nonce]
+    );
+    if (existingNonce) {
       throw new BadRequestError('Nonce already used', 'NONCE_REPLAY');
     }
-    usedNonces.add(claim.nonce);
+    await query(
+      'INSERT INTO used_nonces (nonce) VALUES ($1) ON CONFLICT DO NOTHING',
+      [claim.nonce]
+    );
 
     // Step 2-3: Verify NEP-413 signature
     this.verifyNep413Signature(claim);
@@ -74,7 +97,7 @@ class NearVerificationService {
   /**
    * Parse and validate the message JSON structure.
    */
-  static verifyMessageFormat(message) {
+  static verifyMessageFormat(message, nearAccountId) {
     let parsed;
     try {
       parsed = JSON.parse(message);
@@ -98,6 +121,9 @@ class NearVerificationService {
     if (typeof parsed.timestamp !== 'number') {
       throw new BadRequestError('Message timestamp must be a number', 'INVALID_MESSAGE_FORMAT');
     }
+    if (nearAccountId && parsed.account_id !== nearAccountId) {
+      throw new BadRequestError('Message account_id must match near_account_id', 'INVALID_MESSAGE_FORMAT');
+    }
 
     return parsed;
   }
@@ -111,7 +137,7 @@ class NearVerificationService {
       throw new BadRequestError(
         'Timestamp expired',
         'TIMESTAMP_EXPIRED',
-        'Message must be signed within the last 30 minutes'
+        `Message must be signed within the last ${TIMESTAMP_WINDOW_MS / 60000} minutes`
       );
     }
     if (age < -60000) {
@@ -205,10 +231,11 @@ class NearVerificationService {
     try {
       response = await fetch(NEAR_RPC_URL, {
         method: 'POST',
+        signal: AbortSignal.timeout(10000),
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           jsonrpc: '2.0',
-          id: 'fastbook',
+          id: 'nearly',
           method: 'query',
           params: {
             request_type: 'view_access_key',
@@ -219,12 +246,21 @@ class NearVerificationService {
         }),
       });
     } catch (err) {
+      if (NEAR_RPC_REQUIRED) {
+        throw new ApiError('NEAR RPC unavailable — cannot verify key on-chain', 503);
+      }
       // RPC unreachable — signature verification already passed, so allow it
       console.warn('NEAR RPC unavailable, skipping on-chain key check');
       return;
     }
 
-    const data = await response.json();
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      console.warn('NEAR RPC returned non-JSON response');
+      return;
+    }
 
     if (data.error) {
       const msg = data.error.cause?.name || data.error.message || 'Unknown RPC error';
@@ -234,7 +270,10 @@ class NearVerificationService {
         console.warn(`On-chain key check: ${msg} for ${nearAccountId} — allowing (custodial wallet)`);
         return;
       }
-      // Unexpected RPC error — log but don't block
+      // Unexpected RPC error
+      if (NEAR_RPC_REQUIRED) {
+        throw new ApiError(`NEAR RPC error: ${msg}`, 503);
+      }
       console.warn('NEAR RPC error:', msg);
       return;
     }
@@ -247,7 +286,7 @@ class NearVerificationService {
    */
   static async checkUniqueness(nearAccountId) {
     const existing = await queryOne(
-      'SELECT id, name FROM agents WHERE near_account_id = $1',
+      'SELECT id, handle FROM agents WHERE near_account_id = $1',
       [nearAccountId]
     );
 
@@ -288,6 +327,14 @@ class NearVerificationService {
     }
     const encoded = keyStr.slice(prefix.length);
     return this.base58Decode(encoded);
+  }
+
+  /**
+   * Start the periodic nonce cleanup interval.
+   * Call once at server startup — not on import, to avoid side effects in tests.
+   */
+  static startNonceCleanup() {
+    startNonceCleanup();
   }
 
   /**

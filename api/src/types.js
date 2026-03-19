@@ -1,6 +1,9 @@
 /**
  * Shared JSDoc type definitions for the API.
  *
+ * IMPORTANT: Keep in sync with frontend/src/types/index.ts
+ * Changes to these types must be reflected in both files.
+ *
  * These types are referenced via @typedef imports across service and route files
  * to give editors (and `tsc --checkJs`) enough information for auto-complete and
  * basic type-checking without migrating to TypeScript.
@@ -9,11 +12,10 @@
 /**
  * @typedef {Object} AgentRow
  * @property {string} id
- * @property {string} name
+ * @property {string} handle
  * @property {string} display_name
  * @property {string} [description]
  * @property {string} [avatar_url]
- * @property {number} karma
  * @property {string} status
  * @property {boolean} is_claimed
  * @property {string} [near_account_id]
@@ -22,59 +24,6 @@
  * @property {string} created_at
  * @property {string} [updated_at]
  * @property {string} [last_active]
- */
-
-/**
- * @typedef {Object} PostRow
- * @property {string} id
- * @property {string} title
- * @property {string} [content]
- * @property {string} [url]
- * @property {string} submolt
- * @property {'text'|'link'} post_type
- * @property {number} score
- * @property {number} comment_count
- * @property {string} author_id
- * @property {string} [author_name]
- * @property {string} [author_display_name]
- * @property {string} created_at
- */
-
-/**
- * @typedef {Object} CommentRow
- * @property {string} id
- * @property {string} post_id
- * @property {string} author_id
- * @property {string} content
- * @property {number} score
- * @property {number} upvotes
- * @property {number} downvotes
- * @property {string|null} parent_id
- * @property {number} depth
- * @property {string} [author_name]
- * @property {string} [author_display_name]
- * @property {string} created_at
- * @property {CommentRow[]} [replies]
- */
-
-/**
- * @typedef {Object} SubmoltRow
- * @property {string} id
- * @property {string} name
- * @property {string} display_name
- * @property {string} [description]
- * @property {number} subscriber_count
- * @property {string} [creator_id]
- * @property {string} created_at
- */
-
-/**
- * @typedef {Object} VoteRow
- * @property {string} id
- * @property {string} agent_id
- * @property {string} target_id
- * @property {'post'|'comment'} target_type
- * @property {1|-1} value
  */
 
 /**
@@ -95,15 +44,33 @@
 
 /**
  * @typedef {Object} RegisterData
- * @property {string} name
+ * @property {string} handle
  * @property {string} [description]
  * @property {string} [nearAccountId]
  */
 
 /**
+ * @typedef {Object} OnboardingStep
+ * @property {string} action
+ * @property {string} [method]
+ * @property {string} [path]
+ * @property {string} [url]
+ * @property {string} hint
+ */
+
+/**
+ * @typedef {Object} OnboardingContext
+ * @property {string} welcome
+ * @property {number} profileCompleteness
+ * @property {OnboardingStep[]} steps
+ * @property {Array<{ handle: string, displayName: string, description: string, followerCount: number, followUrl: string }>} suggested
+ */
+
+/**
  * @typedef {Object} RegisterResult
- * @property {{ id: string, api_key: string, claim_url: string, verification_code: string, near_account_id?: string }} agent
+ * @property {{ id: string, api_key: string, near_account_id?: string }} agent
  * @property {string} important
+ * @property {OnboardingContext} onboarding
  */
 
 // Export nothing — this file exists only for JSDoc type definitions

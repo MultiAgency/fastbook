@@ -1,22 +1,31 @@
-// Moltbook API Client
+// Nearly Social API Client
+//
+// Two backends:
+//   Express (default) — API keys, offset pagination, PostgreSQL
+//   OutLayer WASM     — NEP-413 auth, cursor pagination, KV storage
+//
+// Set NEXT_PUBLIC_USE_OUTLAYER=true to use the WASM backend.
+// The two are NOT drop-in replacements — response shapes differ:
+//   - WASM returns numeric timestamps (unix seconds), Express returns ISO strings
+//   - WASM has no `id` field (uses `handle` as primary key)
+//   - WASM returns `trustScore` and `unfollowCount`, Express doesn't
+//   - WASM register returns no `api_key` (uses NEAR account identity)
+//   - WASM suggestions include a VRF proof, Express doesn't
 
 import type {
   Agent,
-  Comment,
-  CommentSort,
-  CreateCommentForm,
-  CreatePostForm,
-  PaginatedResponse,
-  Post,
-  PostSort,
+  Nep413Auth,
+  Notification,
   RegisterAgentForm,
-  SearchResults,
-  Submolt,
-  TimeRange,
+  RegistrationResponse,
+  SuggestionReason,
 } from '@/types';
+import { executeWasm, OutlayerExecError } from './outlayer-exec';
 
 const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL || 'https://www.moltbook.com/api/v1';
+  process.env.NEXT_PUBLIC_API_URL || 'https://nearly.social/api/v1';
+
+const USE_OUTLAYER = process.env.NEXT_PUBLIC_USE_OUTLAYER === 'true';
 
 class ApiError extends Error {
   constructor(
@@ -32,30 +41,35 @@ class ApiError extends Error {
 
 class ApiClient {
   private apiKey: string | null = null;
+  private paymentKey: string | null = null;
+  private auth: Nep413Auth | null = null;
 
   setApiKey(key: string | null) {
     this.apiKey = key;
-    if (key && typeof window !== 'undefined') {
-      localStorage.setItem('moltbook_api_key', key);
-    }
   }
 
   getApiKey(): string | null {
-    if (this.apiKey) return this.apiKey;
-    if (typeof window !== 'undefined') {
-      this.apiKey = localStorage.getItem('moltbook_api_key');
-    }
     return this.apiKey;
   }
 
   clearApiKey() {
     this.apiKey = null;
-    if (typeof window !== 'undefined') {
-      localStorage.removeItem('moltbook_api_key');
-    }
+    this.auth = null;
   }
 
-  private async request<T>(
+  /** Set the OutLayer Payment Key for WASM execution */
+  setPaymentKey(key: string | null) {
+    this.paymentKey = key;
+  }
+
+  /** Set NEP-413 auth credentials (from registration or sign-in flow) */
+  setAuth(auth: Nep413Auth | null) {
+    this.auth = auth;
+  }
+
+  // ─── REST transport (Express backend) ──────────────────────────────
+
+  private async requestRest<T>(
     method: string,
     path: string,
     body?: unknown,
@@ -95,214 +109,155 @@ class ApiClient {
     return response.json();
   }
 
-  // Agent endpoints
+  // ─── WASM transport (OutLayer) ─────────────────────────────────────
+
+  private async requestWasm<T>(
+    action: string,
+    args: Record<string, unknown> = {},
+    requiresAuth = true,
+  ): Promise<T> {
+    if (!this.paymentKey) {
+      throw new ApiError(401, 'Payment key not set');
+    }
+
+    try {
+      const auth = requiresAuth ? this.auth ?? undefined : undefined;
+      const result = await executeWasm<T>(this.paymentKey, action, args, auth);
+      return result.data as T;
+    } catch (err) {
+      if (err instanceof OutlayerExecError) {
+        throw new ApiError(400, err.message, err.code);
+      }
+      throw err;
+    }
+  }
+
+  // ─── Public API methods ────────────────────────────────────────────
+  // These work with both Express and OutLayer backends.
+
   async register(data: RegisterAgentForm) {
-    return this.request<{
-      agent: { api_key: string; claim_url: string; verification_code: string };
-      important: string;
-    }>('POST', '/agents/register', data);
+    if (USE_OUTLAYER) {
+      return this.requestWasm<RegistrationResponse>('register', {
+        handle: data.handle,
+        description: data.description,
+      });
+    }
+    return this.requestRest<RegistrationResponse>('POST', '/agents/register', data);
+  }
+
+  async getSuggestedFollows(limit = 10) {
+    if (USE_OUTLAYER) {
+      const result = await this.requestWasm<{
+        agents: (Agent & { reason?: SuggestionReason })[];
+        vrf: { output: string; proof: string; alpha: string } | null;
+      }>('get_suggested', { limit });
+      return result.agents;
+    }
+    return this.requestRest<{
+      data: (Agent & { reason?: SuggestionReason })[];
+    }>('GET', '/agents/suggested', undefined, { limit }).then(r => r.data);
   }
 
   async getMe() {
-    return this.request<{ agent: Agent }>('GET', '/agents/me').then(
+    if (USE_OUTLAYER) {
+      const result = await this.requestWasm<{ agent: Agent }>('get_me');
+      return result.agent;
+    }
+    return this.requestRest<{ agent: Agent }>('GET', '/agents/me').then(
       (r) => r.agent,
     );
   }
 
-  async updateMe(data: { displayName?: string; description?: string }) {
-    return this.request<{ agent: Agent }>('PATCH', '/agents/me', data).then(
+  async updateMe(data: { displayName?: string; description?: string; tags?: string[]; capabilities?: Record<string, unknown> }) {
+    if (USE_OUTLAYER) {
+      const result = await this.requestWasm<{ agent: Agent }>('update_me', {
+        display_name: data.displayName,
+        description: data.description,
+        tags: data.tags,
+        capabilities: data.capabilities,
+      });
+      return result.agent;
+    }
+    return this.requestRest<{ agent: Agent }>('PATCH', '/agents/me', data).then(
       (r) => r.agent,
     );
   }
 
-  async getAgent(name: string) {
-    return this.request<{
+  async getAgent(handle: string) {
+    if (USE_OUTLAYER) {
+      return this.requestWasm<{ agent: Agent; isFollowing: boolean }>(
+        'get_profile',
+        { handle },
+      );
+    }
+    return this.requestRest<{
       agent: Agent;
       isFollowing: boolean;
-      recentPosts: Post[];
-    }>('GET', '/agents/profile', undefined, { name });
+    }>('GET', '/agents/profile', undefined, { handle });
   }
 
-  async followAgent(name: string) {
-    return this.request<{ success: boolean }>('POST', `/agents/${name}/follow`);
+  async followAgent(handle: string, reason?: string) {
+    if (USE_OUTLAYER) {
+      return this.requestWasm<{ success: boolean }>('follow', { handle, reason });
+    }
+    return this.requestRest<{ success: boolean }>('POST', `/agents/${handle}/follow`, reason ? { reason } : undefined);
   }
 
-  async unfollowAgent(name: string) {
-    return this.request<{ success: boolean }>(
+  async unfollowAgent(handle: string, reason?: string) {
+    if (USE_OUTLAYER) {
+      return this.requestWasm<{ success: boolean }>('unfollow', { handle, reason });
+    }
+    return this.requestRest<{ success: boolean }>(
       'DELETE',
-      `/agents/${name}/follow`,
+      `/agents/${handle}/follow`,
+      reason ? { reason } : undefined,
     );
   }
 
-  // Post endpoints
-  async getPosts(
-    options: {
-      sort?: PostSort;
-      timeRange?: TimeRange;
-      limit?: number;
-      offset?: number;
-      submolt?: string;
-    } = {},
-  ) {
-    return this.request<PaginatedResponse<Post>>('GET', '/posts', undefined, {
-      sort: options.sort || 'hot',
-      t: options.timeRange,
-      limit: options.limit || 25,
-      offset: options.offset || 0,
-      submolt: options.submolt,
-    });
+  async getNotifications(since?: string, limit = 50) {
+    if (USE_OUTLAYER) {
+      return this.requestWasm<{ notifications: Notification[]; unreadCount: number }>('get_notifications', { since, limit });
+    }
+    const params: Record<string, string> = { limit: String(limit) };
+    if (since) params.since = since;
+    return this.requestRest<{ notifications: Notification[]; unreadCount: number }>('GET', '/agents/me/notifications', undefined, params);
   }
 
-  async getPost(id: string) {
-    return this.request<{ post: Post }>('GET', `/posts/${id}`).then(
-      (r) => r.post,
-    );
+  async readNotifications() {
+    if (USE_OUTLAYER) {
+      return this.requestWasm<{ readAt: number }>('read_notifications', {});
+    }
+    return this.requestRest<{ readAt: string }>('POST', '/agents/me/notifications/read');
   }
 
-  async createPost(data: CreatePostForm) {
-    return this.request<{ post: Post }>('POST', '/posts', data).then(
-      (r) => r.post,
-    );
-  }
-
-  async deletePost(id: string) {
-    return this.request<{ success: boolean }>('DELETE', `/posts/${id}`);
-  }
-
-  async upvotePost(id: string) {
-    return this.request<{ success: boolean; action: string }>(
-      'POST',
-      `/posts/${id}/upvote`,
-    );
-  }
-
-  async downvotePost(id: string) {
-    return this.request<{ success: boolean; action: string }>(
-      'POST',
-      `/posts/${id}/downvote`,
-    );
-  }
-
-  // Comment endpoints
-  async getComments(
-    postId: string,
-    options: { sort?: CommentSort; limit?: number } = {},
-  ) {
-    return this.request<{ comments: Comment[] }>(
-      'GET',
-      `/posts/${postId}/comments`,
-      undefined,
-      {
-        sort: options.sort || 'top',
-        limit: options.limit || 100,
-      },
-    ).then((r) => r.comments);
-  }
-
-  async createComment(postId: string, data: CreateCommentForm) {
-    return this.request<{ comment: Comment }>(
-      'POST',
-      `/posts/${postId}/comments`,
-      data,
-    ).then((r) => r.comment);
-  }
-
-  async deleteComment(id: string) {
-    return this.request<{ success: boolean }>('DELETE', `/comments/${id}`);
-  }
-
-  async upvoteComment(id: string) {
-    return this.request<{ success: boolean; action: string }>(
-      'POST',
-      `/comments/${id}/upvote`,
-    );
-  }
-
-  async downvoteComment(id: string) {
-    return this.request<{ success: boolean; action: string }>(
-      'POST',
-      `/comments/${id}/downvote`,
-    );
-  }
-
-  // Submolt endpoints
-  async getSubmolts(
-    options: { sort?: string; limit?: number; offset?: number } = {},
-  ) {
-    return this.request<PaginatedResponse<Submolt>>(
-      'GET',
-      '/submolts',
-      undefined,
-      {
-        sort: options.sort || 'popular',
-        limit: options.limit || 50,
-        offset: options.offset || 0,
-      },
-    );
-  }
-
-  async getSubmolt(name: string) {
-    return this.request<{ submolt: Submolt }>('GET', `/submolts/${name}`).then(
-      (r) => r.submolt,
-    );
-  }
-
-  async createSubmolt(data: {
-    name: string;
-    displayName?: string;
-    description?: string;
-  }) {
-    return this.request<{ submolt: Submolt }>('POST', '/submolts', data).then(
-      (r) => r.submolt,
-    );
-  }
-
-  async subscribeSubmolt(name: string) {
-    return this.request<{ success: boolean }>(
-      'POST',
-      `/submolts/${name}/subscribe`,
-    );
-  }
-
-  async unsubscribeSubmolt(name: string) {
-    return this.request<{ success: boolean }>(
-      'DELETE',
-      `/submolts/${name}/subscribe`,
-    );
-  }
-
-  async getSubmoltFeed(
-    name: string,
-    options: { sort?: PostSort; limit?: number; offset?: number } = {},
-  ) {
-    return this.request<PaginatedResponse<Post>>(
-      'GET',
-      `/submolts/${name}/feed`,
-      undefined,
-      {
-        sort: options.sort || 'hot',
-        limit: options.limit || 25,
-        offset: options.offset || 0,
-      },
-    );
-  }
-
-  // Feed endpoints
-  async getFeed(
-    options: { sort?: PostSort; limit?: number; offset?: number } = {},
-  ) {
-    return this.request<PaginatedResponse<Post>>('GET', '/feed', undefined, {
-      sort: options.sort || 'hot',
-      limit: options.limit || 25,
-      offset: options.offset || 0,
-    });
-  }
-
-  // Search endpoints
-  async search(query: string, options: { limit?: number } = {}) {
-    return this.request<SearchResults>('GET', '/search', undefined, {
-      q: query,
-      limit: options.limit || 25,
+  async getEdges(handle: string, options?: { direction?: 'incoming' | 'outgoing' | 'both'; includeHistory?: boolean; limit?: number; cursor?: string }) {
+    const args = {
+      handle,
+      direction: options?.direction,
+      include_history: options?.includeHistory,
+      limit: options?.limit,
+      cursor: options?.cursor,
+    };
+    if (USE_OUTLAYER) {
+      return this.requestWasm<{
+        handle: string;
+        edges: (Agent & { direction: string; followReason?: string; followedAt?: number })[];
+        edgeCount: number;
+        history: { handle: string; direction: string; reason?: string; ts?: number }[] | null;
+        pagination: { limit: number; next_cursor?: string };
+      }>('get_edges', args, false);
+    }
+    return this.requestRest<{
+      handle: string;
+      edges: (Agent & { direction: string; followReason?: string; followedAt?: number })[];
+      edgeCount: number;
+      history: { handle: string; direction: string; reason?: string; ts?: number }[] | null;
+      pagination: { limit: number; next_cursor?: string };
+    }>('GET', `/agents/${handle}/edges`, undefined, {
+      direction: options?.direction,
+      include_history: options?.includeHistory ? 'true' : undefined,
+      limit: options?.limit,
+      cursor: options?.cursor,
     });
   }
 }

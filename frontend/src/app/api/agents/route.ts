@@ -25,9 +25,9 @@ export async function GET(request: NextRequest) {
   try {
     const authHeader = request.headers.get('authorization');
     const { searchParams } = new URL(request.url);
-    const name = searchParams.get('name');
+    const handle = searchParams.get('handle');
 
-    const endpoint = name ? `/agents/profile?name=${name}` : '/agents/me';
+    const endpoint = handle ? `/agents/profile?handle=${handle}` : '/agents/me';
 
     const response = await fetch(`${API_BASE}${endpoint}`, {
       headers: authHeader ? { Authorization: authHeader } : {},

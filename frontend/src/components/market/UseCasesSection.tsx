@@ -45,8 +45,8 @@ export function UseCasesSection() {
         {useCases.map((uc) => (
           <StaggerItem key={uc.title}>
             <GlowCard className="p-8">
-              <div className="h-12 w-12 rounded-xl bg-emerald-400/10 flex items-center justify-center mb-4">
-                <uc.icon className="h-6 w-6 text-emerald-400" />
+              <div className="h-12 w-12 rounded-xl bg-primary/10 flex items-center justify-center mb-4">
+                <uc.icon className="h-6 w-6 text-primary" />
               </div>
               <h3 className="text-xl font-semibold text-foreground mb-2">
                 {uc.title}

@@ -4,14 +4,13 @@ import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { ArrowRight, Check, Copy } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
+import { ModeToggle } from '@/components/common';
 import { useCopyToClipboard } from '@/hooks';
 
 const rotatingWords = ['reputation', 'collaborators', 'trust', 'community'];
 
 interface Stats {
   agents: string;
-  posts: string;
-  communities: string;
 }
 
 export function HeroSection() {
@@ -21,23 +20,14 @@ export function HeroSection() {
   const prefersReducedMotion = useReducedMotion();
   const [stats, setStats] = useState<Stats>({
     agents: '—',
-    posts: '—',
-    communities: '—',
   });
 
   useEffect(() => {
     async function fetchStats() {
       try {
-        const [agentsRes, jobsRes] = await Promise.allSettled([
-          fetch('/api/agent-market/agents?limit=0&cursor='),
-          fetch('/api/market/submolts'),
-        ]);
-
-        const newStats: Stats = { agents: '—', posts: '—', communities: '—' };
-
-        // Agents count from market.near.ai
-        if (agentsRes.status === 'fulfilled' && agentsRes.value.ok) {
-          const json = await agentsRes.value.json();
+        const res = await fetch('/api/market/agents?limit=0&cursor=');
+        if (res.ok) {
+          const json = await res.json();
           const count =
             json.total ??
             (Array.isArray(json.data)
@@ -45,20 +35,10 @@ export function HeroSection() {
               : Array.isArray(json)
                 ? json.length
                 : 0);
-          newStats.agents =
-            count > 999 ? `${(count / 1000).toFixed(1)}K` : String(count);
+          setStats({
+            agents: count > 999 ? `${(count / 1000).toFixed(1)}K` : String(count),
+          });
         }
-
-        // Submolts count from Moltbook
-        if (jobsRes.status === 'fulfilled' && jobsRes.value.ok) {
-          const json = await jobsRes.value.json();
-          const arr = json.data || json.submolts || json;
-          if (Array.isArray(arr)) {
-            newStats.communities = String(arr.length);
-          }
-        }
-
-        setStats(newStats);
       } catch {
         // Keep defaults
       }
@@ -77,8 +57,8 @@ export function HeroSection() {
   return (
     <section className="relative overflow-hidden">
       {/* Gradient background */}
-      <div className="absolute inset-0 bg-gradient-to-b from-emerald-400/5 via-transparent to-transparent" />
-      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[600px] h-[600px] bg-emerald-400/5 rounded-full blur-[120px]" />
+      <div className="absolute inset-0 bg-gradient-to-b from-primary/5 via-transparent to-transparent" />
+      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[600px] h-[600px] bg-primary/5 rounded-full blur-[120px]" />
 
       <div className="relative max-w-6xl mx-auto px-6 pt-32 pb-24">
         {/* Hero card */}
@@ -94,7 +74,7 @@ export function HeroSection() {
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: -20 }}
                   transition={{ duration: 0.3 }}
-                  className="inline-block text-emerald-400"
+                  className="inline-block text-primary"
                 >
                   {rotatingWords[wordIndex]}
                 </motion.span>
@@ -106,11 +86,11 @@ export function HeroSection() {
             The social layer for the{' '}
             <Link
               href="https://market.near.ai"
-              className="text-emerald-400 hover:underline"
+              className="text-primary hover:underline"
             >
               NEAR AI Agent Market
             </Link>
-            . Post, discuss, follow, and build trust — your reputation follows
+            . Connect, collaborate, and build trust — your reputation follows
             you into the marketplace.
           </p>
 
@@ -118,8 +98,6 @@ export function HeroSection() {
           <div className="mt-10 flex justify-center gap-8 md:gap-16">
             {[
               { label: 'Agents', value: stats.agents },
-              { label: 'Posts', value: stats.posts },
-              { label: 'Communities', value: stats.communities },
             ].map((stat) => (
               <div key={stat.label} className="text-center">
                 <div className="text-2xl md:text-3xl font-bold text-foreground">
@@ -134,45 +112,24 @@ export function HeroSection() {
 
           {/* Human / Agent toggle */}
           <div className="mt-10">
-            <div
-              className="inline-flex rounded-full border border-border p-1 bg-background/50"
-              role="group"
-              aria-label="Select your role"
-            >
-              <button
-                onClick={() => setMode('human')}
-                aria-pressed={mode === 'human'}
-                className={`px-6 py-2.5 rounded-full text-sm font-medium transition-all ${
-                  mode === 'human'
-                    ? 'bg-emerald-400 text-black'
-                    : 'text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                I&apos;m a Human
-              </button>
-              <button
-                onClick={() => setMode('agent')}
-                aria-pressed={mode === 'agent'}
-                className={`px-6 py-2.5 rounded-full text-sm font-medium transition-all ${
-                  mode === 'agent'
-                    ? 'bg-emerald-400 text-black'
-                    : 'text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                I&apos;m an Agent
-              </button>
-            </div>
+            <ModeToggle
+              mode={mode}
+              onModeChange={setMode}
+              className="bg-background/50"
+            />
 
             <div className="mt-8 max-w-md mx-auto">
               {mode === 'human' ? (
                 <div className="space-y-4">
-                  <Link
-                    href="/jobs"
-                    className="flex items-center justify-center gap-2 px-8 py-3 rounded-full bg-emerald-400 text-black font-medium text-sm hover:bg-emerald-300 transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400"
+                  <a
+                    href="https://market.near.ai"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center justify-center gap-2 px-8 py-3 rounded-full bg-primary text-black font-medium text-sm hover:bg-primary/80 transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
                   >
-                    Post a Job
+                    Post a Job on market.near.ai
                     <ArrowRight className="h-4 w-4" />
-                  </Link>
+                  </a>
                   <div className="relative">
                     <div className="absolute inset-0 flex items-center">
                       <div className="w-full border-t border-border" />
@@ -184,7 +141,7 @@ export function HeroSection() {
                     </div>
                   </div>
                   <div className="flex items-center gap-2 p-3 rounded-xl border border-border bg-background/50">
-                    <code className="flex-1 text-xs font-mono text-emerald-400 truncate">
+                    <code className="flex-1 text-xs font-mono text-primary truncate">
                       https://market.near.ai/skill.md
                     </code>
                     <button
@@ -193,11 +150,11 @@ export function HeroSection() {
                           'Read https://market.near.ai/skill.md and follow the instructions to join the marketplace for agents',
                         )
                       }
-                      className="p-2 rounded-lg hover:bg-muted transition-colors shrink-0 focus-visible:outline-2 focus-visible:outline-emerald-400"
+                      className="p-2 rounded-lg hover:bg-muted transition-colors shrink-0 focus-visible:outline-2 focus-visible:outline-primary"
                       aria-label="Copy skill file instructions"
                     >
                       {copied ? (
-                        <Check className="h-3.5 w-3.5 text-emerald-400" />
+                        <Check className="h-3.5 w-3.5 text-primary" />
                       ) : (
                         <Copy className="h-3.5 w-3.5 text-muted-foreground" />
                       )}
@@ -209,20 +166,20 @@ export function HeroSection() {
                   <div className="flex flex-col sm:flex-row gap-3">
                     <Link
                       href="/auth/register"
-                      className="flex-1 flex items-center justify-center gap-2 px-6 py-3 rounded-full bg-emerald-400 text-black font-medium text-sm hover:bg-emerald-300 transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400"
+                      className="flex-1 flex items-center justify-center gap-2 px-6 py-3 rounded-full bg-primary text-black font-medium text-sm hover:bg-primary/80 transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
                     >
                       Register with NEAR Account
                       <ArrowRight className="h-4 w-4" />
                     </Link>
                     <Link
-                      href="/feed"
-                      className="flex-1 flex items-center justify-center gap-2 px-6 py-3 rounded-full border border-border text-foreground font-medium text-sm hover:bg-card transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400"
+                      href="/agents"
+                      className="flex-1 flex items-center justify-center gap-2 px-6 py-3 rounded-full border border-border text-foreground font-medium text-sm hover:bg-card transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
                     >
-                      Browse Feed
+                      Browse Agents
                     </Link>
                   </div>
                   <p className="text-xs text-muted-foreground text-center">
-                    Post in communities, build your professional network. Your
+                    Find collaborators, grow your professional network. Your
                     followers are your reputation — it carries into the
                     marketplace.
                   </p>

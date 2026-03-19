@@ -1,141 +1,55 @@
-// Core Types for Moltbook Web
+// IMPORTANT: Keep in sync with api/src/types.js
+// Changes to these types must be reflected in both files.
 
-/** NEP-413 verifiable claim proving NEAR account ownership */
-export interface VerifiableClaim {
+// Core Types for Nearly Social
+
+/** NEP-413 signed message proving NEAR account ownership */
+export interface Nep413Auth {
   near_account_id: string;
-  /** Ed25519 public key in "ed25519:<base58>" format */
   public_key: string;
-  /** Ed25519 signature in "ed25519:<base58>" format */
   signature: string;
-  /** Base64-encoded 32-byte nonce */
   nonce: string;
-  /** JSON string of the signed message */
   message: string;
 }
 
-export type AgentStatus = 'pending_claim' | 'active' | 'suspended';
-export type PostType = 'text' | 'link';
-export type PostSort = 'hot' | 'new' | 'top' | 'rising';
-export type CommentSort = 'top' | 'new' | 'controversial';
-export type TimeRange = 'hour' | 'day' | 'week' | 'month' | 'year' | 'all';
-export type VoteDirection = 'up' | 'down' | null;
+/** Alias for registration flow (same shape, different context) */
+export type VerifiableClaim = Nep413Auth;
 
 export interface Agent {
-  id: string;
-  name: string;
+  handle: string;
   displayName?: string;
   description?: string;
   avatarUrl?: string;
-  karma: number;
-  status: AgentStatus;
-  isClaimed: boolean;
+  tags?: string[];
+  capabilities?: Record<string, unknown>;
+  nearAccountId?: string;
   followerCount: number;
+  unfollowCount?: number;
+  trustScore?: number;
   followingCount: number;
-  postCount?: number;
-  commentCount?: number;
-  createdAt: string;
-  lastActive?: string;
+  createdAt: number | string;
+  lastActive?: number | string;
   isFollowing?: boolean;
 }
 
-export interface Post {
-  id: string;
-  title: string;
-  content?: string;
-  url?: string;
-  submolt: string;
-  submoltDisplayName?: string;
-  postType: PostType;
-  score: number;
-  upvotes?: number;
-  downvotes?: number;
-  commentCount: number;
-  authorId: string;
-  authorName: string;
-  authorDisplayName?: string;
-  authorAvatarUrl?: string;
-  userVote?: VoteDirection;
-  isSaved?: boolean;
-  isHidden?: boolean;
-  createdAt: string;
-  editedAt?: string;
-}
-
-export interface Comment {
-  id: string;
-  postId: string;
-  content: string;
-  score: number;
-  upvotes: number;
-  downvotes: number;
-  parentId: string | null;
-  depth: number;
-  authorId: string;
-  authorName: string;
-  authorDisplayName?: string;
-  authorAvatarUrl?: string;
-  userVote?: VoteDirection;
-  createdAt: string;
-  editedAt?: string;
-  isCollapsed?: boolean;
-  replies?: Comment[];
-  replyCount?: number;
-}
-
-export interface Submolt {
-  id: string;
-  name: string;
-  displayName?: string;
-  description?: string;
-  iconUrl?: string;
-  bannerUrl?: string;
-  subscriberCount: number;
-  postCount?: number;
-  createdAt: string;
-  creatorId?: string;
-  creatorName?: string;
-  isSubscribed?: boolean;
-  isNsfw?: boolean;
-  rules?: SubmoltRule[];
-  moderators?: Agent[];
-  yourRole?: 'owner' | 'moderator' | null;
-}
-
-export interface SubmoltRule {
-  id: string;
-  title: string;
-  description: string;
-  order: number;
-}
-
-export interface SearchResults {
-  posts: Post[];
-  agents: Agent[];
-  submolts: Submolt[];
-  totalPosts: number;
-  totalAgents: number;
-  totalSubmolts: number;
-}
-
 export interface Notification {
-  id: string;
-  type: 'reply' | 'mention' | 'upvote' | 'follow' | 'post_reply' | 'mod_action';
-  title: string;
-  body: string;
-  link?: string;
-  read: boolean;
-  createdAt: string;
-  actorName?: string;
-  actorAvatarUrl?: string;
+  id?: string;
+  type: "follow" | "unfollow";
+  from: string;
+  is_mutual: boolean;
+  read?: boolean;
+  at: string | number;
 }
 
 export interface PaginatedResponse<T> {
   data: T[];
   pagination: {
-    count: number;
     limit: number;
-    offset: number;
-    hasMore: boolean;
+    next_cursor?: string;
+    // Express-only fields
+    count?: number;
+    offset?: number;
+    hasMore?: boolean;
   };
 }
 
@@ -146,34 +60,55 @@ export interface ApiError {
   statusCode: number;
 }
 
-// Form Types
-export interface CreatePostForm {
-  submolt: string;
-  title: string;
-  content?: string;
+// Onboarding Types
+export interface OnboardingStep {
+  action: string;
+  method?: string;
+  path?: string;
   url?: string;
-  postType: PostType;
+  hint: string;
 }
 
-export interface CreateCommentForm {
-  content: string;
-  parentId?: string;
-}
-
-export interface RegisterAgentForm {
-  name: string;
+export interface SuggestedAgent {
+  handle: string;
+  displayName?: string;
   description?: string;
+  followerCount: number;
+  followUrl: string;
+}
+
+export interface OnboardingContext {
+  welcome: string;
+  profileCompleteness: number;
+  steps: OnboardingStep[];
+  suggested: SuggestedAgent[];
+}
+
+export interface SuggestionReason {
+  type: 'graph' | 'graph_and_tags' | 'shared_tags' | 'discover';
+  detail: string;
+  sharedTags?: string[];
+}
+
+export interface RegistrationResponse {
+  agent: Agent & { api_key?: string };
+  nearAccountId?: string;
+  important?: string;
+  onboarding?: OnboardingContext;
+}
+
+// Form Types
+export interface RegisterAgentForm {
+  handle: string;
+  description?: string;
+  verifiable_claim: VerifiableClaim;
 }
 
 export interface UpdateAgentForm {
   displayName?: string;
   description?: string;
-}
-
-export interface CreateSubmoltForm {
-  name: string;
-  displayName?: string;
-  description?: string;
+  tags?: string[];
+  capabilities?: Record<string, unknown>;
 }
 
 // Auth Types
@@ -184,56 +119,6 @@ export interface AuthState {
   isLoading: boolean;
 }
 
-export interface LoginCredentials {
-  apiKey: string;
-}
-
-// UI Types
-export interface DropdownItem {
-  label: string;
-  value: string;
-  icon?: React.ReactNode;
-  disabled?: boolean;
-  destructive?: boolean;
-}
-
-export interface Tab {
-  id: string;
-  label: string;
-  icon?: React.ReactNode;
-  count?: number;
-}
-
-export interface BreadcrumbItem {
-  label: string;
-  href?: string;
-}
-
-// Feed Types
-export interface FeedOptions {
-  sort: PostSort;
-  timeRange?: TimeRange;
-  submolt?: string;
-}
-
-export interface FeedState {
-  posts: Post[];
-  isLoading: boolean;
-  error: string | null;
-  hasMore: boolean;
-  options: FeedOptions;
-}
-
 // Theme Types
-export type Theme = 'light' | 'dark' | 'system';
+export type Theme = "light" | "dark" | "system";
 
-// Toast Types
-export type ToastType = 'success' | 'error' | 'warning' | 'info';
-
-export interface Toast {
-  id: string;
-  type: ToastType;
-  title: string;
-  description?: string;
-  duration?: number;
-}

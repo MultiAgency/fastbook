@@ -11,74 +11,7 @@ const nacl = require('tweetnacl');
 
 const { describe, test, assert, assertEqual, runTests } = require('./helpers');
 
-// --- Crypto helpers (from verifiable-claim.test.js) ---
-
-function writeU32LE(value) {
-  const buf = Buffer.alloc(4);
-  buf.writeUInt32LE(value);
-  return buf;
-}
-
-function base58Encode(buffer) {
-  const ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
-  let num = BigInt('0x' + buffer.toString('hex'));
-  let str = '';
-  while (num > 0n) {
-    str = ALPHABET[Number(num % 58n)] + str;
-    num = num / 58n;
-  }
-  for (const byte of buffer) {
-    if (byte === 0) str = '1' + str;
-    else break;
-  }
-  return str || '1';
-}
-
-function createTestClaim(overrides = {}) {
-  const keypair = nacl.sign.keyPair();
-
-  const message = overrides.message || JSON.stringify({
-    action: 'register',
-    domain: 'market.near.ai',
-    version: 1,
-    timestamp: overrides.timestamp || Date.now(),
-  });
-
-  const recipient = 'market.near.ai';
-  const nonce = overrides.nonce || crypto.randomBytes(32);
-  const nonceBase64 = Buffer.from(nonce).toString('base64');
-
-  const NEP413_TAG = 2147484061;
-  const messageBytes = Buffer.from(message, 'utf-8');
-  const recipientBytes = Buffer.from(recipient, 'utf-8');
-
-  const payload = Buffer.concat([
-    writeU32LE(NEP413_TAG),
-    writeU32LE(messageBytes.length),
-    messageBytes,
-    Buffer.from(nonce),
-    writeU32LE(recipientBytes.length),
-    recipientBytes,
-    Buffer.from([0]),
-  ]);
-
-  const hash = crypto.createHash('sha256').update(payload).digest();
-  const signature = nacl.sign.detached(hash, keypair.secretKey);
-
-  const publicKeyBase58 = 'ed25519:' + base58Encode(Buffer.from(keypair.publicKey));
-  const signatureBase58 = 'ed25519:' + base58Encode(Buffer.from(signature));
-
-  return {
-    claim: {
-      near_account_id: overrides.near_account_id || 'test-account.near',
-      public_key: overrides.public_key || publicKeyBase58,
-      signature: overrides.signature || signatureBase58,
-      nonce: nonceBase64,
-      message,
-    },
-    keypair,
-  };
-}
+const { createTestClaim, base58Encode } = require('./crypto-helpers');
 
 // --- HTTP helper ---
 
@@ -124,17 +57,14 @@ function stubNearRpc() {
 // --- Tests ---
 
 describe('Registration without verifiable_claim', () => {
-  test('registers an agent with name and description', async () => {
+  test('rejects registration without verifiable_claim', async () => {
     const { status, data } = await post('/api/v1/agents/register', {
-      name: 'baseline_agent',
+      handle: 'baseline_agent',
       description: 'A test agent',
     });
 
-    assertEqual(status, 201, `Expected 201, got ${status}: ${JSON.stringify(data)}`);
-    assert(data.success === true, 'Expected success: true');
-    assert(data.agent.api_key.startsWith('moltbook_'), 'API key should start with moltbook_');
-    assert(data.agent.id, 'Should have agent id');
-    assertEqual(data.agent.near_account_id, undefined, 'Should not have near_account_id');
+    assertEqual(status, 400, `Expected 400, got ${status}: ${JSON.stringify(data)}`);
+    assertEqual(data.code, 'VALIDATION_ERROR');
   });
 });
 
@@ -142,7 +72,7 @@ describe('Registration with valid NEP-413 claim', () => {
   test('registers agent with verified NEAR account', async () => {
     const { claim } = createTestClaim({ near_account_id: 'alice.near' });
     const { status, data } = await post('/api/v1/agents/register', {
-      name: 'alice_agent',
+      handle: 'alice_agent',
       description: 'Alice verified agent',
       verifiable_claim: claim,
     });
@@ -150,7 +80,7 @@ describe('Registration with valid NEP-413 claim', () => {
     assertEqual(status, 201, `Expected 201, got ${status}: ${JSON.stringify(data)}`);
     assert(data.success === true, 'Expected success: true');
     assertEqual(data.agent.near_account_id, 'alice.near');
-    assert(data.agent.api_key.startsWith('moltbook_'), 'API key should start with moltbook_');
+    assert(data.agent.api_key.startsWith('nearly_'), 'API key should start with nearly_');
   });
 });
 
@@ -160,7 +90,7 @@ describe('Registration with invalid signature', () => {
     claim.message = claim.message.replace('"register"', '"login"');
 
     const { status, data } = await post('/api/v1/agents/register', {
-      name: 'tampered_agent',
+      handle: 'tampered_agent',
       verifiable_claim: claim,
     });
 
@@ -177,7 +107,7 @@ describe('Registration with expired timestamp', () => {
     });
 
     const { status, data } = await post('/api/v1/agents/register', {
-      name: 'expired_agent',
+      handle: 'expired_agent',
       verifiable_claim: claim,
     });
 
@@ -194,7 +124,7 @@ describe('Registration with future timestamp', () => {
     });
 
     const { status, data } = await post('/api/v1/agents/register', {
-      name: 'future_agent',
+      handle: 'future_agent',
       verifiable_claim: claim,
     });
 
@@ -207,14 +137,14 @@ describe('Duplicate NEAR account', () => {
   test('rejects second registration with same NEAR account', async () => {
     const { claim: claim1 } = createTestClaim({ near_account_id: 'bob.near' });
     const { status: s1 } = await post('/api/v1/agents/register', {
-      name: 'bob_agent_1',
+      handle: 'bob_agent_1',
       verifiable_claim: claim1,
     });
     assertEqual(s1, 201, 'First registration should succeed');
 
     const { claim: claim2 } = createTestClaim({ near_account_id: 'bob.near' });
     const { status: s2, data: d2 } = await post('/api/v1/agents/register', {
-      name: 'bob_agent_2',
+      handle: 'bob_agent_2',
       verifiable_claim: claim2,
     });
 
@@ -232,7 +162,7 @@ describe('Nonce replay', () => {
       nonce: sharedNonce,
     });
     const { status: s1 } = await post('/api/v1/agents/register', {
-      name: 'nonce_agent_1',
+      handle: 'nonce_agent_1',
       verifiable_claim: claim1,
     });
     assertEqual(s1, 201, 'First use of nonce should succeed');
@@ -242,7 +172,7 @@ describe('Nonce replay', () => {
       nonce: sharedNonce,
     });
     const { status: s2, data: d2 } = await post('/api/v1/agents/register', {
-      name: 'nonce_agent_2',
+      handle: 'nonce_agent_2',
       verifiable_claim: claim2,
     });
 
@@ -257,7 +187,7 @@ describe('Missing required claim fields', () => {
     delete claim.public_key;
 
     const { status, data } = await post('/api/v1/agents/register', {
-      name: 'missing_field_agent',
+      handle: 'missing_field_agent',
       verifiable_claim: claim,
     });
 
@@ -277,7 +207,7 @@ describe('Validation errors', () => {
 
   test('rejects name too short', async () => {
     const { status, data } = await post('/api/v1/agents/register', {
-      name: 'a',
+      handle: 'a',
     });
 
     assertEqual(status, 400, `Expected 400, got ${status}`);

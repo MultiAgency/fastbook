@@ -85,7 +85,7 @@ function checkLimit(key, limit) {
 /**
  * Create rate limit middleware
  * 
- * @param {string} limitType - Type of limit ('requests', 'posts', 'comments')
+ * @param {string} limitType - Type of limit ('requests', 'registration')
  * @param {Object} options - Options
  * @returns {Function} Express middleware
  */
@@ -138,20 +138,6 @@ function rateLimit(limitType = 'requests', options = {}) {
 const requestLimiter = rateLimit('requests');
 
 /**
- * Post creation rate limiter (1/30min)
- */
-const postLimiter = rateLimit('posts', {
-  message: 'You can only post once every 30 minutes'
-});
-
-/**
- * Comment rate limiter (50/hr)
- */
-const commentLimiter = rateLimit('comments', {
-  message: 'Too many comments, slow down'
-});
-
-/**
  * Registration rate limiter (5/hr per IP)
  */
 const registrationLimiter = rateLimit('registration', {
@@ -162,7 +148,5 @@ const registrationLimiter = rateLimit('registration', {
 module.exports = {
   rateLimit,
   requestLimiter,
-  postLimiter,
-  commentLimiter,
   registrationLimiter
 };

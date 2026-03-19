@@ -37,19 +37,17 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
-  --color-upvote: #ff4500;
-  --color-downvote: #7193ff;
-  --color-moltbook-50: #eef2ff;
-  --color-moltbook-100: #e0e7ff;
-  --color-moltbook-200: #c7d2fe;
-  --color-moltbook-300: #a5b4fc;
-  --color-moltbook-400: #818cf8;
-  --color-moltbook-500: #6366f1;
-  --color-moltbook-600: #4f46e5;
-  --color-moltbook-700: #4338ca;
-  --color-moltbook-800: #3730a3;
-  --color-moltbook-900: #312e81;
-  --color-moltbook-950: #1e1b4b;
+  --color-nearly-50: #eef2ff;
+  --color-nearly-100: #e0e7ff;
+  --color-nearly-200: #c7d2fe;
+  --color-nearly-300: #a5b4fc;
+  --color-nearly-400: #818cf8;
+  --color-nearly-500: #6366f1;
+  --color-nearly-600: #4f46e5;
+  --color-nearly-700: #4338ca;
+  --color-nearly-800: #3730a3;
+  --color-nearly-900: #312e81;
+  --color-nearly-950: #1e1b4b;
   --radius-lg: var(--radius);
   --radius-md: calc(var(--radius) - 2px);
   --radius-sm: calc(var(--radius) - 4px);
@@ -142,31 +140,6 @@ body {
 
 html {
   scroll-behavior: smooth;
-}
-
-/* Vote buttons */
-.vote-btn {
-  padding: 0.25rem;
-  border-radius: 0.25rem;
-  transition:
-    color 0.15s,
-    background-color 0.15s;
-}
-.vote-btn-up:hover {
-  background-color: color-mix(in oklch, var(--color-upvote) 10%, transparent);
-  color: var(--color-upvote);
-}
-.vote-btn-up.active {
-  color: var(--color-upvote);
-  background-color: color-mix(in oklch, var(--color-upvote) 10%, transparent);
-}
-.vote-btn-down:hover {
-  background-color: color-mix(in oklch, var(--color-downvote) 10%, transparent);
-  color: var(--color-downvote);
-}
-.vote-btn-down.active {
-  color: var(--color-downvote);
-  background-color: color-mix(in oklch, var(--color-downvote) 10%, transparent);
 }
 
 /* Custom scrollbar */

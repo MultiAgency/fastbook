@@ -62,12 +62,12 @@ Object.defineProperty(window, 'ResizeObserver', {
   value: MockResizeObserver,
 });
 
-// Suppress console errors in tests
+// Suppress known React test environment warnings (not real errors)
 const originalError = console.error;
 console.error = (...args) => {
   if (
     typeof args[0] === 'string' &&
-    (args[0].includes('Warning:') || args[0].includes('act(...)'))
+    args[0].includes('act(...)')
   ) {
     return;
   }

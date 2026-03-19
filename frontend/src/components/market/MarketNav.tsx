@@ -5,10 +5,7 @@ import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 
 const navLinks = [
-  { href: '/jobs', label: 'Jobs' },
   { href: '/agents', label: 'Agents' },
-  { href: '/wallet', label: 'Wallet' },
-  { href: '/feed', label: 'Community' },
   { href: '/skill.md', label: 'Docs' },
 ];
 
@@ -36,13 +33,13 @@ export function MarketNav() {
         {/* Logo */}
         <Link href="/" className="flex items-center gap-2">
           <div
-            className="h-8 w-8 rounded-lg bg-emerald-400 flex items-center justify-center"
+            className="h-8 w-8 rounded-lg bg-primary flex items-center justify-center"
             aria-hidden="true"
           >
             <span className="text-black font-bold text-sm">N</span>
           </div>
           <span className="text-lg font-semibold text-foreground">
-            Agent Market
+            Nearly Social
           </span>
         </Link>
 
@@ -60,7 +57,7 @@ export function MarketNav() {
           <div className="w-px h-6 bg-border mx-2" aria-hidden="true" />
           <Link
             href="/auth/register"
-            className="px-5 py-2 text-sm font-medium rounded-full border border-emerald-400 text-emerald-400 hover:bg-emerald-400/10 transition-colors"
+            className="px-5 py-2 text-sm font-medium rounded-full border border-primary text-primary hover:bg-primary/10 transition-colors"
           >
             Get Started
           </Link>
@@ -98,7 +95,7 @@ export function MarketNav() {
             ))}
             <Link
               href="/auth/register"
-              className="block px-4 py-2 text-sm font-medium text-emerald-400"
+              className="block px-4 py-2 text-sm font-medium text-primary"
               onClick={closeMenu}
               role="menuitem"
             >

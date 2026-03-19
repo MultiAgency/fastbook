@@ -114,9 +114,9 @@ test.describe('Registration Flow', () => {
 
     await expect(page.getByText('Mocked — market.near.ai proposal')).toBeVisible();
 
-    const toggle = page.getByRole('switch', { name: 'Toggle live Moltbook API' });
+    const toggle = page.getByRole('switch', { name: 'Toggle live Nearly Social API' });
     await toggle.click();
-    await expect(page.getByText('Live — Moltbook API')).toBeVisible();
+    await expect(page.getByText('Live — Nearly Social API')).toBeVisible();
   });
 
   test('completion shows what-next cards', async ({ page }) => {
@@ -132,8 +132,8 @@ test.describe('Registration Flow', () => {
 
     await expect(page.getByText("What's next?")).toBeVisible();
     // Social links appear in summary card
-    await expect(page.getByText('View your Moltbook profile')).toBeVisible();
-    await expect(page.getByText('Join the community feed')).toBeVisible();
+    await expect(page.getByText('View your Nearly Social profile')).toBeVisible();
+    await expect(page.getByText('Browse the agent directory')).toBeVisible();
   });
 
   test('start over resets all steps', async ({ page }) => {
@@ -149,6 +149,9 @@ test.describe('Registration Flow', () => {
 
     await page.getByRole('button', { name: 'Start Over' }).click();
     await expect(page.getByRole('button', { name: /Create Wallet/ })).toBeVisible();
+    // Verify step results are cleared — wallet/signature data should not be visible
+    await expect(page.getByText('Your NEAR Account')).not.toBeVisible();
+    await expect(page.getByText('Registration Complete')).not.toBeVisible();
   });
 
   // /register route removed — demo page is the canonical path
@@ -172,17 +175,23 @@ test.describe('Registration Accessibility', () => {
     await page.getByRole('button', { name: /Sign Message/ }).click();
     await expect(page.getByText('Public Key')).toBeVisible({ timeout: 15000 });
 
-    const toggle = page.getByRole('switch', { name: 'Toggle live Moltbook API' });
+    const toggle = page.getByRole('switch', { name: 'Toggle live Nearly Social API' });
     await expect(toggle).toBeVisible();
     await expect(toggle).toHaveAttribute('aria-checked', 'false');
   });
 
-  test('step errors have role="alert"', async ({ page }) => {
+  test('aria-live region announces step changes', async ({ page }) => {
     await page.goto('/demo');
     await page.getByRole('button', { name: "I'm an Agent" }).click();
-    // StepCard error divs render with role="alert" when errors occur
-    // This is a structural test — verify the attribute exists in the component
-    const stepCards = page.locator('[data-slot="card"]');
-    await expect(stepCards.first()).toBeVisible();
+
+    const liveRegion = page.locator('.sr-only[aria-live="polite"]');
+    await expect(liveRegion).toBeAttached();
+
+    await page.getByRole('button', { name: /Create Wallet/ }).click();
+    await expect(page.getByText('Your NEAR Account')).toBeVisible({ timeout: 15000 });
+
+    // After step 1 completes, the live region should have updated content
+    const text = await liveRegion.textContent();
+    expect(text?.length).toBeGreaterThan(0);
   });
 });

@@ -13,6 +13,7 @@ import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { GlowCard } from '@/components/market';
+import { EXTERNAL_URLS } from '@/lib/constants';
 import { getProfile, type OnChainProfile } from '@/lib/near-social';
 
 export default function AgentProfilePage() {
@@ -68,7 +69,7 @@ export default function AgentProfilePage() {
           </h2>
           <p className="text-sm text-muted-foreground mb-1">
             Account:{' '}
-            <span className="font-mono text-emerald-400">{truncatedId}</span>
+            <span className="font-mono text-primary">{truncatedId}</span>
           </p>
           <p className="text-xs text-muted-foreground">
             This account exists on NEAR but hasn&apos;t written a profile to
@@ -89,8 +90,8 @@ export default function AgentProfilePage() {
                   className="h-16 w-16 rounded-xl object-cover"
                 />
               ) : (
-                <div className="h-16 w-16 rounded-xl bg-emerald-400/10 flex items-center justify-center">
-                  <span className="text-2xl font-bold text-emerald-400">
+                <div className="h-16 w-16 rounded-xl bg-primary/10 flex items-center justify-center">
+                  <span className="text-2xl font-bold text-primary">
                     {(p?.name || accountId)[0]?.toUpperCase()}
                   </span>
                 </div>
@@ -102,7 +103,7 @@ export default function AgentProfilePage() {
                 {am?.handle && p?.name && (
                   <p className="text-sm text-muted-foreground">@{am.handle}</p>
                 )}
-                <p className="text-xs font-mono text-emerald-400 mt-1 break-all">
+                <p className="text-xs font-mono text-primary mt-1 break-all">
                   {accountId}
                 </p>
               </div>
@@ -181,7 +182,7 @@ export default function AgentProfilePage() {
                       {am.capabilities.map((cap) => (
                         <span
                           key={cap}
-                          className="px-2 py-0.5 text-xs rounded-full bg-emerald-400/10 text-emerald-400"
+                          className="px-2 py-0.5 text-xs rounded-full bg-primary/10 text-primary"
                         >
                           {cap}
                         </span>
@@ -196,7 +197,7 @@ export default function AgentProfilePage() {
           {/* View on NEAR Social */}
           <div className="flex gap-3">
             <a
-              href={`https://near.social/mob.near/widget/ProfilePage?accountId=${accountId}`}
+              href={EXTERNAL_URLS.NEAR_SOCIAL_PROFILE(accountId)}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full border border-border text-xs text-muted-foreground hover:text-foreground transition-colors"
@@ -205,7 +206,7 @@ export default function AgentProfilePage() {
               View on NEAR Social
             </a>
             <a
-              href={`https://nearblocks.io/address/${accountId}`}
+              href={EXTERNAL_URLS.NEARBLOCKS(accountId)}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full border border-border text-xs text-muted-foreground hover:text-foreground transition-colors"

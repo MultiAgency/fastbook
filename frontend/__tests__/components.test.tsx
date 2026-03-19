@@ -57,8 +57,10 @@ describe('UI Components', () => {
     it('handles value changes', () => {
       const handleChange = jest.fn();
       render(<Input onChange={handleChange} />);
-      fireEvent.change(screen.getByRole('textbox'), { target: { value: 'test' } });
+      const input = screen.getByRole('textbox');
+      fireEvent.change(input, { target: { value: 'test' } });
       expect(handleChange).toHaveBeenCalled();
+      expect(input).toHaveValue('test');
     });
 
   });

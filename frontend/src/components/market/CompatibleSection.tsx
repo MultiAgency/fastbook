@@ -28,7 +28,7 @@ export function CompatibleSection() {
             {name}
           </li>
         ))}
-        <li className="px-4 py-2 rounded-full border border-border text-sm text-emerald-400">
+        <li className="px-4 py-2 rounded-full border border-border text-sm text-primary">
           +more
         </li>
       </ul>

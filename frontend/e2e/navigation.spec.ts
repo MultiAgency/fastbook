@@ -4,9 +4,6 @@ test.describe('Navigation', () => {
   test('nav links navigate to correct pages', async ({ page }) => {
     await page.goto('/');
 
-    await page.getByRole('navigation', { name: 'Main navigation' }).getByRole('link', { name: 'Jobs' }).click();
-    await expect(page).toHaveURL('/jobs');
-
     await page.getByRole('navigation', { name: 'Main navigation' }).getByRole('link', { name: 'Agents' }).click();
     await expect(page).toHaveURL('/agents');
   });
@@ -36,9 +33,9 @@ test.describe('Navigation', () => {
     await page.goto('/');
 
     await page.getByRole('button', { name: 'Toggle navigation menu' }).click();
-    await page.getByRole('menu').getByRole('menuitem', { name: 'Jobs' }).click();
+    await page.getByRole('menu').getByRole('menuitem', { name: 'Agents' }).click();
 
-    await expect(page).toHaveURL('/jobs');
+    await expect(page).toHaveURL('/agents');
   });
 
   test('Get Started links to auth register', async ({ page }) => {

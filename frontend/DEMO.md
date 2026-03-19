@@ -48,6 +48,7 @@ We think that's wrong. An agent's NEAR account IS its identity. Registration sho
 **Say:** "First, the agent gets a NEAR account through OutLayer's custody wallet API. This is a single POST request, no auth required. OutLayer gives back an account ID and an API key."
 
 **Point out:**
+
 - The real NEAR account ID displayed in the green box
 - Click "View raw request / response" to show the JSON
 - The green "Live API call" indicator — this is hitting the real OutLayer API right now
@@ -56,9 +57,10 @@ We think that's wrong. An agent's NEAR account IS its identity. Registration sho
 
 **Click "Sign Message"**
 
-**Say:** "Now the agent proves it owns that account by signing a message using NEP-413. The message says 'I want to register on market.near.ai' with a timestamp. OutLayer signs it with the account's private key."
+**Say:** "Now the agent proves it owns that account by signing a message using NEP-413. The message says 'I want to register on nearly.social' with a timestamp. OutLayer signs it with the account's private key."
 
 **Point out:**
+
 - The message preview (action, domain, version, timestamp)
 - The real signature and public key in the response
 - Expand the JSON viewer — show that the response shape IS the verifiable_claim
@@ -78,6 +80,7 @@ We think that's wrong. An agent's NEAR account IS its identity. Registration sho
 **Say:** "The `verifiable_claim` in the request body is exactly the signed proof from Step 2. The Market verifies the signature, confirms the public key belongs to the claimed account, and registers the agent with its existing identity. Same account, no new one created."
 
 **Point out:**
+
 - The "Proposed API — not yet implemented" badge
 - The amber "Mock response" indicator
 - In the response: `near_account_id` matches Step 1 — **this is the whole argument**
@@ -87,6 +90,7 @@ We think that's wrong. An agent's NEAR account IS its identity. Registration sho
 **Say:** "After registration, the agent has both its OutLayer custody key and its Market API key, both tied to the same NEAR account."
 
 **Point out:**
+
 - Click reveal on the masked keys
 - The "Fund wallet via OutLayer" link
 
@@ -101,6 +105,7 @@ We think that's wrong. An agent's NEAR account IS its identity. Registration sho
 **Say:** "This section is the actual proposal — the spec you'd hand to the Market team. It defines the `verifiable_claim` field, the NEP-413 message format, the verification steps for the backend, and why OutLayer makes it trivially implementable for any agent."
 
 **Point out:**
+
 - The 3 verification steps (validate message, verify ed25519 signature, register)
 - The curl examples — two HTTP calls, no SDK needed
 - "Any agent with an OutLayer custody wallet — or any NEP-413-compatible signer — can bring its existing NEAR identity to Market in seconds."
@@ -140,10 +145,10 @@ A: Three steps: validate the signed message, verify the ed25519 signature, regis
 
 ## If Things Go Wrong
 
-| Problem | What happens | What to say |
-|---------|-------------|-------------|
-| OutLayer API is down | Steps 1-2 use mock data, amber badge shows | "The mock fallback kicked in — in production this would retry. Let me show you the flow with mock data." |
-| Browser CORS error | Same as above — mock fallback | Same as above |
-| Page is blank | Check dev server is running | `npm run dev` in terminal |
-| sessionStorage has stale state | Old step data shows | Click "Start Over" or open incognito |
-| Dark mode looks wrong | Toggle theme | Click the theme toggle or check system preferences |
+| Problem                        | What happens                               | What to say                                                                                              |
+| ------------------------------ | ------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
+| OutLayer API is down           | Steps 1-2 use mock data, amber badge shows | "The mock fallback kicked in — in production this would retry. Let me show you the flow with mock data." |
+| Browser CORS error             | Same as above — mock fallback              | Same as above                                                                                            |
+| Page is blank                  | Check dev server is running                | `npm run dev` in terminal                                                                                |
+| sessionStorage has stale state | Old step data shows                        | Click "Start Over" or open incognito                                                                     |
+| Dark mode looks wrong          | Toggle theme                               | Click the theme toggle or check system preferences                                                       |

@@ -36,7 +36,6 @@ test.describe('Homepage', () => {
 
   test('navigation links are present', async ({ page }) => {
     const nav = page.getByRole('navigation', { name: 'Main navigation' });
-    await expect(nav.getByRole('link', { name: 'Jobs' })).toBeVisible();
     await expect(nav.getByRole('link', { name: 'Agents' })).toBeVisible();
     await expect(nav.getByRole('link', { name: 'Community' })).toBeVisible();
     await expect(nav.getByRole('link', { name: 'Docs' })).toBeVisible();

@@ -70,8 +70,8 @@ export function FeaturesSection() {
         {features.map((feature) => (
           <StaggerItem key={feature.title} className={feature.span}>
             <GlowCard>
-              <div className="h-10 w-10 rounded-lg bg-emerald-400/10 flex items-center justify-center mb-4">
-                <feature.icon className="h-5 w-5 text-emerald-400" />
+              <div className="h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center mb-4">
+                <feature.icon className="h-5 w-5 text-primary" />
               </div>
               <h3 className="text-lg font-semibold text-foreground mb-2">
                 {feature.title}

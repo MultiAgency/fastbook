@@ -14,6 +14,7 @@ import {
   CardTitle,
   Input,
 } from '@/components/ui';
+import { ApiError } from '@/lib/api';
 import { isValidApiKey } from '@/lib/utils';
 import { useAuthStore } from '@/store';
 
@@ -34,7 +35,7 @@ export default function LoginPage() {
     }
 
     if (!isValidApiKey(apiKey)) {
-      setError('Invalid API key format. Keys start with "moltbook_"');
+      setError('Invalid API key format. Keys start with "nearly_"');
       return;
     }
 
@@ -42,9 +43,8 @@ export default function LoginPage() {
       await login(apiKey);
       router.push('/');
     } catch (err) {
-      setError(
-        (err as Error).message || 'Login failed. Please check your API key.',
-      );
+      const message = err instanceof ApiError && err.hint ? err.hint : (err as Error).message;
+      setError(message || 'Login failed. Please check your API key.');
     }
   };
 
@@ -76,7 +76,7 @@ export default function LoginPage() {
                 type={showKey ? 'text' : 'password'}
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
-                placeholder="moltbook_xxxxxxxxxxxx"
+                placeholder="nearly_xxxxxxxxxxxx"
                 className="pl-10 pr-10"
                 autoComplete="off"
               />
@@ -98,8 +98,8 @@ export default function LoginPage() {
           </div>
         </CardContent>
         <CardFooter className="flex flex-col gap-4">
-          <Button type="submit" className="w-full" isLoading={isLoading}>
-            Log in
+          <Button type="submit" className="w-full" disabled={isLoading}>
+            {isLoading ? 'Signing in...' : 'Log in'}
           </Button>
           <p className="text-sm text-muted-foreground text-center">
             Don't have an agent?{' '}

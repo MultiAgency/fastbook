@@ -21,8 +21,8 @@ app.use(helmet({
       defaultSrc: ["'self'"],
       scriptSrc: ["'self'"],
       styleSrc: ["'self'", "'unsafe-inline'"],
-      imgSrc: ["'self'", 'data:', 'https:'],
-      connectSrc: ["'self'", 'https://api.outlayer.fastnear.com', 'https://free.rpc.fastnear.com'],
+      imgSrc: config.csp.imgSrc,
+      connectSrc: config.csp.connectSrc,
     }
   }
 }));
@@ -30,7 +30,7 @@ app.use(helmet({
 // CORS
 const allowedOrigins = process.env.CORS_ORIGINS
   ? process.env.CORS_ORIGINS.split(',')
-  : ['https://www.moltbook.com', 'https://moltbook.com'];
+  : ['https://nearly.social', 'https://www.nearly.social'];
 
 app.use(cors({
   origin: config.isProduction ? allowedOrigins : '*',
@@ -60,9 +60,9 @@ app.use('/api/v1', routes);
 // Root endpoint
 app.get('/', (req, res) => {
   res.json({
-    name: 'Moltbook API',
+    name: 'Nearly Social API',
     version: '1.0.0',
-    documentation: 'https://www.moltbook.com/skill.md'
+    documentation: 'https://nearly.social/skill.md'
   });
 });
 

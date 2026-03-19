@@ -12,65 +12,72 @@ let pool = null;
 const memoryStore = {
   agents: [],
   follows: [],
+  used_nonces: [],
 
-  /**
-   * Simulate a SQL query against the in-memory store.
-   * Supports agents + follows tables — enough for registration and social graph.
-   */
   query(text, params) {
     const normalized = text.replace(/\s+/g, ' ').trim().toUpperCase();
 
-    // --- Transaction control (no-ops in memory) ---
     if (normalized === 'BEGIN' || normalized === 'COMMIT' || normalized === 'ROLLBACK') {
       return { rows: [], rowCount: 0 };
     }
 
-    // --- AGENTS table ---
+    if (normalized.startsWith('INSERT INTO AGENTS'))   return this._handleAgentInsert(text, params);
+    if (normalized.includes('UPDATE AGENTS'))           return this._handleAgentUpdate(normalized, text, params);
+    if (normalized.includes('FROM AGENTS'))             return this._handleAgentSelect(normalized, params);
+    if (normalized.startsWith('INSERT INTO FOLLOWS'))   return this._handleFollowInsert(params);
+    if (normalized.includes('DELETE FROM FOLLOWS'))     return this._handleFollowDelete(normalized, params);
+    if (normalized.includes('FROM FOLLOWS'))            return this._handleFollowSelect(normalized, params);
+    if (normalized.includes('FROM USED_NONCES') || normalized.startsWith('INSERT INTO USED_NONCES') || normalized.includes('DELETE FROM USED_NONCES'))
+      return this._handleNonce(normalized, params);
 
-    // INSERT INTO agents ... RETURNING ...
-    if (normalized.startsWith('INSERT INTO AGENTS')) {
-      const id = crypto.randomUUID();
-      const agent = { id, follower_count: 0, following_count: 0, karma: 0 };
-      const colMatch = text.match(/\(([^)]+)\)\s*VALUES/i);
-      if (colMatch) {
-        const cols = colMatch[1].split(',').map(c => c.trim());
-        cols.forEach((col, i) => { agent[col] = params[i]; });
+    console.warn('In-memory store: unrecognized query pattern:', text.substring(0, 80));
+    return { rows: [], rowCount: 0 };
+  },
+
+  _handleAgentInsert(text, params) {
+    const id = crypto.randomUUID();
+    const agent = { id, follower_count: 0, following_count: 0 };
+    const colMatch = text.match(/\(([^)]+)\)\s*VALUES/i);
+    if (colMatch) {
+      const cols = colMatch[1].split(',').map(c => c.trim());
+      cols.forEach((col, i) => { agent[col] = params[i]; });
+    }
+    agent.created_at = new Date().toISOString();
+    agent.last_active = agent.created_at;
+    this.agents.push(agent);
+    return { rows: [agent], rowCount: 1 };
+  },
+
+  _handleAgentUpdate(normalized, text, params) {
+    if (!normalized.includes('WHERE ID =')) return { rows: [], rowCount: 0 };
+    const whereMatch = text.match(/WHERE\s+id\s*=\s*\$(\d+)/i);
+    const idParamIndex = whereMatch ? parseInt(whereMatch[1], 10) - 1 : params.length - 1;
+    const id = params[idParamIndex];
+    const agent = this.agents.find(a => a.id === id);
+    if (!agent) return { rows: [], rowCount: 0 };
+
+    if (normalized.includes('FOLLOWER_COUNT = FOLLOWER_COUNT +'))       agent.follower_count = (agent.follower_count || 0) + 1;
+    else if (normalized.includes('FOLLOWER_COUNT = FOLLOWER_COUNT -'))  agent.follower_count = Math.max(0, (agent.follower_count || 0) - 1);
+    else if (normalized.includes('FOLLOWING_COUNT = FOLLOWING_COUNT +')) agent.following_count = (agent.following_count || 0) + 1;
+    else if (normalized.includes('FOLLOWING_COUNT = FOLLOWING_COUNT -')) agent.following_count = Math.max(0, (agent.following_count || 0) - 1);
+    else {
+      // Generic SET field = $N support (e.g. api_key_hash, last_active, description)
+      const setMatches = [...text.matchAll(/(\w+)\s*=\s*\$(\d+)/gi)];
+      for (const m of setMatches) {
+        const col = m[1].toLowerCase();
+        if (col === 'id') continue; // skip WHERE id = $N
+        const paramIdx = parseInt(m[2], 10) - 1;
+        agent[col] = params[paramIdx];
       }
-      agent.created_at = new Date().toISOString();
-      agent.last_active = agent.created_at;
-      this.agents.push(agent);
-      return { rows: [agent], rowCount: 1 };
     }
 
-    // UPDATE agents SET follower_count, following_count, or karma
-    if (normalized.includes('UPDATE AGENTS') && normalized.includes('WHERE ID =')) {
-      // Find the $N placeholder for id in the WHERE clause to determine which param is the id
-      const whereMatch = text.match(/WHERE\s+id\s*=\s*\$(\d+)/i);
-      const idParamIndex = whereMatch ? parseInt(whereMatch[1], 10) - 1 : params.length - 1;
-      const id = params[idParamIndex];
-      const agent = this.agents.find(a => a.id === id);
-      if (agent) {
-        if (normalized.includes('FOLLOWER_COUNT = FOLLOWER_COUNT +')) {
-          agent.follower_count = (agent.follower_count || 0) + 1;
-        } else if (normalized.includes('FOLLOWER_COUNT = FOLLOWER_COUNT -')) {
-          agent.follower_count = Math.max(0, (agent.follower_count || 0) - 1);
-        } else if (normalized.includes('FOLLOWING_COUNT = FOLLOWING_COUNT +')) {
-          agent.following_count = (agent.following_count || 0) + 1;
-        } else if (normalized.includes('FOLLOWING_COUNT = FOLLOWING_COUNT -')) {
-          agent.following_count = Math.max(0, (agent.following_count || 0) - 1);
-        } else if (normalized.includes('KARMA = KARMA +')) {
-          // karma + $2 WHERE id = $1 → delta is the other param
-          const deltaIndex = idParamIndex === 0 ? 1 : 0;
-          agent.karma = (agent.karma || 0) + params[deltaIndex];
-        }
-        agent.updated_at = new Date().toISOString();
-        return { rows: [agent], rowCount: 1 };
-      }
-      return { rows: [], rowCount: 0 };
-    }
+    agent.updated_at = new Date().toISOString();
+    return { rows: [agent], rowCount: 1 };
+  },
 
-    // SELECT verified agents (near_account_id IS NOT NULL)
-    if (normalized.includes('FROM AGENTS') && normalized.includes('NEAR_ACCOUNT_ID IS NOT NULL')) {
+  _handleAgentSelect(normalized, params) {
+    // Verified agents
+    if (normalized.includes('NEAR_ACCOUNT_ID IS NOT NULL')) {
       const verified = this.agents.filter(a => a.near_account_id != null);
       verified.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
       const limit = parseInt(params[0], 10) || 50;
@@ -79,14 +86,11 @@ const memoryStore = {
       return { rows: sliced, rowCount: sliced.length };
     }
 
-    // SELECT all agents (listing) — ORDER BY
-    // Guard: !WHERE ensures this only matches unfiltered listings.
-    // Filtered queries (e.g. WHERE status = ...) need their own branch.
-    if (normalized.includes('FROM AGENTS') && normalized.includes('ORDER BY') && !normalized.includes('WHERE')) {
+    // Unfiltered listing with ORDER BY
+    if (normalized.includes('ORDER BY') && !normalized.includes('WHERE')) {
       let sorted = [...this.agents];
-      if (normalized.includes('ORDER BY KARMA')) sorted.sort((a, b) => (b.karma || 0) - (a.karma || 0));
-      else if (normalized.includes('ORDER BY FOLLOWER_COUNT')) sorted.sort((a, b) => (b.follower_count || 0) - (a.follower_count || 0));
-      else if (normalized.includes('ORDER BY CREATED_AT')) sorted.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+      if (normalized.includes('ORDER BY FOLLOWER_COUNT'))   sorted.sort((a, b) => (b.follower_count || 0) - (a.follower_count || 0));
+      else if (normalized.includes('ORDER BY CREATED_AT'))  sorted.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
       else if (normalized.includes('ORDER BY LAST_ACTIVE')) sorted.sort((a, b) => new Date(b.last_active || 0) - new Date(a.last_active || 0));
       const limit = parseInt(params[0], 10) || 25;
       const offset = parseInt(params[1], 10) || 0;
@@ -94,53 +98,55 @@ const memoryStore = {
       return { rows: sliced, rowCount: sliced.length };
     }
 
-    // SELECT ... FROM agents WHERE id = $1
-    if (normalized.includes('FROM AGENTS') && normalized.includes('WHERE ID =')) {
-      const found = this.agents.find(a => a.id === params[0]);
-      return { rows: found ? [found] : [], rowCount: found ? 1 : 0 };
+    // Popular agents fallback (for suggested follows)
+    if (normalized.includes('WHERE ID !=') && normalized.includes('ORDER BY FOLLOWER_COUNT')) {
+      const agentId = params[0];
+      const limit = parseInt(params[1], 10) || 10;
+      const myFollowedIds = new Set(this.follows.filter(f => f.follower_id === agentId).map(f => f.followed_id));
+      const candidates = this.agents
+        .filter(a => a.id !== agentId && !myFollowedIds.has(a.id))
+        .sort((a, b) => (b.follower_count || 0) - (a.follower_count || 0))
+        .slice(0, limit)
+        .map(a => ({ ...a, mutual_count: 0 }));
+      return { rows: candidates, rowCount: candidates.length };
     }
 
-    // SELECT ... FROM agents WHERE name = $1
-    if (normalized.includes('FROM AGENTS') && normalized.includes('WHERE NAME')) {
-      const found = this.agents.find(a => a.name === params[0]);
-      return { rows: found ? [found] : [], rowCount: found ? 1 : 0 };
+    // Lookup by specific field
+    if (normalized.includes('WHERE ID ='))               return this._findAgent(a => a.id === params[0]);
+    if (normalized.includes('WHERE HANDLE'))              return this._findAgent(a => a.handle === params[0]);
+    if (normalized.includes('WHERE NEAR_ACCOUNT_ID'))     return this._findAgent(a => a.near_account_id === params[0]);
+    if (normalized.includes('WHERE API_KEY_HASH'))        return this._findAgent(a => a.api_key_hash === params[0]);
+
+    return { rows: [], rowCount: 0 };
+  },
+
+  _findAgent(predicate) {
+    const found = this.agents.find(predicate);
+    return { rows: found ? [found] : [], rowCount: found ? 1 : 0 };
+  },
+
+  _handleFollowInsert(params) {
+    const existing = this.follows.find(f => f.follower_id === params[0] && f.followed_id === params[1]);
+    if (existing) return { rows: [], rowCount: 0 };
+    const id = crypto.randomUUID();
+    const follow = { id, follower_id: params[0], followed_id: params[1], created_at: new Date().toISOString() };
+    this.follows.push(follow);
+    return { rows: [follow], rowCount: 1 };
+  },
+
+  _handleFollowDelete(normalized, params) {
+    if (!normalized.includes('FOLLOWER_ID') || !normalized.includes('FOLLOWED_ID')) return { rows: [], rowCount: 0 };
+    const idx = this.follows.findIndex(f => f.follower_id === params[0] && f.followed_id === params[1]);
+    if (idx >= 0) {
+      const removed = this.follows.splice(idx, 1)[0];
+      return { rows: [removed], rowCount: 1 };
     }
+    return { rows: [], rowCount: 0 };
+  },
 
-    // SELECT ... FROM agents WHERE near_account_id = $1
-    if (normalized.includes('FROM AGENTS') && normalized.includes('WHERE NEAR_ACCOUNT_ID')) {
-      const found = this.agents.find(a => a.near_account_id === params[0]);
-      return { rows: found ? [found] : [], rowCount: found ? 1 : 0 };
-    }
-
-    // SELECT ... FROM agents WHERE api_key_hash = $1
-    if (normalized.includes('FROM AGENTS') && normalized.includes('WHERE API_KEY_HASH')) {
-      const found = this.agents.find(a => a.api_key_hash === params[0]);
-      return { rows: found ? [found] : [], rowCount: found ? 1 : 0 };
-    }
-
-    // --- FOLLOWS table ---
-
-    // INSERT INTO follows
-    if (normalized.startsWith('INSERT INTO FOLLOWS')) {
-      const id = crypto.randomUUID();
-      const follow = { id, follower_id: params[0], followed_id: params[1], created_at: new Date().toISOString() };
-      this.follows.push(follow);
-      return { rows: [follow], rowCount: 1 };
-    }
-
-    // DELETE FROM follows WHERE follower_id AND followed_id
-    if (normalized.includes('DELETE FROM FOLLOWS') && normalized.includes('FOLLOWER_ID') && normalized.includes('FOLLOWED_ID')) {
-      const idx = this.follows.findIndex(f => f.follower_id === params[0] && f.followed_id === params[1]);
-      if (idx >= 0) {
-        const removed = this.follows.splice(idx, 1)[0];
-        return { rows: [removed], rowCount: 1 };
-      }
-      return { rows: [], rowCount: 0 };
-    }
-
-    // SELECT ... FROM follows WHERE follower_id AND followed_id (isFollowing check)
-    if (normalized.includes('FROM FOLLOWS') && normalized.includes('FOLLOWER_ID') && normalized.includes('FOLLOWED_ID') && !normalized.includes('JOIN')) {
-      // batchIsFollowing: WHERE follower_id = $1 AND followed_id = ANY($2)
+  _handleFollowSelect(normalized, params) {
+    // isFollowing check (no JOIN)
+    if (normalized.includes('FOLLOWER_ID') && normalized.includes('FOLLOWED_ID') && !normalized.includes('JOIN')) {
       if (normalized.includes('ANY')) {
         const ids = Array.isArray(params[1]) ? params[1] : [];
         const found = this.follows.filter(f => f.follower_id === params[0] && ids.includes(f.followed_id));
@@ -150,7 +156,7 @@ const memoryStore = {
       return { rows: found ? [found] : [], rowCount: found ? 1 : 0 };
     }
 
-    // SUGGESTED FOLLOWS: friends-of-friends query (must be checked before getFollowers/getFollowing)
+    // Friends-of-friends (suggested follows)
     if (normalized.includes('FROM FOLLOWS F1') || (normalized.includes('FROM FOLLOWS') && normalized.includes('JOIN FOLLOWS'))) {
       const agentId = params[0];
       const limit = parseInt(params[1], 10) || 10;
@@ -173,9 +179,8 @@ const memoryStore = {
       return { rows, rowCount: rows.length };
     }
 
-    // GET FOLLOWERS / FOLLOWING: JOIN follows + agents
-    // Distinguish by WHERE clause: "WHERE F.FOLLOWED_ID" = getFollowers, "WHERE F.FOLLOWER_ID" = getFollowing
-    if (normalized.includes('FROM FOLLOWS') && normalized.includes('JOIN AGENTS')) {
+    // Followers/following with JOIN
+    if (normalized.includes('JOIN AGENTS')) {
       const agentId = params[0];
       const limit = parseInt(params[1], 10) || 25;
       const offset = parseInt(params[2], 10) || 0;
@@ -192,22 +197,26 @@ const memoryStore = {
       return { rows, rowCount: rows.length };
     }
 
-    // Fallback: popular agents (for suggested follows fallback query)
-    if (normalized.includes('FROM AGENTS') && normalized.includes('WHERE ID !=') && normalized.includes('ORDER BY FOLLOWER_COUNT')) {
-      const agentId = params[0];
-      const limit = parseInt(params[1], 10) || 10;
-      const myFollowedIds = new Set(this.follows.filter(f => f.follower_id === agentId).map(f => f.followed_id));
-      const candidates = this.agents
-        .filter(a => a.id !== agentId && !myFollowedIds.has(a.id))
-        .sort((a, b) => (b.follower_count || 0) - (a.follower_count || 0))
-        .slice(0, limit)
-        .map(a => ({ ...a, mutual_count: 0 }));
-      return { rows: candidates, rowCount: candidates.length };
-    }
-
-    // Default: return empty
     return { rows: [], rowCount: 0 };
-  }
+  },
+
+  _handleNonce(normalized, params) {
+    if (normalized.includes('FROM USED_NONCES') && normalized.includes('WHERE NONCE')) {
+      const found = this.used_nonces.find(n => n.nonce === params[0]);
+      return { rows: found ? [found] : [], rowCount: found ? 1 : 0 };
+    }
+    if (normalized.startsWith('INSERT INTO USED_NONCES')) {
+      const existing = this.used_nonces.find(n => n.nonce === params[0]);
+      if (!existing) this.used_nonces.push({ nonce: params[0], used_at: new Date().toISOString() });
+      return { rows: [], rowCount: existing ? 0 : 1 };
+    }
+    if (normalized.includes('DELETE FROM USED_NONCES')) {
+      const cutoff = Date.now() - 10 * 60 * 1000;
+      this.used_nonces = this.used_nonces.filter(n => new Date(n.used_at).getTime() > cutoff);
+      return { rows: [], rowCount: 0 };
+    }
+    return { rows: [], rowCount: 0 };
+  },
 };
 
 /**

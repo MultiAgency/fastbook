@@ -2,13 +2,9 @@
 
 import * as TabsPrimitive from '@radix-ui/react-tabs';
 import {
-  AlertTriangle,
-  Bell,
   LogOut,
   Palette,
   Save,
-  Shield,
-  Trash2,
   User,
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
@@ -51,9 +47,7 @@ export default function SettingsPage() {
 
   const tabs = [
     { id: 'profile', label: 'Profile', icon: User },
-    { id: 'notifications', label: 'Notifications', icon: Bell },
-    { id: 'appearance', label: 'Appearance', icon: Palette },
-    { id: 'account', label: 'Account', icon: Shield },
+    { id: 'account', label: 'Account', icon: Palette },
   ];
 
   return (
@@ -62,7 +56,6 @@ export default function SettingsPage() {
         <h1 className="text-2xl font-bold mb-6">Settings</h1>
 
         <div className="flex flex-col lg:flex-row gap-6">
-          {/* Sidebar */}
           <TabsPrimitive.Root
             value={activeTab}
             onValueChange={setActiveTab}
@@ -89,22 +82,13 @@ export default function SettingsPage() {
               })}
             </TabsPrimitive.List>
 
-            {/* Content */}
             <div className="flex-1">
               <TabsPrimitive.Content value="profile">
                 <ProfileSettings agent={currentAgent} />
               </TabsPrimitive.Content>
 
-              <TabsPrimitive.Content value="notifications">
-                <NotificationSettings />
-              </TabsPrimitive.Content>
-
-              <TabsPrimitive.Content value="appearance">
-                <AppearanceSettings theme={theme} setTheme={setTheme} />
-              </TabsPrimitive.Content>
-
               <TabsPrimitive.Content value="account">
-                <AccountSettings agent={currentAgent} onLogout={logout} />
+                <AccountSettings agent={currentAgent} onLogout={logout} theme={theme} setTheme={setTheme} />
               </TabsPrimitive.Content>
             </div>
           </TabsPrimitive.Root>
@@ -119,9 +103,11 @@ function ProfileSettings({ agent }: { agent: Agent }) {
   const [description, setDescription] = useState(agent?.description || '');
   const [isSaving, setIsSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState('');
 
   const handleSave = async () => {
     setIsSaving(true);
+    setSaveError('');
     try {
       await api.updateMe({
         displayName: displayName || undefined,
@@ -130,7 +116,7 @@ function ProfileSettings({ agent }: { agent: Agent }) {
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (err) {
-      console.error('Failed to save:', err);
+      setSaveError((err as Error).message || 'Failed to save');
     } finally {
       setIsSaving(false);
     }
@@ -145,31 +131,24 @@ function ProfileSettings({ agent }: { agent: Agent }) {
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
-        {/* Avatar */}
         <div className="flex items-center gap-4">
           <Avatar className="h-20 w-20">
             <AvatarImage src={agent?.avatarUrl} />
             <AvatarFallback className="text-2xl">
-              {agent?.name ? getInitials(agent.name) : '?'}
+              {agent?.handle ? getInitials(agent.handle) : '?'}
             </AvatarFallback>
           </Avatar>
-          <div>
-            <p className="font-medium">{agent?.name}</p>
-            <p className="text-sm text-muted-foreground">
-              Avatar changes are not yet supported
-            </p>
-          </div>
+          <p className="font-medium">{agent?.handle}</p>
         </div>
 
         <Separator />
 
-        {/* Display Name */}
         <div className="space-y-2">
           <label className="text-sm font-medium">Display Name</label>
           <Input
             value={displayName}
             onChange={(e) => setDisplayName(e.target.value)}
-            placeholder={agent?.name}
+            placeholder={agent?.handle}
             maxLength={50}
           />
           <p className="text-xs text-muted-foreground">
@@ -177,7 +156,6 @@ function ProfileSettings({ agent }: { agent: Agent }) {
           </p>
         </div>
 
-        {/* Description */}
         <div className="space-y-2">
           <label className="text-sm font-medium">Bio</label>
           <Textarea
@@ -196,99 +174,30 @@ function ProfileSettings({ agent }: { agent: Agent }) {
           <Save className="h-4 w-4" />
           {saved ? 'Saved!' : isSaving ? 'Saving...' : 'Save Changes'}
         </Button>
+        {saveError && <p className="text-sm text-destructive">{saveError}</p>}
       </CardContent>
     </Card>
   );
 }
 
-function NotificationSettings() {
-  const [emailNotifs, setEmailNotifs] = useState(true);
-  const [replyNotifs, setReplyNotifs] = useState(true);
-  const [mentionNotifs, setMentionNotifs] = useState(true);
-  const [upvoteNotifs, setUpvoteNotifs] = useState(false);
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Notifications</CardTitle>
-        <CardDescription>
-          Configure how you receive notifications
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <NotificationToggle
-          label="Email notifications"
-          description="Receive notifications via email"
-          checked={emailNotifs}
-          onChange={setEmailNotifs}
-        />
-        <Separator />
-        <NotificationToggle
-          label="Replies"
-          description="When someone replies to your posts or comments"
-          checked={replyNotifs}
-          onChange={setReplyNotifs}
-        />
-        <NotificationToggle
-          label="Mentions"
-          description="When someone mentions you"
-          checked={mentionNotifs}
-          onChange={setMentionNotifs}
-        />
-        <NotificationToggle
-          label="Upvotes"
-          description="When someone upvotes your content"
-          checked={upvoteNotifs}
-          onChange={setUpvoteNotifs}
-        />
-      </CardContent>
-    </Card>
-  );
-}
-
-function NotificationToggle({
-  label,
-  description,
-  checked,
-  onChange,
-}: {
-  label: string;
-  description: string;
-  checked: boolean;
-  onChange: (v: boolean) => void;
-}) {
-  return (
-    <div className="flex items-center justify-between">
-      <div>
-        <p className="font-medium text-sm">{label}</p>
-        <p className="text-xs text-muted-foreground">{description}</p>
-      </div>
-      <button
-        type="button"
-        onClick={() => onChange(!checked)}
-        className={cn(
-          'w-11 h-6 rounded-full transition-colors',
-          checked ? 'bg-primary' : 'bg-muted',
-        )}
-      >
-        <div
-          className={cn(
-            'h-5 w-5 rounded-full bg-white shadow transition-transform',
-            checked ? 'translate-x-5' : 'translate-x-0.5',
-          )}
-        />
-      </button>
-    </div>
-  );
-}
-
-function AppearanceSettings({
+function AccountSettings({
+  agent,
+  onLogout,
   theme,
   setTheme,
 }: {
+  agent: Agent;
+  onLogout: () => void;
   theme?: string;
   setTheme: (t: string) => void;
 }) {
+  const router = useRouter();
+
+  const handleLogout = () => {
+    onLogout();
+    router.push('/');
+  };
+
   const themes = [
     { id: 'light', label: 'Light', icon: '☀️' },
     { id: 'dark', label: 'Dark', icon: '🌙' },
@@ -298,10 +207,36 @@ function AppearanceSettings({
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Appearance</CardTitle>
-        <CardDescription>Customize how moltbook looks</CardDescription>
+        <CardTitle>Account</CardTitle>
+        <CardDescription>Manage your account settings</CardDescription>
       </CardHeader>
-      <CardContent className="space-y-4">
+      <CardContent className="space-y-6">
+        <div className="space-y-2">
+          <label className="text-sm font-medium">Username</label>
+          <Input value={agent?.handle || ''} disabled />
+          <p className="text-xs text-muted-foreground">
+            Usernames cannot be changed
+          </p>
+        </div>
+
+        <div className="space-y-2">
+          <label className="text-sm font-medium">Account Status</label>
+          <div className="flex items-center gap-2">
+            <span
+              className={cn(
+                'h-2 w-2 rounded-full',
+                agent?.nearAccountId ? 'bg-green-500' : 'bg-yellow-500',
+              )}
+            />
+            <span className="text-sm capitalize">
+              {agent?.nearAccountId ? 'Verified' : 'Unknown'}
+            </span>
+          </div>
+        </div>
+
+        <Separator />
+
+        {/* Theme */}
         <div className="space-y-2">
           <label className="text-sm font-medium">Theme</label>
           <div className="grid grid-cols-3 gap-2">
@@ -323,81 +258,14 @@ function AppearanceSettings({
             ))}
           </div>
         </div>
-      </CardContent>
-    </Card>
-  );
-}
-
-function AccountSettings({
-  agent,
-  onLogout,
-}: {
-  agent: Agent;
-  onLogout: () => void;
-}) {
-  const router = useRouter();
-
-  const handleLogout = () => {
-    onLogout();
-    router.push('/');
-  };
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Account</CardTitle>
-        <CardDescription>Manage your account settings</CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-6">
-        {/* Account info */}
-        <div className="space-y-2">
-          <label className="text-sm font-medium">Username</label>
-          <Input value={agent?.name || ''} disabled />
-          <p className="text-xs text-muted-foreground">
-            Usernames cannot be changed
-          </p>
-        </div>
-
-        <div className="space-y-2">
-          <label className="text-sm font-medium">Account Status</label>
-          <div className="flex items-center gap-2">
-            <span
-              className={cn(
-                'h-2 w-2 rounded-full',
-                agent?.status === 'active' ? 'bg-green-500' : 'bg-yellow-500',
-              )}
-            />
-            <span className="text-sm capitalize">
-              {agent?.status || 'Unknown'}
-            </span>
-          </div>
-        </div>
 
         <Separator />
 
-        {/* Logout */}
         <div className="space-y-2">
           <label className="text-sm font-medium">Session</label>
           <Button variant="outline" onClick={handleLogout} className="gap-2">
             <LogOut className="h-4 w-4" />
             Sign out
-          </Button>
-        </div>
-
-        <Separator />
-
-        {/* Danger zone */}
-        <div className="space-y-2">
-          <label className="text-sm font-medium text-destructive flex items-center gap-2">
-            <AlertTriangle className="h-4 w-4" />
-            Danger Zone
-          </label>
-          <p className="text-xs text-muted-foreground">
-            Once you delete your account, there is no going back.
-          </p>
-          <Button variant="destructive" className="gap-2" disabled>
-            <Trash2 className="h-4 w-4" />
-            Delete Account
           </Button>
         </div>
       </CardContent>

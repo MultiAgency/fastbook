@@ -12,78 +12,7 @@ const { BadRequestError, ConflictError } = require('../src/utils/errors');
 
 const { describe, test, assert, assertEqual, assertThrows, runTests } = require('./helpers');
 
-// --- Test Helpers ---
-
-/**
- * Create a valid NEP-413 signed claim using a fresh ed25519 keypair.
- */
-function createTestClaim(overrides = {}) {
-  const keypair = nacl.sign.keyPair();
-
-  const message = overrides.message || JSON.stringify({
-    action: 'register',
-    domain: 'market.near.ai',
-    version: 1,
-    timestamp: overrides.timestamp || Date.now(),
-  });
-
-  const recipient = 'market.near.ai';
-  const nonce = overrides.nonce || crypto.randomBytes(32);
-  const nonceBase64 = Buffer.from(nonce).toString('base64');
-
-  // Construct NEP-413 Borsh payload
-  const NEP413_TAG = 2147484061;
-  const messageBytes = Buffer.from(message, 'utf-8');
-  const recipientBytes = Buffer.from(recipient, 'utf-8');
-
-  const payload = Buffer.concat([
-    writeU32LE(NEP413_TAG),
-    writeU32LE(messageBytes.length),
-    messageBytes,
-    Buffer.from(nonce),
-    writeU32LE(recipientBytes.length),
-    recipientBytes,
-    Buffer.from([0]), // callbackUrl = None
-  ]);
-
-  const hash = crypto.createHash('sha256').update(payload).digest();
-  const signature = nacl.sign.detached(hash, keypair.secretKey);
-
-  const publicKeyBase58 = 'ed25519:' + base58Encode(Buffer.from(keypair.publicKey));
-  const signatureBase58 = 'ed25519:' + base58Encode(Buffer.from(signature));
-
-  return {
-    claim: {
-      near_account_id: overrides.near_account_id || 'test-account.near',
-      public_key: overrides.public_key || publicKeyBase58,
-      signature: overrides.signature || signatureBase58,
-      nonce: nonceBase64,
-      message,
-    },
-    keypair,
-  };
-}
-
-function writeU32LE(value) {
-  const buf = Buffer.alloc(4);
-  buf.writeUInt32LE(value);
-  return buf;
-}
-
-function base58Encode(buffer) {
-  const ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
-  let num = BigInt('0x' + buffer.toString('hex'));
-  let str = '';
-  while (num > 0n) {
-    str = ALPHABET[Number(num % 58n)] + str;
-    num = num / 58n;
-  }
-  for (const byte of buffer) {
-    if (byte === 0) str = '1' + str;
-    else break;
-  }
-  return str || '1';
-}
+const { createTestClaim, writeU32LE, base58Encode } = require('./crypto-helpers');
 
 // --- Tests ---
 
@@ -91,12 +20,28 @@ describe('Message Format Validation', () => {
   test('accepts valid message', () => {
     const message = JSON.stringify({
       action: 'register',
-      domain: 'market.near.ai',
+      domain: 'nearly.social',
+      account_id: 'test.near',
       version: 1,
       timestamp: Date.now(),
     });
-    const result = NearVerificationService.verifyMessageFormat(message);
+    const result = NearVerificationService.verifyMessageFormat(message, 'test.near');
     assertEqual(result.action, 'register');
+  });
+
+  test('rejects mismatched account_id', async () => {
+    const message = JSON.stringify({
+      action: 'register',
+      domain: 'nearly.social',
+      account_id: 'other.near',
+      version: 1,
+      timestamp: Date.now(),
+    });
+    await assertThrows(
+      () => NearVerificationService.verifyMessageFormat(message, 'test.near'),
+      'INVALID_MESSAGE_FORMAT',
+      'Mismatched account_id'
+    );
   });
 
   test('rejects non-JSON message', async () => {
@@ -110,7 +55,7 @@ describe('Message Format Validation', () => {
   test('rejects wrong action', async () => {
     const message = JSON.stringify({
       action: 'login',
-      domain: 'market.near.ai',
+      domain: 'nearly.social',
       version: 1,
       timestamp: Date.now(),
     });

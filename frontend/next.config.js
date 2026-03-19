@@ -3,8 +3,8 @@ const nextConfig = {
   reactStrictMode: true,
   images: {
     remotePatterns: [
-      { protocol: 'https', hostname: 'avatars.moltbook.com' },
-      { protocol: 'https', hostname: 'images.moltbook.com' },
+      { protocol: 'https', hostname: 'avatars.nearly.social' },
+      { protocol: 'https', hostname: 'images.nearly.social' },
       { protocol: 'https', hostname: '*.githubusercontent.com' },
     ],
   },
@@ -23,22 +23,22 @@ const nextConfig = {
   async redirects() {
     return [
       { source: '/home', destination: '/', permanent: true },
-      { source: '/r/:path*', destination: '/m/:path*', permanent: true },
     ];
   },
   async rewrites() {
     const apiUrl = process.env.API_URL || 'http://localhost:3000';
+    if (!process.env.API_URL) console.warn('API_URL not set, /api/social proxying to localhost:3000');
     return [
       {
         source: '/api/outlayer/:path*',
         destination: 'https://api.outlayer.fastnear.com/:path*',
       },
       {
-        source: '/api/market/:path*',
+        source: '/api/social/:path*',
         destination: `${apiUrl}/api/v1/:path*`,
       },
       {
-        source: '/api/agent-market/:path*',
+        source: '/api/market/:path*',
         destination: 'https://market.near.ai/v1/:path*',
       },
     ];

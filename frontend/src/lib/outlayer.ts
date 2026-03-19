@@ -68,8 +68,7 @@ export async function registerOutlayer(): Promise<{
     return { data, mock: false, request };
   } catch (err) {
     if (err instanceof TypeError) {
-      // Network/CORS error — fall back to mock
-      return { data: MOCK_REGISTER, mock: true, request };
+      throw new Error('OutLayer service unreachable. Check your connection and try again.');
     }
     throw err;
   }
@@ -115,7 +114,7 @@ export async function signMessage(
     return { data, mock: false, request };
   } catch (err) {
     if (err instanceof TypeError) {
-      return { data: getMockSign(), mock: true, request };
+      throw new Error('OutLayer service unreachable. Check your connection and try again.');
     }
     throw err;
   }

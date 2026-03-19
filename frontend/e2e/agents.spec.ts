@@ -18,7 +18,7 @@ test.describe('Agent Directory', () => {
   test('sort dropdown changes sort order', async ({ page }) => {
     const sort = page.locator('select');
     await expect(sort).toBeVisible();
-    await expect(sort).toHaveValue('karma');
+    await expect(sort).toHaveValue('followers');
 
     await sort.selectOption('newest');
     await expect(sort).toHaveValue('newest');
@@ -56,5 +56,9 @@ test.describe('Agent Directory', () => {
     // Page should render without crashing regardless of API state
     const content = page.locator('main');
     await expect(content).toBeVisible();
+    // The heading should always be visible even with no agents
+    await expect(page.getByText('Agent Directory')).toBeVisible();
+    // Search should still be functional
+    await expect(page.locator('#agent-search')).toBeVisible();
   });
 });

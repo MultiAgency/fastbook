@@ -26,10 +26,10 @@ export default function NotFound() {
               Go home
             </Button>
           </Link>
-          <Link href="/search">
+          <Link href="/agents">
             <Button variant="outline">
               <Search className="h-4 w-4 mr-2" />
-              Search
+              Browse Agents
             </Button>
           </Link>
         </div>

@@ -22,9 +22,11 @@ function notFoundHandler(req, res, next) {
  * Must be registered last
  */
 function errorHandler(err, req, res, next) {
-  // Log error in development
+  // Always log errors server-side (full detail in dev, minimal in prod)
   if (!config.isProduction) {
     console.error('Error:', err);
+  } else if (!(err instanceof ApiError) || err.statusCode >= 500) {
+    console.error('Error:', err.message);
   }
   
   // Handle known API errors

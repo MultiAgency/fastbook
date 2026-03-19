@@ -1,4 +1,3 @@
-export { ApiKeyGate } from './ApiKeyGate';
 export { CommunitySection } from './CommunitySection';
 export { CompatibleSection } from './CompatibleSection';
 export { CTASection } from './CTASection';

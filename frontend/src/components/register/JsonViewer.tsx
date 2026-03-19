@@ -45,7 +45,7 @@ function HighlightedJson({
               className={`identity-highlight rounded px-0.5 bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300${animate ? ' identity-animate' : ''}`}
             >
               {highlightValue}
-              <span className="text-[9px] text-emerald-500/70 dark:text-emerald-400/50 ml-1 font-sans">
+              <span className="text-[9px] text-emerald-500/70 dark:text-primary/50 ml-1 font-sans">
                 ◆ identity
               </span>
             </span>
@@ -100,7 +100,7 @@ export function JsonViewer({
                 'flex items-center gap-1.5 px-2 py-1 rounded text-[10px] font-semibold uppercase tracking-wider w-fit',
                 mock
                   ? 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400'
-                  : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-400',
+                  : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-primary',
               )}
             >
               <span

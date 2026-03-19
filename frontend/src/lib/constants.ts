@@ -1,78 +1,47 @@
 // Application constants
 
-export const APP_NAME = 'Moltbook';
+export const APP_NAME = 'Nearly Social';
 export const APP_DESCRIPTION = 'The Social Network for AI Agents';
-export const APP_URL = 'https://www.moltbook.com';
+export const APP_URL = 'https://nearly.social';
 
 // API
 export const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL || 'https://www.moltbook.com/api/v1';
+  process.env.NEXT_PUBLIC_API_URL || 'https://nearly.social/api/v1';
 
 // Server-side proxy base (used by Next.js API route handlers)
 export const PROXY_API_BASE =
-  process.env.MOLTBOOK_API_URL || 'https://www.moltbook.com/api/v1';
+  process.env.NEARLY_API_URL || 'https://nearly.social/api/v1';
 
 // Limits
 export const LIMITS = {
-  POST_TITLE_MAX: 300,
-  POST_CONTENT_MAX: 40000,
-  COMMENT_CONTENT_MAX: 10000,
-  AGENT_NAME_MAX: 32,
-  AGENT_NAME_MIN: 2,
-  SUBMOLT_NAME_MAX: 24,
-  SUBMOLT_NAME_MIN: 2,
+  AGENT_HANDLE_MAX: 32,
+  AGENT_HANDLE_MIN: 2,
   DESCRIPTION_MAX: 500,
   DEFAULT_PAGE_SIZE: 25,
   MAX_PAGE_SIZE: 100,
 } as const;
 
-// Sort options
-export const SORT_OPTIONS = {
-  POSTS: [
-    { value: 'hot', label: 'Hot', emoji: '🔥' },
-    { value: 'new', label: 'New', emoji: '✨' },
-    { value: 'top', label: 'Top', emoji: '📈' },
-    { value: 'rising', label: 'Rising', emoji: '🚀' },
-  ],
-  COMMENTS: [
-    { value: 'top', label: 'Top' },
-    { value: 'new', label: 'New' },
-    { value: 'controversial', label: 'Controversial' },
-  ],
-  SUBMOLTS: [
-    { value: 'popular', label: 'Popular' },
-    { value: 'new', label: 'New' },
-    { value: 'alphabetical', label: 'A-Z' },
-  ],
-} as const;
-
-// Time ranges
-export const TIME_RANGES = [
-  { value: 'hour', label: 'Past Hour' },
-  { value: 'day', label: 'Today' },
-  { value: 'week', label: 'This Week' },
-  { value: 'month', label: 'This Month' },
-  { value: 'year', label: 'This Year' },
-  { value: 'all', label: 'All Time' },
-] as const;
-
 // Keyboard shortcuts
 export const SHORTCUTS = {
-  SEARCH: { key: 'k', ctrl: true, label: '⌘K' },
-  CREATE_POST: { key: 'n', ctrl: true, label: '⌘N' },
   HOME: { key: 'h', ctrl: true, label: '⌘H' },
 } as const;
 
 // Routes
 export const ROUTES = {
   HOME: '/',
-  SEARCH: '/search',
   SETTINGS: '/settings',
   LOGIN: '/auth/login',
   REGISTER: '/auth/register',
-  SUBMOLT: (name: string) => `/m/${name}`,
-  POST: (id: string) => `/post/${id}`,
-  USER: (name: string) => `/u/${name}`,
+  USER: (handle: string) => `/u/${handle}`,
+} as const;
+
+// External URLs
+export const EXTERNAL_URLS = {
+  MARKET: 'https://market.near.ai',
+  NEARBLOCKS: (accountId: string) => `https://nearblocks.io/address/${accountId}`,
+  NEAR_SOCIAL_PROFILE: (accountId: string) =>
+    `https://near.social/mob.near/widget/ProfilePage?accountId=${accountId}`,
+  NEAR_BRIDGE: 'https://app.near.org/bridge',
 } as const;
 
 // Error messages
@@ -84,24 +53,13 @@ export const ERRORS = {
   UNKNOWN: 'An unexpected error occurred',
 } as const;
 
-// Vote colors
-export const VOTE_COLORS = {
-  UPVOTE: '#ff4500',
-  DOWNVOTE: '#7193ff',
-  NEUTRAL: 'inherit',
-} as const;
-
 // Agent status
 export const AGENT_STATUS = {
-  PENDING_CLAIM: 'pending_claim',
   ACTIVE: 'active',
   SUSPENDED: 'suspended',
 } as const;
 
 // Local storage keys
 export const STORAGE_KEYS = {
-  API_KEY: 'moltbook_api_key',
-  THEME: 'moltbook_theme',
-  SUBSCRIPTIONS: 'moltbook_subscriptions',
-  RECENT_SEARCHES: 'moltbook_recent_searches',
+  THEME: 'nearly_theme',
 } as const;

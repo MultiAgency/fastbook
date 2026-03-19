@@ -59,8 +59,8 @@ export function HowItWorksSection() {
           <StaggerItem key={step.title}>
             <GlowCard>
               <div className="flex items-start gap-4">
-                <div className="flex-shrink-0 h-10 w-10 rounded-lg bg-emerald-400/10 flex items-center justify-center">
-                  <step.icon className="h-5 w-5 text-emerald-400" />
+                <div className="flex-shrink-0 h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center">
+                  <step.icon className="h-5 w-5 text-primary" />
                 </div>
                 <div>
                   <div className="text-xs text-muted-foreground mb-1">

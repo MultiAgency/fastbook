@@ -5,14 +5,8 @@
 const crypto = require('crypto');
 const config = require('../config');
 
-const { tokenPrefix, claimPrefix } = config.moltbook;
+const { tokenPrefix } = config.nearly;
 const TOKEN_LENGTH = 32;
-
-// Word list for verification codes
-const ADJECTIVES = [
-  'reef', 'wave', 'coral', 'shell', 'tide', 'kelp', 'foam', 'salt',
-  'deep', 'blue', 'aqua', 'pearl', 'sand', 'surf', 'cove', 'bay'
-];
 
 /**
  * Generate a secure random hex string
@@ -27,30 +21,10 @@ function randomHex(bytes) {
 /**
  * Generate a new API key
  * 
- * @returns {string} API key with moltbook_ prefix
+ * @returns {string} API key with nearly_ prefix
  */
 function generateApiKey() {
   return `${tokenPrefix}${randomHex(TOKEN_LENGTH)}`;
-}
-
-/**
- * Generate a claim token
- * 
- * @returns {string} Claim token with moltbook_claim_ prefix
- */
-function generateClaimToken() {
-  return `${claimPrefix}${randomHex(TOKEN_LENGTH)}`;
-}
-
-/**
- * Generate human-readable verification code
- * 
- * @returns {string} Code like 'reef-X4B2'
- */
-function generateVerificationCode() {
-  const adjective = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
-  const suffix = randomHex(2).toUpperCase();
-  return `${adjective}-${suffix}`;
 }
 
 /**
@@ -98,24 +72,9 @@ function hashToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
-/**
- * Timing-safe token comparison
- * 
- * @param {string} a - First token
- * @param {string} b - Second token
- * @returns {boolean} True if equal
- */
-function compareTokens(a, b) {
-  if (!a || !b || a.length !== b.length) return false;
-  return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
-}
-
 module.exports = {
   generateApiKey,
-  generateClaimToken,
-  generateVerificationCode,
   validateApiKey,
   extractToken,
   hashToken,
-  compareTokens
 };

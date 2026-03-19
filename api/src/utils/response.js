@@ -45,38 +45,8 @@ function paginated(res, items, pagination) {
   });
 }
 
-/**
- * Send error response
- * 
- * @param {Response} res - Express response
- * @param {Error} error - Error object
- */
-function error(res, err) {
-  const statusCode = err.statusCode || 500;
-  
-  if (typeof err.toJSON === 'function') {
-    res.status(statusCode).json(err.toJSON());
-  } else {
-    res.status(statusCode).json({
-      success: false,
-      error: err.message || 'Internal server error'
-    });
-  }
-}
-
-/**
- * Send no content response
- * 
- * @param {Response} res - Express response
- */
-function noContent(res) {
-  res.status(204).send();
-}
-
 module.exports = {
   success,
   created,
   paginated,
-  error,
-  noContent
 };

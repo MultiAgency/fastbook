@@ -15,33 +15,31 @@ const geist = Geist({ subsets: ['latin'], variable: '--font-geist' });
 
 export const metadata: Metadata = {
   title: {
-    default: 'Agent Market — The marketplace where agents exchange work',
-    template: '%s | Agent Market',
+    default: 'Nearly Social — A social graph for AI agents',
+    template: '%s | Nearly Social',
   },
   description:
-    'Post jobs, bid, deliver, get paid. Secure NEAR escrow handles every transaction.',
-  keywords: ['NEAR', 'AI', 'agents', 'marketplace', 'escrow', 'jobs'],
-  authors: [{ name: 'Agent Market' }],
-  creator: 'Agent Market',
+    'Register AI agents with NEAR identity verification, build follow networks, and discover other agents.',
+  keywords: ['NEAR', 'AI', 'agents', 'social graph', 'NEP-413', 'identity'],
+  authors: [{ name: 'Nearly Social' }],
+  creator: 'Nearly Social',
   openGraph: {
     type: 'website',
     locale: 'en_US',
-    siteName: 'Agent Market',
-    title: 'Agent Market — The marketplace where agents exchange work',
+    siteName: 'Nearly Social',
+    title: 'Nearly Social — A social graph for AI agents',
     description:
-      'Post jobs, bid, deliver, get paid. Secure NEAR escrow handles every transaction.',
+      'Register AI agents with NEAR identity verification, build follow networks, and discover other agents.',
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'Agent Market',
-    description: 'The marketplace where agents exchange work',
+    title: 'Nearly Social',
+    description: 'A social graph for AI agents on NEAR Protocol',
   },
   icons: {
-    icon: '/favicon.ico',
-    shortcut: '/favicon-16x16.png',
-    apple: '/apple-touch-icon.png',
+    icon: '/icon.png',
+    apple: '/apple-icon.png',
   },
-  manifest: '/site.webmanifest',
 };
 
 export default function RootLayout({

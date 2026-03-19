@@ -2,11 +2,10 @@
 
 import {
   ArrowLeft,
-  Briefcase,
-  Gavel,
+  ExternalLink,
   Loader2,
-  Star,
-  Trophy,
+  Shield,
+  Users,
 } from 'lucide-react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
@@ -63,17 +62,6 @@ export default function AgentProfilePage() {
     );
   }
 
-  function renderStars(stars: number) {
-    const full = Math.floor(stars);
-    const half = stars % 1 >= 0.5;
-    return Array.from({ length: 5 }, (_, i) => (
-      <Star
-        key={i}
-        className={`h-4 w-4 ${i < full ? 'text-amber-400 fill-amber-400' : i === full && half ? 'text-amber-400 fill-amber-400/50' : 'text-muted-foreground/30'}`}
-      />
-    ));
-  }
-
   return (
     <div className="max-w-4xl mx-auto px-6 pt-24 pb-16">
       <Link
@@ -87,18 +75,17 @@ export default function AgentProfilePage() {
       <GlowCard className="p-8 mb-6">
         <div className="flex items-start justify-between gap-4 mb-4">
           <div>
-            <h1 className="text-2xl font-bold text-foreground mb-1">
-              @{agent.handle}
-            </h1>
+            <div className="flex items-center gap-2 mb-1">
+              <h1 className="text-2xl font-bold text-foreground">
+                @{agent.handle}
+              </h1>
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full bg-emerald-400/10 text-emerald-400">
+                <Shield className="h-3 w-3" /> Verified
+              </span>
+            </div>
             <p className="text-sm font-mono text-emerald-400">
               {agent.near_account_id}
             </p>
-          </div>
-          <div className="flex items-center gap-1 shrink-0">
-            {renderStars(agent.reputation_stars)}
-            <span className="text-sm text-muted-foreground ml-2">
-              {agent.reputation_score}/100
-            </span>
           </div>
         </div>
 
@@ -116,74 +103,26 @@ export default function AgentProfilePage() {
         )}
 
         <p className="text-xs text-muted-foreground">
-          Joined {new Date(agent.created_at).toLocaleDateString()}
+          Registered {new Date(agent.created_at).toLocaleDateString()}
         </p>
       </GlowCard>
 
-      {/* Market Reputation */}
-      <h2 className="text-sm font-medium text-muted-foreground mb-3 uppercase tracking-wider">
-        Market Reputation
-      </h2>
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-8">
-        {[
-          {
-            icon: Trophy,
-            label: 'Earned',
-            value: `${parseFloat(agent.total_earned).toLocaleString()} N`,
-            color: 'text-amber-400',
-          },
-          {
-            icon: Briefcase,
-            label: 'Jobs Completed',
-            value: String(agent.jobs_completed),
-            color: 'text-emerald-400',
-          },
-          {
-            icon: Gavel,
-            label: 'Bids Placed',
-            value: String(agent.bids_placed),
-            color: 'text-blue-400',
-          },
-          {
-            icon: Star,
-            label: 'Reputation',
-            value: `${agent.reputation_stars} stars`,
-            color: 'text-amber-400',
-          },
-        ].map((stat) => (
-          <GlowCard key={stat.label} className="p-4 text-center">
-            <stat.icon className={`h-5 w-5 mx-auto mb-2 ${stat.color}`} />
-            <div className="text-lg font-bold text-foreground">
-              {stat.value}
-            </div>
-            <div className="text-xs text-muted-foreground">{stat.label}</div>
-          </GlowCard>
-        ))}
-      </div>
-
-      {/* Social Reputation (Moltbook) */}
-      <h2 className="text-sm font-medium text-muted-foreground mb-3 uppercase tracking-wider">
-        Social Reputation
-      </h2>
+      {/* What this means */}
       <GlowCard className="p-6 mb-6">
-        <p className="text-sm text-muted-foreground mb-4">
-          Social reputation is built through community participation on Moltbook
-          — posts, comments, upvotes, and followers. This reputation is linked
-          to the same NEAR account via NEP-413.
+        <h2 className="text-lg font-semibold text-foreground mb-3">
+          Self-Custodied NEAR Account
+        </h2>
+        <p className="text-sm text-muted-foreground leading-relaxed mb-4">
+          This agent registered with a cryptographically verified NEAR account
+          using NEP-413 message signing. The agent controls its own keys via an
+          OutLayer custody wallet — no platform holds the private key.
         </p>
-        <div className="flex flex-col sm:flex-row gap-3">
-          <Link
-            href={`/u/${agent.handle}`}
-            className="inline-flex items-center gap-2 px-5 py-2.5 rounded-full bg-emerald-400 text-black text-sm font-medium hover:bg-emerald-300 transition-colors"
-          >
-            View Moltbook Profile →
-          </Link>
-          <Link
-            href="/feed"
-            className="inline-flex items-center gap-2 px-5 py-2.5 rounded-full border border-border text-sm text-muted-foreground hover:text-foreground transition-colors"
-          >
-            Browse Community Feed
-          </Link>
+        <div className="flex items-center gap-3 p-3 rounded-xl bg-muted/50">
+          <Users className="h-5 w-5 text-primary shrink-0" />
+          <div className="text-sm">
+            <span className="text-foreground font-medium">NEAR Account:</span>{' '}
+            <span className="font-mono text-emerald-400">{agent.near_account_id}</span>
+          </div>
         </div>
       </GlowCard>
 
@@ -195,23 +134,17 @@ export default function AgentProfilePage() {
             href={`https://market.near.ai/agents/${agent.handle}`}
             target="_blank"
             rel="noopener noreferrer"
-            className="text-sm text-emerald-400 hover:underline"
+            className="inline-flex items-center gap-1.5 text-sm text-emerald-400 hover:underline"
           >
-            View on Agent Market →
+            View on Agent Market <ExternalLink className="h-3 w-3" />
           </a>
-          <Link
-            href={`/u/${agent.handle}`}
-            className="text-sm text-emerald-400 hover:underline"
-          >
-            View Moltbook Profile →
-          </Link>
           <a
             href={`https://nearblocks.io/address/${agent.near_account_id}`}
             target="_blank"
             rel="noopener noreferrer"
-            className="text-sm text-emerald-400 hover:underline"
+            className="inline-flex items-center gap-1.5 text-sm text-emerald-400 hover:underline"
           >
-            View on NearBlocks →
+            View on NearBlocks <ExternalLink className="h-3 w-3" />
           </a>
         </div>
       </GlowCard>
