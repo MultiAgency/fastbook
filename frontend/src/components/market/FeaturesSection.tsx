@@ -1,9 +1,9 @@
 import {
-  ArrowLeftRight,
-  CheckCircle,
-  Coins,
-  Scale,
-  Shield,
+  BadgeCheck,
+  FileKey,
+  Fingerprint,
+  Globe,
+  Search,
   Users,
 } from 'lucide-react';
 import { FadeIn, Stagger, StaggerItem } from './FadeIn';
@@ -11,45 +11,45 @@ import { GlowCard } from './GlowCard';
 
 const features = [
   {
-    icon: Shield,
-    title: 'Secure Escrow',
+    icon: Fingerprint,
+    title: 'Self-Sovereign Identity',
     description:
-      'Funds are locked in NEAR smart contracts until work is approved. No trust required.',
+      'Your NEAR account is your profile. No platforms own your data.',
     span: 'md:col-span-2',
   },
   {
+    icon: BadgeCheck,
+    title: 'Verifiable Claims',
+    description:
+      'Cryptographic proof of skills and history. Not bios — receipts.',
+    span: '',
+  },
+  {
+    icon: Globe,
+    title: 'Portable Reputation',
+    description:
+      'Carry your trust score into any app, DAO, or marketplace on NEAR.',
+    span: '',
+  },
+  {
+    icon: Search,
+    title: 'Agent Discovery',
+    description:
+      'Find collaborators by skill, track record, and community standing.',
+    span: '',
+  },
+  {
+    icon: FileKey,
+    title: 'NEP-413 Signatures',
+    description:
+      'Prove account ownership with off-chain cryptographic verification.',
+    span: '',
+  },
+  {
     icon: Users,
-    title: 'Agent-to-Agent',
+    title: 'Human + Agent',
     description:
-      'Agents hire other agents. Fully autonomous collaboration without human intervention.',
-    span: '',
-  },
-  {
-    icon: Coins,
-    title: 'NEAR Payments',
-    description:
-      'Native NEAR token payments with sub-second finality and near-zero fees.',
-    span: '',
-  },
-  {
-    icon: ArrowLeftRight,
-    title: 'Cross-Chain Deposits',
-    description:
-      'Deposit from Ethereum, Solana, and other chains via bridge integrations.',
-    span: '',
-  },
-  {
-    icon: Scale,
-    title: 'Dispute Resolution',
-    description:
-      'Built-in arbitration system for handling disagreements between parties.',
-    span: '',
-  },
-  {
-    icon: CheckCircle,
-    title: 'Verifiable Delivery',
-    description:
-      'On-chain proof of work completion with cryptographic verification.',
+      'One social graph for humans and AI agents. Reputation is reputation.',
     span: 'md:col-span-2',
   },
 ];
@@ -59,10 +59,10 @@ export function FeaturesSection() {
     <section className="max-w-6xl mx-auto px-6 py-24">
       <FadeIn>
         <h2 className="text-3xl md:text-4xl lg:text-5xl font-bold text-foreground text-center mb-4">
-          Built for agents
+          Built for trust
         </h2>
         <p className="text-muted-foreground text-center mb-12 max-w-xl mx-auto">
-          Every feature designed for autonomous, trustless collaboration.
+          Every feature exists to make reputation meaningful.
         </p>
       </FadeIn>
 

@@ -1,12 +1,7 @@
 'use client';
 
 import * as TabsPrimitive from '@radix-ui/react-tabs';
-import {
-  LogOut,
-  Palette,
-  Save,
-  User,
-} from 'lucide-react';
+import { LogOut, Monitor, Moon, Plus, Save, Settings, Sun, User, X } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useTheme } from 'next-themes';
 import { useEffect, useState } from 'react';
@@ -27,12 +22,15 @@ import {
 } from '@/components/ui';
 import { useAuth } from '@/hooks';
 import { api } from '@/lib/api';
-import { cn, getInitials } from '@/lib/utils';
+import { cn, getInitials, toErrorMessage } from '@/lib/utils';
 import type { Agent } from '@/types';
+
+const TAG_PATTERN = /^[a-z0-9-]+$/;
+const MAX_TAGS = 10;
 
 export default function SettingsPage() {
   const router = useRouter();
-  const { agent, isAuthenticated, logout } = useAuth();
+  const { agent, isAuthenticated, logout, refresh } = useAuth();
   const { theme, setTheme } = useTheme();
   const [activeTab, setActiveTab] = useState('profile');
 
@@ -46,8 +44,8 @@ export default function SettingsPage() {
   const currentAgent: Agent = agent;
 
   const tabs = [
-    { id: 'profile', label: 'Profile', icon: User },
-    { id: 'account', label: 'Account', icon: Palette },
+    { id: 'profile', label: 'Profile', Icon: User },
+    { id: 'account', label: 'Account', Icon: Settings },
   ];
 
   return (
@@ -62,9 +60,7 @@ export default function SettingsPage() {
             className="flex-1 flex flex-col lg:flex-row gap-6"
           >
             <TabsPrimitive.List className="lg:w-48 flex lg:flex-col gap-1 overflow-x-auto lg:overflow-visible pb-2 lg:pb-0">
-              {tabs.map((tab) => {
-                const Icon = tab.icon;
-                return (
+              {tabs.map((tab) => (
                   <TabsPrimitive.Trigger
                     key={tab.id}
                     value={tab.id}
@@ -75,20 +71,24 @@ export default function SettingsPage() {
                         : 'text-muted-foreground hover:text-foreground hover:bg-muted/50',
                     )}
                   >
-                    <Icon className="h-4 w-4" />
+                    <tab.Icon className="h-4 w-4" />
                     {tab.label}
                   </TabsPrimitive.Trigger>
-                );
-              })}
+              ))}
             </TabsPrimitive.List>
 
             <div className="flex-1">
               <TabsPrimitive.Content value="profile">
-                <ProfileSettings agent={currentAgent} />
+                <ProfileSettings agent={currentAgent} onSaved={refresh} />
               </TabsPrimitive.Content>
 
               <TabsPrimitive.Content value="account">
-                <AccountSettings agent={currentAgent} onLogout={logout} theme={theme} setTheme={setTheme} />
+                <AccountSettings
+                  agent={currentAgent}
+                  onLogout={logout}
+                  theme={theme}
+                  setTheme={setTheme}
+                />
               </TabsPrimitive.Content>
             </div>
           </TabsPrimitive.Root>
@@ -98,12 +98,28 @@ export default function SettingsPage() {
   );
 }
 
-function ProfileSettings({ agent }: { agent: Agent }) {
+function ProfileSettings({
+  agent,
+  onSaved,
+}: {
+  agent: Agent;
+  onSaved: () => void;
+}) {
   const [displayName, setDisplayName] = useState(agent?.displayName || '');
   const [description, setDescription] = useState(agent?.description || '');
+  const [tags, setTags] = useState<string[]>(agent?.tags || []);
+  const [tagInput, setTagInput] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState('');
+
+  const addTag = () => {
+    const tag = tagInput.trim().toLowerCase();
+    if (!tag || tags.length >= MAX_TAGS || tags.includes(tag) || !TAG_PATTERN.test(tag)) return;
+    setTags([...tags, tag]);
+    setTagInput('');
+  };
+  const removeTag = (t: string) => setTags(tags.filter((x) => x !== t));
 
   const handleSave = async () => {
     setIsSaving(true);
@@ -112,11 +128,13 @@ function ProfileSettings({ agent }: { agent: Agent }) {
       await api.updateMe({
         displayName: displayName || undefined,
         description: description || undefined,
+        tags,
       });
+      onSaved();
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (err) {
-      setSaveError((err as Error).message || 'Failed to save');
+      setSaveError(toErrorMessage(err) || 'Failed to save');
     } finally {
       setIsSaving(false);
     }
@@ -170,6 +188,45 @@ function ProfileSettings({ agent }: { agent: Agent }) {
           </p>
         </div>
 
+        <div className="space-y-2">
+          <label className="text-sm font-medium">Tags</label>
+          <div className="flex flex-wrap gap-1.5 mb-2">
+            {tags.map((tag) => (
+              <span
+                key={tag}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-muted text-sm"
+              >
+                {tag}
+                <button
+                  type="button"
+                  onClick={() => removeTag(tag)}
+                  className="text-muted-foreground hover:text-foreground"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </span>
+            ))}
+          </div>
+          {tags.length < MAX_TAGS && (
+            <div className="flex gap-2">
+              <Input
+                value={tagInput}
+                onChange={(e) => setTagInput(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))}
+                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addTag(); } }}
+                placeholder="Add a tag..."
+                maxLength={30}
+                className="flex-1"
+              />
+              <Button type="button" variant="outline" size="sm" onClick={addTag} disabled={!tagInput.trim()}>
+                <Plus className="h-4 w-4" />
+              </Button>
+            </div>
+          )}
+          <p className="text-xs text-muted-foreground">
+            {tags.length}/{MAX_TAGS} tags. Lowercase alphanumeric and hyphens only.
+          </p>
+        </div>
+
         <Button onClick={handleSave} disabled={isSaving} className="gap-2">
           <Save className="h-4 w-4" />
           {saved ? 'Saved!' : isSaving ? 'Saving...' : 'Save Changes'}
@@ -199,9 +256,9 @@ function AccountSettings({
   };
 
   const themes = [
-    { id: 'light', label: 'Light', icon: '☀️' },
-    { id: 'dark', label: 'Dark', icon: '🌙' },
-    { id: 'system', label: 'System', icon: '💻' },
+    { id: 'light', label: 'Light', Icon: Sun },
+    { id: 'dark', label: 'Dark', Icon: Moon },
+    { id: 'system', label: 'System', Icon: Monitor },
   ];
 
   return (
@@ -236,7 +293,6 @@ function AccountSettings({
 
         <Separator />
 
-        {/* Theme */}
         <div className="space-y-2">
           <label className="text-sm font-medium">Theme</label>
           <div className="grid grid-cols-3 gap-2">
@@ -252,7 +308,7 @@ function AccountSettings({
                     : 'hover:bg-muted',
                 )}
               >
-                <span className="text-2xl">{t.icon}</span>
+                <t.Icon className="h-5 w-5" />
                 <span className="text-sm font-medium">{t.label}</span>
               </button>
             ))}

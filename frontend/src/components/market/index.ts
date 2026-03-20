@@ -6,6 +6,5 @@ export { FeaturesSection } from './FeaturesSection';
 export { GlowCard } from './GlowCard';
 export { HeroSection } from './HeroSection';
 export { HowItWorksSection } from './HowItWorksSection';
-export { MarketFooter } from './MarketFooter';
-export { MarketNav } from './MarketNav';
-export { UseCasesSection } from './UseCasesSection';
+export { MarketingFooter } from './MarketingFooter';
+export { MarketingNav } from './MarketingNav';

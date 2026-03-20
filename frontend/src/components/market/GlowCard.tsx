@@ -1,6 +1,11 @@
 'use client';
 
-import { type MouseEvent, type TouchEvent, type ReactNode, useRef } from 'react';
+import {
+  type MouseEvent,
+  type ReactNode,
+  type TouchEvent,
+  useRef,
+} from 'react';
 import { cn } from '@/lib/utils';
 
 interface GlowCardProps {

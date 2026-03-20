@@ -13,7 +13,7 @@ npm run dev
 
 Open `http://localhost:3001/demo` in a clean browser tab (or incognito to avoid cached sessionStorage state).
 
-**Quick pre-check:** Click "Create Wallet" once to confirm OutLayer is responding. If it works, click "Start Over" to reset. If it fails, the flow still works with mock data — just note the amber "Mock response" badge.
+**Quick pre-check:** Click "Create Wallet" once to confirm OutLayer is responding. If it works, click "Start Over" to reset.
 
 ---
 
@@ -51,7 +51,6 @@ We think that's wrong. An agent's NEAR account IS its identity. Registration sho
 
 - The real NEAR account ID displayed in the green box
 - Click "View raw request / response" to show the JSON
-- The green "Live API call" indicator — this is hitting the real OutLayer API right now
 
 ### Step 2 — Sign Registration Message
 
@@ -73,16 +72,14 @@ We think that's wrong. An agent's NEAR account IS its identity. Registration sho
 
 **Click "Register Agent"**
 
-**Say:** "This step is mocked — the Market doesn't support this endpoint yet. That's the whole point of this prototype. But look at the request body..."
+**Say:** "This registers the agent on Nearly Social via the OutLayer WASM backend. The verifiable claim from Step 2 is verified on-chain, and the agent is registered with its existing NEAR identity."
 
 **Expand the JSON viewer for Step 3.**
 
-**Say:** "The `verifiable_claim` in the request body is exactly the signed proof from Step 2. The Market verifies the signature, confirms the public key belongs to the claimed account, and registers the agent with its existing identity. Same account, no new one created."
+**Say:** "The `verifiable_claim` in the request body is exactly the signed proof from Step 2. The backend verifies the signature, confirms the public key belongs to the claimed account, and registers the agent with its existing identity. Same account, no new one created."
 
 **Point out:**
 
-- The "Proposed API — not yet implemented" badge
-- The amber "Mock response" indicator
 - In the response: `near_account_id` matches Step 1 — **this is the whole argument**
 
 ### Summary Card
@@ -127,10 +124,10 @@ A: It's NEAR's standard for off-chain message signing. It includes a recipient f
 A: Five lines of verification logic (we spec them in the README). The endpoint shape doesn't change — you're just adding an optional field to the existing registration request.
 
 **Q: What if OutLayer is down?**
-A: The prototype falls back to mock data so the flow is always demonstrable. In production, the agent would retry or use any other NEP-413 signer — OutLayer is convenient but not required.
+A: The agent would retry or use any other NEP-413 signer — OutLayer is convenient but not required.
 
 **Q: Is this production-ready?**
-A: This is a prototype to demonstrate the concept and proposed API shape. The OutLayer integration is real. The Market integration is mocked because that endpoint doesn't exist yet — building it is what we're proposing.
+A: This is a working prototype. The OutLayer integration and WASM backend are real. The proposal is for market.near.ai to adopt the same `verifiable_claim` field on their registration endpoint.
 
 **Q: Why is the NEAR account ID a long hex string instead of something like `agent.near`?**
 A: OutLayer's trial wallets create implicit NEAR accounts (derived from the public key). In production, agents would typically use named accounts like `my-agent.near`. The verification flow is identical regardless — it's the same ed25519 signature check.
@@ -147,8 +144,8 @@ A: Three steps: validate the signed message, verify the ed25519 signature, regis
 
 | Problem                        | What happens                               | What to say                                                                                              |
 | ------------------------------ | ------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
-| OutLayer API is down           | Steps 1-2 use mock data, amber badge shows | "The mock fallback kicked in — in production this would retry. Let me show you the flow with mock data." |
-| Browser CORS error             | Same as above — mock fallback              | Same as above                                                                                            |
+| OutLayer API is down           | Steps 1-2 fail with error message          | "OutLayer is temporarily unreachable — let me try again in a moment."                                    |
+| Browser CORS error             | Fetch fails with network error             | "There's a CORS issue with the proxy — let me check the dev server."                                     |
 | Page is blank                  | Check dev server is running                | `npm run dev` in terminal                                                                                |
 | sessionStorage has stale state | Old step data shows                        | Click "Start Over" or open incognito                                                                     |
 | Dark mode looks wrong          | Toggle theme                               | Click the theme toggle or check system preferences                                                       |

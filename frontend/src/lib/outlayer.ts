@@ -1,6 +1,9 @@
 // OutLayer API Client
 // Proxied through Next.js rewrites: /api/outlayer/* → https://api.outlayer.fastnear.com/*
 
+import { API_TIMEOUT_MS } from './constants';
+import { assertOk, fetchWithTimeout } from './fetch';
+
 export interface OutlayerRegisterResponse {
   api_key: string;
   near_account_id: string;
@@ -25,53 +28,24 @@ export interface SignMessageResponse {
   nonce: string;
 }
 
-const MOCK_REGISTER: OutlayerRegisterResponse & { _mock: true } = {
-  api_key: 'ol_mock_abc123def456',
-  near_account_id: 'agent-demo.near',
-  handoff_url: 'https://app.outlayer.com/handoff/mock-session',
-  trial: true,
-  _mock: true,
-};
-
-function getMockSign(): SignMessageResponse & { _mock: true } {
-  return {
-    account_id: 'agent-demo.near',
-    public_key: 'ed25519:MockPublicKeyBase64EncodedString123456789',
-    signature: 'ed25519:MockSignatureBase64EncodedString987654321AbCdEfGh',
-    nonce: btoa(String(Date.now())),
-    _mock: true,
-  };
-}
-
 export async function registerOutlayer(): Promise<{
   data: OutlayerRegisterResponse;
-  mock: boolean;
   request: { method: string; url: string; body: null };
 }> {
   const url = '/api/outlayer/register';
   const request = { method: 'POST', url, body: null };
 
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000);
-    const res = await fetch(url, {
+  const res = await fetchWithTimeout(
+    url,
+    {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: 'Unknown error' }));
-      throw new Error(err.error || `HTTP ${res.status}`);
-    }
-    const data: OutlayerRegisterResponse = await res.json();
-    return { data, mock: false, request };
-  } catch (err) {
-    if (err instanceof TypeError) {
-      throw new Error('OutLayer service unreachable. Check your connection and try again.');
-    }
-    throw err;
-  }
+    },
+    API_TIMEOUT_MS,
+  );
+  await assertOk(res);
+  const data: OutlayerRegisterResponse = await res.json();
+  return { data, request };
 }
 
 export async function signMessage(
@@ -80,7 +54,6 @@ export async function signMessage(
   recipient: string,
 ): Promise<{
   data: SignMessageResponse;
-  mock: boolean;
   request: {
     method: string;
     url: string;
@@ -96,28 +69,18 @@ export async function signMessage(
   };
   const request = { method: 'POST', url, headers, body };
 
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000);
-    const res = await fetch(url, {
+  const res = await fetchWithTimeout(
+    url,
+    {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: 'Unknown error' }));
-      throw new Error(err.error || `HTTP ${res.status}`);
-    }
-    const data: SignMessageResponse = await res.json();
-    return { data, mock: false, request };
-  } catch (err) {
-    if (err instanceof TypeError) {
-      throw new Error('OutLayer service unreachable. Check your connection and try again.');
-    }
-    throw err;
-  }
+    },
+    API_TIMEOUT_MS,
+  );
+  await assertOk(res);
+  const data: SignMessageResponse = await res.json();
+  return { data, request };
 }
 
 export interface CallContractParams {
@@ -145,28 +108,22 @@ export async function callContract(
 ): Promise<CallContractResponse> {
   const url = '/api/outlayer/wallet/v1/call';
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
+  const res = await fetchWithTimeout(
+    url,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(params),
     },
-    body: JSON.stringify(params),
-  });
+    API_TIMEOUT_MS,
+  );
 
-  let data: CallContractResponse;
-  try {
-    data = await res.json();
-  } catch {
-    throw new Error(
-      `Contract call failed: unexpected response (${res.status})`,
-    );
-  }
+  await assertOk(res);
 
-  if (!res.ok) {
-    throw new Error(`Contract call failed: ${res.status}`);
-  }
-
+  const data: CallContractResponse = await res.json();
   return data;
 }
 
@@ -176,9 +133,17 @@ export async function callContract(
 export async function getBalance(apiKey: string): Promise<string> {
   const url = '/api/outlayer/wallet/v1/balance?chain=near';
 
-  const res = await fetch(url, {
-    headers: { Authorization: `Bearer ${apiKey}` },
-  });
+  const res = await fetchWithTimeout(
+    url,
+    {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    },
+    API_TIMEOUT_MS,
+  );
+
+  if (!res.ok) {
+    throw new Error(`Balance check failed: HTTP ${res.status}`);
+  }
 
   let data: { balance?: string };
   try {

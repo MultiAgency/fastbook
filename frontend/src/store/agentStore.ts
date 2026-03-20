@@ -9,18 +9,9 @@ import type {
 type StepNumber = 1 | 2 | 3;
 type StepStatus = 'idle' | 'loading' | 'success' | 'error';
 
-/** Explicit step status map — prevents accessing invalid step numbers */
-type StepStatusMap = { 1: StepStatus; 2: StepStatus; 3: StepStatus };
-type StepErrorMap = { 1: string | null; 2: string | null; 3: string | null };
-
-/** Branded type to prevent accidentally swapping OutLayer and Market API keys */
-type OutlayerApiKey = string & { readonly __brand?: 'OutlayerApiKey' };
-/** Branded type to prevent accidentally swapping Market and OutLayer API keys */
-type MarketApiKey = string & { readonly __brand?: 'MarketApiKey' };
-
 interface AgentStore {
   // Step 1
-  outlayerApiKey: OutlayerApiKey | null;
+  apiKey: string | null;
   nearAccountId: string | null;
   handoffUrl: string | null;
 
@@ -29,23 +20,15 @@ interface AgentStore {
   signMessage: string | null;
 
   // Step 3
-  marketAgentId: string | null;
-  marketApiKey: MarketApiKey | null;
   marketHandle: string | null;
 
   // Step state
   currentStep: StepNumber;
-  stepStatus: StepStatusMap;
-  stepErrors: StepErrorMap;
-
-  // Live API toggle
-  useLiveApi: boolean;
-  setUseLiveApi: (val: boolean) => void;
-
-  // Manual API key entry
-  setMarketApiKey: (key: string) => void;
+  stepStatus: Record<StepNumber, StepStatus>;
+  stepErrors: Record<StepNumber, string | null>;
 
   // Actions
+  setApiKey: (key: string) => void;
   setStepLoading: (step: StepNumber) => void;
   setStepError: (step: StepNumber, error: string) => void;
   completeStep1: (data: OutlayerRegisterResponse) => void;
@@ -55,84 +38,89 @@ interface AgentStore {
 }
 
 const initialState = {
-  outlayerApiKey: null as OutlayerApiKey | null,
+  apiKey: null as string | null,
   nearAccountId: null as string | null,
   handoffUrl: null as string | null,
   signResult: null as SignMessageResponse | null,
   signMessage: null as string | null,
-  marketAgentId: null as string | null,
-  marketApiKey: null as MarketApiKey | null,
   marketHandle: null as string | null,
-  currentStep: 1 as const satisfies StepNumber,
-  stepStatus: {
-    1: 'idle',
-    2: 'idle',
-    3: 'idle',
-  } as const satisfies StepStatusMap,
-  stepErrors: { 1: null, 2: null, 3: null } satisfies StepErrorMap,
-  useLiveApi: false,
+  currentStep: 1 as StepNumber,
+  stepStatus: { 1: 'idle', 2: 'idle', 3: 'idle' } as Record<StepNumber, StepStatus>,
+  stepErrors: { 1: null, 2: null, 3: null } as Record<StepNumber, string | null>,
 };
 
 export const useAgentStore = create<AgentStore>()(
   persist(
-    (set) => ({
-      ...initialState,
-
-      setMarketApiKey: (key) => set({ marketApiKey: key as MarketApiKey }),
-
-      setUseLiveApi: (val) =>
+    (set) => {
+      const updateStep = (step: StepNumber, status: StepStatus, error: string | null = null) =>
         set((s) => ({
-          useLiveApi: val,
-          // Reset Step 3 so user can re-register in the other mode
-          marketAgentId: null,
-          marketApiKey: null,
-          marketHandle: null,
-          stepStatus: { ...s.stepStatus, 3: 'idle' as const },
-          stepErrors: { ...s.stepErrors, 3: null },
-        })),
-
-      setStepLoading: (step) =>
-        set((s) => ({
-          stepStatus: { ...s.stepStatus, [step]: 'loading' as const },
-          stepErrors: { ...s.stepErrors, [step]: null },
-        })),
-
-      setStepError: (step, error) =>
-        set((s) => ({
-          stepStatus: { ...s.stepStatus, [step]: 'error' as const },
+          stepStatus: { ...s.stepStatus, [step]: status },
           stepErrors: { ...s.stepErrors, [step]: error },
-        })),
+        }));
 
-      completeStep1: (data) =>
-        set((s) => ({
-          outlayerApiKey: data.api_key as OutlayerApiKey,
-          nearAccountId: data.near_account_id,
-          handoffUrl: data.handoff_url,
-          currentStep: 2 as const,
-          stepStatus: { ...s.stepStatus, 1: 'success' as const },
-        })),
+      return {
+        ...initialState,
 
-      completeStep2: (data, message) =>
-        set((s) => ({
-          signResult: data,
-          signMessage: message,
-          currentStep: 3 as const,
-          stepStatus: { ...s.stepStatus, 2: 'success' as const },
-        })),
+        setApiKey: (key) => set({ apiKey: key }),
 
-      completeStep3: (data) =>
-        set((s) => ({
-          marketAgentId: data.agent_id,
-          marketApiKey: data.api_key as MarketApiKey,
-          marketHandle: data.handle,
-          stepStatus: { ...s.stepStatus, 3: 'success' as const },
-        })),
+        setStepLoading: (step) => updateStep(step, 'loading'),
 
-      reset: () => set(initialState),
-    }),
+        setStepError: (step, error) => updateStep(step, 'error', error),
+
+        completeStep1: (data) => {
+          updateStep(1, 'success');
+          set({
+            apiKey: data.api_key,
+            nearAccountId: data.near_account_id,
+            handoffUrl: data.handoff_url,
+            currentStep: 2,
+          });
+        },
+
+        completeStep2: (data, message) => {
+          updateStep(2, 'success');
+          set({ signResult: data, signMessage: message, currentStep: 3 });
+        },
+
+        completeStep3: (data) => {
+          updateStep(3, 'success');
+          // Clear secrets now that registration is complete — only keep
+          // non-sensitive display fields in sessionStorage.
+          set({
+            marketHandle: data.handle,
+            apiKey: null,
+            signResult: null,
+            signMessage: null,
+            handoffUrl: null,
+          });
+        },
+
+        reset: () => set(initialState),
+      };
+    },
     {
       name: 'near-agency-agent',
       storage: createJSONStorage(() => sessionStorage),
+      partialize: (state) => ({
+        currentStep: state.currentStep,
+        stepStatus: state.stepStatus,
+        stepErrors: state.stepErrors,
+        nearAccountId: state.nearAccountId,
+        marketHandle: state.marketHandle,
+      }),
+      onRehydrateStorage: () => (state) => {
+        // If secrets were lost (page refresh mid-flow), reset to step 1
+        // since apiKey is intentionally excluded from persistence.
+        // Skip reset when registration is already complete (step 3 success).
+        if (
+          state &&
+          state.currentStep > 1 &&
+          !state.apiKey &&
+          state.stepStatus[3] !== 'success'
+        ) {
+          state.reset();
+        }
+      },
     },
   ),
 );

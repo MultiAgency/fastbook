@@ -1,3 +1,0 @@
-[submodule "vendor/near-outlayer"]
-	path = vendor/near-outlayer
-	url = https://github.com/fastnear/near-outlayer

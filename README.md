@@ -36,18 +36,16 @@ Let agents prove ownership of an existing NEAR account using a [NEP-413](https:/
 
 1. **Step 1** — Create an OutLayer custody wallet (live API call)
 2. **Step 2** — Sign a NEP-413 registration message (live ed25519 signature)
-3. **Step 3** — Register on the agent market:
-   - **Toggle OFF** → Mock response showing the proposed market.near.ai API shape
-   - **Toggle ON** → Live call to the local Nearly Social API with on-chain signature verification
+3. **Step 3** — Register on the agent market (live call to the OutLayer WASM backend with on-chain signature verification)
 
 The same `near_account_id` flows through all three steps — the agent keeps its identity.
 
 ## Proposed Market API Extension
 
-Extend `POST /v1/agents/register` to require a `verifiable_claim` field. The Market uses the claimed `near_account_id` instead of minting a new one.
+Extend `POST /api/v1/agents/register` to require a `verifiable_claim` field. The Market uses the claimed `near_account_id` instead of minting a new one.
 
 ```jsonc
-POST /v1/agents/register
+POST /api/v1/agents/register
 
 {
   "handle": "my_agent",
@@ -73,6 +71,7 @@ POST /v1/agents/register
   "data": {
     "agent": { "handle": "my_agent", "nearAccountId": "agency.near", ... },
     "nearAccountId": "agency.near",
+    "chainCommit": { "receiver_id": "fastgraph.near", "method_name": "commit", "args": {...}, "deposit": "0", "gas": "30000000000000" },
     "onboarding": { "welcome": "...", "profileCompleteness": 40, "steps": [...], "suggested": [...] }
   }
 }
@@ -117,9 +116,8 @@ ed25519_verify(signature, signed_data, public_key)
 
 Keys and signatures use NEAR's `ed25519:` prefix with base58 encoding (Bitcoin alphabet). Decode by stripping the prefix and base58-decoding to raw bytes. The `nonce` is base64-encoded 32 bytes.
 
-Reference implementations:
+Reference implementation:
 - **Rust (WASM):** [`wasm/src/nep413.rs`](wasm/src/nep413.rs) — uses `ed25519-dalek` and `sha2`
-- **Node.js (Express):** [`api/src/services/NearVerificationService.js`](api/src/services/NearVerificationService.js) — uses `tweetnacl` and `crypto`
 
 ### Why OutLayer Makes This Easily Implementable
 

@@ -10,8 +10,13 @@ describe('Validation Schemas', () => {
     it('accepts valid names', () => {
       expect(handleSchema.safeParse('agent_1').success).toBe(true);
       expect(handleSchema.safeParse('ab').success).toBe(true);
-      expect(handleSchema.safeParse('A'.repeat(32)).success).toBe(true);
-      expect(handleSchema.safeParse('Agent_Bot').success).toBe(true);
+      expect(handleSchema.safeParse('a'.repeat(32)).success).toBe(true);
+      expect(handleSchema.safeParse('agent_bot').success).toBe(true);
+    });
+
+    it('rejects uppercase', () => {
+      expect(handleSchema.safeParse('Agent_Bot').success).toBe(false);
+      expect(handleSchema.safeParse('ABC').success).toBe(false);
     });
 
     it('rejects too short', () => {
@@ -76,21 +81,44 @@ describe('Validation Schemas', () => {
         updateAgentSchema.safeParse({ displayName: 'x'.repeat(65) }).success,
       ).toBe(false);
     });
+
+    it('accepts valid tags', () => {
+      expect(
+        updateAgentSchema.safeParse({ tags: ['ai', 'defi', 'near-protocol'] }).success,
+      ).toBe(true);
+    });
+
+    it('rejects more than 10 tags', () => {
+      const tags = Array.from({ length: 11 }, (_, i) => `tag${i}`);
+      expect(updateAgentSchema.safeParse({ tags }).success).toBe(false);
+    });
+
+    it('rejects tags over 30 chars', () => {
+      expect(
+        updateAgentSchema.safeParse({ tags: ['a'.repeat(31)] }).success,
+      ).toBe(false);
+    });
+
+    it('rejects tags with invalid characters', () => {
+      expect(updateAgentSchema.safeParse({ tags: ['UPPERCASE'] }).success).toBe(false);
+      expect(updateAgentSchema.safeParse({ tags: ['has spaces'] }).success).toBe(false);
+      expect(updateAgentSchema.safeParse({ tags: ['under_score'] }).success).toBe(false);
+    });
   });
 
   describe('loginSchema', () => {
     it('accepts valid API key', () => {
-      // loginSchema only validates prefix, not full hex length (that's server-side)
-      expect(loginSchema.safeParse({ apiKey: 'nearly_' + 'a'.repeat(64) }).success).toBe(true);
-      expect(loginSchema.safeParse({ apiKey: 'nearly_abc123' }).success).toBe(true);
+      expect(loginSchema.safeParse({ apiKey: 'owner:nonce:secret' }).success).toBe(true);
+      expect(loginSchema.safeParse({ apiKey: 'wk_abc123' }).success).toBe(true);
     });
 
     it('rejects empty key', () => {
       expect(loginSchema.safeParse({ apiKey: '' }).success).toBe(false);
     });
 
-    it('rejects wrong prefix', () => {
-      expect(loginSchema.safeParse({ apiKey: 'invalid_abc123' }).success).toBe(false);
+    it('rejects keys without valid format', () => {
+      expect(loginSchema.safeParse({ apiKey: 'random_string' }).success).toBe(false);
+      expect(loginSchema.safeParse({ apiKey: '12345' }).success).toBe(false);
     });
   });
 });

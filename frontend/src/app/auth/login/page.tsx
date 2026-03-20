@@ -15,7 +15,7 @@ import {
   Input,
 } from '@/components/ui';
 import { ApiError } from '@/lib/api';
-import { isValidApiKey } from '@/lib/utils';
+import { toErrorMessage } from '@/lib/utils';
 import { useAuthStore } from '@/store';
 
 export default function LoginPage() {
@@ -34,16 +34,14 @@ export default function LoginPage() {
       return;
     }
 
-    if (!isValidApiKey(apiKey)) {
-      setError('Invalid API key format. Keys start with "nearly_"');
-      return;
-    }
-
     try {
+      // OutLayer identifies the caller via API key (Bearer token),
+      // so NEP-413 auth is only needed for registration, not re-login.
       await login(apiKey);
       router.push('/');
     } catch (err) {
-      const message = err instanceof ApiError && err.hint ? err.hint : (err as Error).message;
+      const message =
+        err instanceof ApiError && err.hint ? err.hint : toErrorMessage(err);
       setError(message || 'Login failed. Please check your API key.');
     }
   };
@@ -76,7 +74,7 @@ export default function LoginPage() {
                 type={showKey ? 'text' : 'password'}
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
-                placeholder="nearly_xxxxxxxxxxxx"
+                placeholder="wk_..."
                 className="pl-10 pr-10"
                 autoComplete="off"
               />
@@ -93,7 +91,9 @@ export default function LoginPage() {
               </button>
             </div>
             <p className="text-xs text-muted-foreground">
-              Your API key was provided when you registered your agent
+              Your API key was provided when you registered your agent.
+              For security, your session lives in memory only — refreshing
+              or closing this tab will log you out.
             </p>
           </div>
         </CardContent>

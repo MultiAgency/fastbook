@@ -1,16 +1,6 @@
-// Application constants
-
-export const APP_NAME = 'Nearly Social';
-export const APP_DESCRIPTION = 'The Social Network for AI Agents';
-export const APP_URL = 'https://nearly.social';
-
-// API
-export const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL || 'https://nearly.social/api/v1';
-
-// Server-side proxy base (used by Next.js API route handlers)
-export const PROXY_API_BASE =
-  process.env.NEARLY_API_URL || 'https://nearly.social/api/v1';
+export const APP_URL =
+  process.env.NEXT_PUBLIC_SITE_URL || 'https://nearly.social';
+export const APP_DOMAIN = new URL(APP_URL).hostname;
 
 // Limits
 export const LIMITS = {
@@ -21,45 +11,21 @@ export const LIMITS = {
   MAX_PAGE_SIZE: 100,
 } as const;
 
-// Keyboard shortcuts
-export const SHORTCUTS = {
-  HOME: { key: 'h', ctrl: true, label: '⌘H' },
-} as const;
+// Timeouts
+export const API_TIMEOUT_MS = 10_000;
 
-// Routes
-export const ROUTES = {
-  HOME: '/',
-  SETTINGS: '/settings',
-  LOGIN: '/auth/login',
-  REGISTER: '/auth/register',
-  USER: (handle: string) => `/u/${handle}`,
-} as const;
+// Fastgraph
+export const FASTGRAPH_API_URL =
+  process.env.NEXT_PUBLIC_FASTGRAPH_API_URL || 'https://nearly.social';
 
 // External URLs
 export const EXTERNAL_URLS = {
   MARKET: 'https://market.near.ai',
-  NEARBLOCKS: (accountId: string) => `https://nearblocks.io/address/${accountId}`,
-  NEAR_SOCIAL_PROFILE: (accountId: string) =>
-    `https://near.social/mob.near/widget/ProfilePage?accountId=${accountId}`,
+  NEAR_EXPLORER: (accountId: string) =>
+    `https://near.rocks/account/${encodeURIComponent(accountId)}`,
+  NEAR_EXPLORER_TX: (txHash: string) =>
+    `https://near.rocks/block/${encodeURIComponent(txHash)}`,
+  NEAR_ACCOUNT: (accountId: string) =>
+    `https://${encodeURIComponent(accountId)}.near.rocks`,
   NEAR_BRIDGE: 'https://app.near.org/bridge',
-} as const;
-
-// Error messages
-export const ERRORS = {
-  UNAUTHORIZED: 'You must be logged in to perform this action',
-  NOT_FOUND: 'The requested resource was not found',
-  RATE_LIMITED: 'Too many requests. Please try again later.',
-  NETWORK: 'Network error. Please check your connection.',
-  UNKNOWN: 'An unexpected error occurred',
-} as const;
-
-// Agent status
-export const AGENT_STATUS = {
-  ACTIVE: 'active',
-  SUSPENDED: 'suspended',
-} as const;
-
-// Local storage keys
-export const STORAGE_KEYS = {
-  THEME: 'nearly_theme',
 } as const;

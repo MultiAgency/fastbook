@@ -8,7 +8,6 @@ interface JsonViewerProps {
   label: string;
   request?: unknown;
   response?: unknown;
-  mock?: boolean;
   highlightValue?: string;
   className?: string;
 }
@@ -16,7 +15,7 @@ interface JsonViewerProps {
 /**
  * Render JSON string with optional value highlighting.
  * Finds exact string matches of highlightValue within JSON values
- * and wraps them in an emerald pill with an inline identity label.
+ * and wraps them in a highlighted pill with an inline identity label.
  */
 function HighlightedJson({
   data,
@@ -42,10 +41,10 @@ function HighlightedJson({
           {part}
           {i < parts.length - 1 && (
             <span
-              className={`identity-highlight rounded px-0.5 bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300${animate ? ' identity-animate' : ''}`}
+              className={`identity-highlight rounded px-0.5 bg-nearly-50 text-nearly-700 dark:bg-nearly-950 dark:text-nearly-300${animate ? ' identity-animate' : ''}`}
             >
               {highlightValue}
-              <span className="text-[9px] text-emerald-500/70 dark:text-primary/50 ml-1 font-sans">
+              <span className="text-[9px] text-nearly-500/70 dark:text-primary/50 ml-1 font-sans">
                 ◆ identity
               </span>
             </span>
@@ -60,7 +59,6 @@ export function JsonViewer({
   label,
   request,
   response,
-  mock,
   highlightValue,
   className,
 }: JsonViewerProps) {
@@ -94,24 +92,6 @@ export function JsonViewer({
       </button>
       {open && (
         <div className="border-t px-3 py-2 space-y-3 bg-muted/30">
-          {mock !== undefined && (
-            <div
-              className={cn(
-                'flex items-center gap-1.5 px-2 py-1 rounded text-[10px] font-semibold uppercase tracking-wider w-fit',
-                mock
-                  ? 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400'
-                  : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-primary',
-              )}
-            >
-              <span
-                className={cn(
-                  'inline-block h-1.5 w-1.5 rounded-full',
-                  mock ? 'bg-amber-500' : 'bg-emerald-500',
-                )}
-              />
-              {mock ? 'Mock response' : 'Live API call'}
-            </div>
-          )}
           {request !== undefined && (
             <div>
               <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1 font-semibold">

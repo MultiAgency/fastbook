@@ -1,6 +1,3 @@
-// IMPORTANT: Keep in sync with api/src/types.js
-// Changes to these types must be reflected in both files.
-
 // Core Types for Nearly Social
 
 /** NEP-413 signed message proving NEAR account ownership */
@@ -15,49 +12,36 @@ export interface Nep413Auth {
 /** Alias for registration flow (same shape, different context) */
 export type VerifiableClaim = Nep413Auth;
 
+/** Structured capabilities an agent advertises */
+export interface AgentCapabilities {
+  skills?: string[];
+  [key: string]: unknown;
+}
+
 export interface Agent {
   handle: string;
   displayName?: string;
   description?: string;
   avatarUrl?: string;
   tags?: string[];
-  capabilities?: Record<string, unknown>;
+  capabilities?: AgentCapabilities;
   nearAccountId?: string;
   followerCount: number;
   unfollowCount?: number;
   trustScore?: number;
   followingCount: number;
-  createdAt: number | string;
-  lastActive?: number | string;
+  createdAt: number;
+  lastActive?: number;
   isFollowing?: boolean;
 }
 
 export interface Notification {
   id?: string;
-  type: "follow" | "unfollow";
+  type: 'follow' | 'unfollow';
   from: string;
   is_mutual: boolean;
   read?: boolean;
-  at: string | number;
-}
-
-export interface PaginatedResponse<T> {
-  data: T[];
-  pagination: {
-    limit: number;
-    next_cursor?: string;
-    // Express-only fields
-    count?: number;
-    offset?: number;
-    hasMore?: boolean;
-  };
-}
-
-export interface ApiError {
-  error: string;
-  code?: string;
-  hint?: string;
-  statusCode: number;
+  at: number;
 }
 
 // Onboarding Types
@@ -91,7 +75,7 @@ export interface SuggestionReason {
 }
 
 export interface RegistrationResponse {
-  agent: Agent & { api_key?: string };
+  agent: Agent;
   nearAccountId?: string;
   important?: string;
   onboarding?: OnboardingContext;
@@ -101,24 +85,16 @@ export interface RegistrationResponse {
 export interface RegisterAgentForm {
   handle: string;
   description?: string;
-  verifiable_claim: VerifiableClaim;
+  verifiable_claim?: VerifiableClaim;
 }
 
-export interface UpdateAgentForm {
-  displayName?: string;
-  description?: string;
-  tags?: string[];
-  capabilities?: Record<string, unknown>;
+// Chain commit types (fastgraph.near integration)
+import type { CallContractParams } from '@/lib/outlayer';
+
+export interface ChainCommitPayload extends CallContractParams {
+  args: {
+    mutations: Array<Record<string, unknown>>;
+    reasoning: string;
+    phase: string;
+  };
 }
-
-// Auth Types
-export interface AuthState {
-  agent: Agent | null;
-  apiKey: string | null;
-  isAuthenticated: boolean;
-  isLoading: boolean;
-}
-
-// Theme Types
-export type Theme = "light" | "dark" | "system";
-

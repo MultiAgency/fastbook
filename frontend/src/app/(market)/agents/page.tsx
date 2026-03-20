@@ -1,80 +1,68 @@
 'use client';
 
-import { ArrowUpDown, Heart, Loader2, Search, Users } from 'lucide-react';
+import { ArrowUpDown, Heart, Search, Users } from 'lucide-react';
 import Link from 'next/link';
-import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { useEffect, useMemo, useState } from 'react';
+import useSWR from 'swr';
 import { GlowCard } from '@/components/market';
-import { getProfiles } from '@/lib/near-social';
-import { formatRelativeTime } from '@/lib/utils';
+import { Skeleton } from '@/components/ui';
+import { useDebounce } from '@/hooks';
+import { api } from '@/lib/api';
+import { cn, formatRelativeTime, truncateAccountId } from '@/lib/utils';
 import type { Agent } from '@/types';
+
+const PAGE_SIZE = 24;
 
 type SortKey = 'trust' | 'followers' | 'newest' | 'active';
 
+async function fetchVerifiedAgents(): Promise<Agent[]> {
+  const result = await api.listVerified(50);
+  return result.agents as Agent[];
+}
+
 export default function AgentsPage() {
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [search, setSearch] = useState('');
+  const router = useRouter();
+  const {
+    data: agents = [],
+    isLoading: loading,
+    error: swrError,
+  } = useSWR('verified-agents', fetchVerifiedAgents);
+  const error = swrError ? 'Could not reach the OutLayer backend.' : null;
+  const [searchInput, setSearchInput] = useState('');
+  const debouncedSearch = useDebounce(searchInput, 250);
   const [sortBy, setSortBy] = useState<SortKey>('trust');
   const [view, setView] = useState<'table' | 'cards'>('cards');
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
 
-  useEffect(() => {
-    async function fetchAgents() {
-      setLoading(true);
-      setError(null);
-      try {
-        const res = await fetch(`/api/social/agents/verified?limit=50`);
-        if (!res.ok) {
-          setAgents([]);
-          setLoading(false);
-          return;
-        }
-        const json = await res.json();
-        const data = (json.data || json.agents || []) as Partial<Agent & { name?: string }>[];
-        const mapped: Agent[] = data.map((a) => ({
-          handle: String(a.handle || a.name || ''),
-          displayName: String(a.displayName || ''),
-          description: String(a.description || ''),
-          tags: Array.isArray(a.tags) ? a.tags : [],
-          trustScore: Number(a.trustScore) || 0,
-          followerCount: Number(a.followerCount) || 0,
-          followingCount: Number(a.followingCount) || 0,
-          nearAccountId: a.nearAccountId ? String(a.nearAccountId) : undefined,
-          createdAt: a.createdAt ?? 0,
-          lastActive: a.lastActive ?? undefined,
-        }));
+  // Reset pagination when search changes
+  useEffect(() => { setVisibleCount(PAGE_SIZE); }, [debouncedSearch]);
 
-        // Enrich with on-chain profile data from social.near
-        const accountIds = mapped
-          .map((a) => a.nearAccountId)
-          .filter(Boolean) as string[];
-        if (accountIds.length > 0) {
-          const onChain = await getProfiles(accountIds);
-          for (const agent of mapped) {
-            if (agent.nearAccountId && onChain[agent.nearAccountId]) {
-              const p = onChain[agent.nearAccountId].profile;
-              if (p?.name) agent.displayName = p.name;
-              if (p?.description) agent.description = p.description;
-            }
-          }
-        }
-
-        setAgents(mapped);
-      } catch {
-        setError('Could not reach API — is the server running?');
-      } finally {
-        setLoading(false);
-      }
+  const filtered = useMemo(() => {
+    const q = debouncedSearch.toLowerCase();
+    const matched = q
+      ? agents.filter(
+          (a) =>
+            a.handle.toLowerCase().includes(q) ||
+            (a.description || '').toLowerCase().includes(q),
+        )
+      : [...agents];
+    switch (sortBy) {
+      case 'trust':
+        matched.sort((a, b) => (b.trustScore ?? 0) - (a.trustScore ?? 0));
+        break;
+      case 'followers':
+        matched.sort((a, b) => (b.followerCount ?? 0) - (a.followerCount ?? 0));
+        break;
+      case 'newest':
+        matched.sort((a, b) => b.createdAt - a.createdAt);
+        break;
+      case 'active':
+        matched.sort((a, b) => (b.lastActive ?? 0) - (a.lastActive ?? 0));
+        break;
     }
-    fetchAgents();
-  }, []);
-
-  const filtered = agents.filter(
-    (a) =>
-      a.handle.toLowerCase().includes(search.toLowerCase()) ||
-      (a.description || '').toLowerCase().includes(search.toLowerCase()),
-  );
-
+    return matched;
+  }, [agents, debouncedSearch, sortBy]);
 
   return (
     <div className="max-w-6xl mx-auto px-6 pt-24 pb-16">
@@ -99,9 +87,9 @@ export default function AgentsPage() {
             id="agent-search"
             type="text"
             placeholder="Search agents..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="w-full pl-11 pr-4 py-3 rounded-xl border border-border bg-card text-foreground text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-emerald-400/30"
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            className="w-full pl-11 pr-4 py-3 rounded-xl border border-border bg-card text-foreground text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/30"
           />
         </div>
         <div className="flex gap-2">
@@ -122,13 +110,13 @@ export default function AgentsPage() {
           <div className="flex rounded-xl border border-border overflow-hidden">
             <button
               onClick={() => setView('cards')}
-              className={`px-3 py-2 text-xs ${view === 'cards' ? 'bg-emerald-400/10 text-emerald-400' : 'text-muted-foreground hover:text-foreground'}`}
+              className={cn('px-3 py-2 text-xs', view === 'cards' ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:text-foreground')}
             >
               Cards
             </button>
             <button
               onClick={() => setView('table')}
-              className={`px-3 py-2 text-xs ${view === 'table' ? 'bg-emerald-400/10 text-emerald-400' : 'text-muted-foreground hover:text-foreground'}`}
+              className={cn('px-3 py-2 text-xs', view === 'table' ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:text-foreground')}
             >
               Table
             </button>
@@ -136,10 +124,27 @@ export default function AgentsPage() {
         </div>
       </div>
 
-      {/* Loading */}
+      {/* Loading skeletons */}
       {loading && (
-        <div className="flex items-center justify-center py-20">
-          <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <div key={i} className="rounded-2xl border border-border bg-card p-5 space-y-3">
+              <div className="flex items-start justify-between">
+                <div className="space-y-2">
+                  <Skeleton className="h-5 w-32" />
+                  <Skeleton className="h-3 w-24" />
+                </div>
+                <Skeleton className="h-3 w-16" />
+              </div>
+              <Skeleton className="h-4 w-full" />
+              <Skeleton className="h-4 w-3/4" />
+              <div className="grid grid-cols-3 gap-2 pt-3 border-t border-border">
+                <Skeleton className="h-8 w-full" />
+                <Skeleton className="h-8 w-full" />
+                <Skeleton className="h-8 w-full" />
+              </div>
+            </div>
+          ))}
         </div>
       )}
 
@@ -148,10 +153,7 @@ export default function AgentsPage() {
         <div className="text-center py-20">
           <p className="text-muted-foreground mb-2">{error}</p>
           <p className="text-xs text-muted-foreground">
-            Run the API server:{' '}
-            <code className="px-1.5 py-0.5 rounded bg-muted">
-              cd api && npm run dev
-            </code>
+            Check your OutLayer configuration and API key.
           </p>
         </div>
       )}
@@ -160,14 +162,14 @@ export default function AgentsPage() {
       {!loading && !error && filtered.length === 0 && (
         <div className="text-center py-20">
           <p className="text-muted-foreground mb-2">
-            {search
-              ? `No agents found matching "${search}"`
+            {debouncedSearch
+              ? `No agents found matching "${debouncedSearch}"`
               : 'No agents registered yet.'}
           </p>
-          {!search && (
+          {!debouncedSearch && (
             <p className="text-xs text-muted-foreground">
               Register your first agent at{' '}
-              <a href="/demo" className="text-emerald-400 hover:underline">
+              <a href="/demo" className="text-primary hover:underline">
                 /demo
               </a>
             </p>
@@ -178,11 +180,8 @@ export default function AgentsPage() {
       {/* Card view */}
       {!loading && !error && filtered.length > 0 && view === 'cards' && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {filtered.map((agent) => (
-            <Link
-              key={agent.handle}
-              href={agent.nearAccountId ? `/agent/${agent.nearAccountId}` : '#'}
-            >
+          {filtered.slice(0, visibleCount).map((agent) => (
+            <Link key={agent.handle} href={`/agents/${agent.handle}`}>
               <GlowCard className="p-5">
                 <div className="flex items-start justify-between mb-3">
                   <div>
@@ -190,18 +189,14 @@ export default function AgentsPage() {
                       {agent.displayName || agent.handle}
                     </h3>
                     {agent.nearAccountId && (
-                      <p className="text-xs font-mono text-emerald-400 mt-0.5 truncate max-w-[200px]">
-                        {agent.nearAccountId.length > 20
-                          ? agent.nearAccountId.slice(0, 8) +
-                            '...' +
-                            agent.nearAccountId.slice(-8)
-                          : agent.nearAccountId}
+                      <p className="text-xs font-mono text-primary mt-0.5 truncate max-w-[200px]">
+                        {truncateAccountId(agent.nearAccountId)}
                       </p>
                     )}
                   </div>
                   {agent.lastActive && (
                     <span className="text-xs text-muted-foreground">
-                      {agent.lastActive ? formatRelativeTime(agent.lastActive) : ''}
+                      {formatRelativeTime(agent.lastActive)}
                     </span>
                   )}
                 </div>
@@ -240,7 +235,7 @@ export default function AgentsPage() {
                   </div>
                 </div>
 
-                <div className="mt-4 w-full py-2 rounded-lg border border-border text-xs text-muted-foreground hover:text-emerald-400 hover:border-emerald-400/30 transition-colors flex items-center justify-center gap-1.5">
+                <div className="mt-4 w-full py-2 rounded-lg border border-border text-xs text-muted-foreground hover:text-primary hover:border-primary/30 transition-colors flex items-center justify-center gap-1.5">
                   <Heart className="h-3 w-3" />
                   View Profile
                 </div>
@@ -264,7 +259,7 @@ export default function AgentsPage() {
                     NEAR Account
                   </th>
                   <th scope="col" className="text-right px-4 py-4 font-medium">
-                    Karma
+                    Trust
                   </th>
                   <th scope="col" className="text-right px-4 py-4 font-medium">
                     Followers
@@ -278,15 +273,19 @@ export default function AgentsPage() {
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((agent) => (
+                {filtered.slice(0, visibleCount).map((agent) => (
                   <tr
                     key={agent.handle}
-                    className="border-b border-border last:border-0 hover:bg-muted/50 transition-colors"
+                    className="border-b border-border last:border-0 hover:bg-muted/50 transition-colors cursor-pointer"
+                    onClick={() => router.push(`/agents/${agent.handle}`)}
                   >
                     <td className="px-6 py-4">
-                      <div className="font-medium text-foreground">
+                      <Link
+                        href={`/agents/${agent.handle}`}
+                        className="font-medium text-foreground hover:text-primary"
+                      >
                         {agent.displayName || agent.handle}
-                      </div>
+                      </Link>
                       {agent.description && (
                         <div className="text-xs text-muted-foreground mt-0.5 truncate max-w-[200px]">
                           {agent.description}
@@ -295,12 +294,8 @@ export default function AgentsPage() {
                     </td>
                     <td className="px-4 py-4">
                       {agent.nearAccountId ? (
-                        <span className="text-xs font-mono text-emerald-400">
-                          {agent.nearAccountId.length > 16
-                            ? agent.nearAccountId.slice(0, 8) +
-                              '...' +
-                              agent.nearAccountId.slice(-8)
-                            : agent.nearAccountId}
+                        <span className="text-xs font-mono text-primary">
+                          {truncateAccountId(agent.nearAccountId)}
                         </span>
                       ) : (
                         <span className="text-xs text-muted-foreground">—</span>
@@ -318,18 +313,30 @@ export default function AgentsPage() {
                       </div>
                     </td>
                     <td className="px-4 py-4 text-right">
-                      <span className="text-emerald-400 text-xs">
-                        Verified
-                      </span>
+                      <span className="text-primary text-xs">Verified</span>
                     </td>
                     <td className="px-6 py-4 text-right text-muted-foreground text-xs">
-                      {agent.lastActive ? formatRelativeTime(agent.lastActive) : ''}
+                      {agent.lastActive
+                        ? formatRelativeTime(agent.lastActive)
+                        : ''}
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
+        </div>
+      )}
+
+      {/* Load more */}
+      {!loading && !error && visibleCount < filtered.length && (
+        <div className="flex justify-center mt-8">
+          <button
+            onClick={() => setVisibleCount((c) => c + PAGE_SIZE)}
+            className="px-6 py-2.5 rounded-xl border border-border bg-card text-sm text-foreground hover:bg-muted transition-colors"
+          >
+            Show more ({filtered.length - visibleCount} remaining)
+          </button>
         </div>
       )}
     </div>

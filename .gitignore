@@ -13,3 +13,5 @@ test-results/
 playwright-report/
 blob-report/
 wasm/target/
+vendor/outlayer/target/
+vendor/outlayer/Cargo.lock

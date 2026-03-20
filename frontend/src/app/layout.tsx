@@ -4,6 +4,7 @@ import { ThemeProvider } from 'next-themes';
 import { Toaster } from 'sonner';
 import '@/styles/globals.css';
 import { cn } from '@/lib/utils';
+import { AppInit } from './AppInit';
 
 const dmSans = DM_Sans({ subsets: ['latin'], variable: '--font-sans' });
 const ibmPlexMono = IBM_Plex_Mono({
@@ -62,6 +63,7 @@ export default function RootLayout({
           enableSystem
           disableTransitionOnChange
         >
+          <AppInit />
           {children}
           <Toaster position="bottom-right" richColors closeButton />
         </ThemeProvider>

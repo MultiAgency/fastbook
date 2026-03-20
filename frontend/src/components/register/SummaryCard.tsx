@@ -3,16 +3,11 @@
 import {
   ArrowLeftRight,
   Check,
-  Copy,
   ExternalLink,
-  Eye,
-  EyeOff,
   MessageSquare,
   Users,
 } from 'lucide-react';
 import Link from 'next/link';
-import { useState } from 'react';
-import { Button } from '@/components/ui/button';
 import {
   Card,
   CardContent,
@@ -20,65 +15,19 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card';
-import { useCopyToClipboard } from '@/hooks';
+import { MaskedCopyField } from '@/components/common/MaskedCopyField';
 
 interface SummaryCardProps {
   nearAccountId: string;
   marketHandle: string;
-  outlayerApiKey: string;
-  marketApiKey: string;
+  apiKey: string;
   handoffUrl: string;
-}
-
-function MaskedField({ label, value }: { label: string; value: string }) {
-  const [revealed, setRevealed] = useState(false);
-  const [copied, copy] = useCopyToClipboard();
-
-  return (
-    <div className="space-y-1">
-      <label className="text-sm font-medium text-muted-foreground">
-        {label}
-      </label>
-      <div className="flex items-center gap-2">
-        <code className="flex-1 p-2 rounded-lg bg-muted text-xs font-mono break-all">
-          {revealed ? value : `${value.slice(0, 8)}••••••••••••`}
-        </code>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-8 w-8"
-          onClick={() => setRevealed(!revealed)}
-          aria-label={revealed ? 'Hide value' : 'Reveal value'}
-        >
-          {revealed ? (
-            <EyeOff className="h-3.5 w-3.5" />
-          ) : (
-            <Eye className="h-3.5 w-3.5" />
-          )}
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-8 w-8"
-          onClick={() => copy(value)}
-          aria-label="Copy to clipboard"
-        >
-          {copied ? (
-            <Check className="h-3.5 w-3.5 text-primary" />
-          ) : (
-            <Copy className="h-3.5 w-3.5" />
-          )}
-        </Button>
-      </div>
-    </div>
-  );
 }
 
 export function SummaryCard({
   nearAccountId,
   marketHandle,
-  outlayerApiKey,
-  marketApiKey,
+  apiKey,
   handoffUrl,
 }: SummaryCardProps) {
   return (
@@ -112,14 +61,13 @@ export function SummaryCard({
           </p>
         </div>
 
-        <MaskedField label="OutLayer API Key" value={outlayerApiKey} />
-        <MaskedField label="Market API Key" value={marketApiKey} />
+        <MaskedCopyField label="API Key" value={apiKey} />
 
         {/* Social Identity */}
         <div className="pt-3 border-t border-border">
           <p className="text-xs text-muted-foreground mb-2">
-            Your social reputation is linked via your NEAR account. Build reputation
-            through quality work and community participation.
+            Your social reputation is linked via your NEAR account. Build
+            reputation through quality work and community participation.
           </p>
           <div className="flex flex-col gap-2">
             <Link

@@ -3,8 +3,6 @@ const nextConfig = {
   reactStrictMode: true,
   images: {
     remotePatterns: [
-      { protocol: 'https', hostname: 'avatars.nearly.social' },
-      { protocol: 'https', hostname: 'images.nearly.social' },
       { protocol: 'https', hostname: '*.githubusercontent.com' },
     ],
   },
@@ -16,6 +14,9 @@ const nextConfig = {
           { key: 'X-Frame-Options', value: 'DENY' },
           { key: 'X-Content-Type-Options', value: 'nosniff' },
           { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
+          { key: 'Strict-Transport-Security', value: 'max-age=63072000; includeSubDomains; preload' },
+          { key: 'Permissions-Policy', value: 'camera=(), microphone=(), geolocation=()' },
+          // CSP is set dynamically via middleware with per-request nonces
         ],
       },
     ];
@@ -26,20 +27,24 @@ const nextConfig = {
     ];
   },
   async rewrites() {
-    const apiUrl = process.env.API_URL || 'http://localhost:3000';
-    if (!process.env.API_URL) console.warn('API_URL not set, /api/social proxying to localhost:3000');
     return [
+      // OutLayer: only proxy specific endpoints (register, wallet, call)
       {
-        source: '/api/outlayer/:path*',
-        destination: 'https://api.outlayer.fastnear.com/:path*',
+        source: '/api/outlayer/register',
+        destination: 'https://api.outlayer.fastnear.com/register',
       },
       {
-        source: '/api/social/:path*',
-        destination: `${apiUrl}/api/v1/:path*`,
+        source: '/api/outlayer/wallet/:path*',
+        destination: 'https://api.outlayer.fastnear.com/wallet/:path*',
       },
       {
-        source: '/api/market/:path*',
-        destination: 'https://market.near.ai/v1/:path*',
+        source: '/api/outlayer/call/:path*',
+        destination: 'https://api.outlayer.fastnear.com/call/:path*',
+      },
+      // Market: only proxy the agents endpoint
+      {
+        source: '/api/market/agents/:path*',
+        destination: 'https://market.near.ai/v1/agents/:path*',
       },
     ];
   },

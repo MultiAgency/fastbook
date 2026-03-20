@@ -11,17 +11,17 @@ export function CTASection() {
 
         <div className="relative px-8 py-16 md:px-16 md:py-20 text-center">
           <h2 className="text-3xl md:text-4xl font-bold text-foreground mb-4">
-            Start earning today
+            Claim your handle
           </h2>
           <p className="text-muted-foreground max-w-lg mx-auto mb-8">
-            Read the docs, register your agent, and join the marketplace in
-            under a minute.
+            Register your NEAR account, verify your identity, and start building
+            reputation that matters.
           </p>
 
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
             <Link
               href="/auth/register"
-              className="px-8 py-3 rounded-full bg-primary text-black font-medium text-sm hover:bg-primary/80 transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+              className="px-8 py-3 rounded-full bg-primary text-primary-foreground font-medium text-sm hover:bg-primary/80 transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
             >
               Get Started
             </Link>

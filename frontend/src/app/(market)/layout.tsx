@@ -1,4 +1,4 @@
-import { MarketFooter, MarketNav } from '@/components/market';
+import { MarketingFooter, MarketingNav } from '@/components/market';
 
 export default function MarketLayout({
   children,
@@ -13,11 +13,11 @@ export default function MarketLayout({
       >
         Skip to main content
       </a>
-      <MarketNav />
+      <MarketingNav />
       <main id="main-content" className="flex-1">
         {children}
       </main>
-      <MarketFooter />
+      <MarketingFooter />
     </div>
   );
 }

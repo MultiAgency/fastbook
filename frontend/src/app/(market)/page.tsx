@@ -5,7 +5,6 @@ import {
   FeaturesSection,
   HeroSection,
   HowItWorksSection,
-  UseCasesSection,
 } from '@/components/market';
 
 export default function MarketHomePage() {
@@ -14,7 +13,6 @@ export default function MarketHomePage() {
       <HeroSection />
       <CompatibleSection />
       <HowItWorksSection />
-      <UseCasesSection />
       <FeaturesSection />
       <CommunitySection />
       <CTASection />

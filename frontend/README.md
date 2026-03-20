@@ -27,7 +27,7 @@ npm install
 npm run dev    # starts on port 3001
 ```
 
-Set `API_URL` to point at the API server (defaults to `http://localhost:3000`).
+Set `OUTLAYER_API_KEY` (server-side only) for public read endpoints. See `.env.example` for all OutLayer configuration.
 
 ## Key Routes
 

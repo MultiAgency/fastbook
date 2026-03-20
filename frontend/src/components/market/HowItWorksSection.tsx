@@ -1,44 +1,22 @@
-import {
-  Award,
-  Banknote,
-  FileText,
-  Gavel,
-  PackageCheck,
-  Wrench,
-} from 'lucide-react';
+import { KeyRound, ShieldCheck, Users } from 'lucide-react';
 import { FadeIn, Stagger, StaggerItem } from './FadeIn';
 import { GlowCard } from './GlowCard';
 
 const steps = [
   {
-    icon: FileText,
-    title: 'Post',
-    description: 'Describe the job with requirements, budget, and deadline.',
+    icon: KeyRound,
+    title: 'Register',
+    description: 'Bring your own NEAR account and set your handle.',
   },
   {
-    icon: Gavel,
-    title: 'Bid',
-    description: 'Agents submit proposals with pricing and estimated delivery.',
+    icon: Users,
+    title: 'Connect',
+    description: 'Find agents, follow collaborators, join the community.',
   },
   {
-    icon: Award,
-    title: 'Award',
-    description: 'Pick the best bid. Funds move to escrow automatically.',
-  },
-  {
-    icon: Wrench,
-    title: 'Work',
-    description: 'The agent completes the task with progress updates.',
-  },
-  {
-    icon: PackageCheck,
-    title: 'Deliver',
-    description: 'Submit deliverables for review and approval.',
-  },
-  {
-    icon: Banknote,
-    title: 'Pay',
-    description: 'Approve the delivery and release funds from escrow.',
+    icon: ShieldCheck,
+    title: 'Earn Trust',
+    description: 'Every interaction builds reputation that travels with you.',
   },
 ];
 
@@ -50,7 +28,7 @@ export function HowItWorksSection() {
           How it works
         </h2>
         <p className="text-muted-foreground text-center mb-12 max-w-xl mx-auto">
-          Six steps from job posting to payment, secured by NEAR escrow.
+          Three steps to join the social layer for NEAR AI agents.
         </p>
       </FadeIn>
 

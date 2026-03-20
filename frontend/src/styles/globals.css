@@ -24,11 +24,6 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
-  --color-chart-1: var(--chart-1);
-  --color-chart-2: var(--chart-2);
-  --color-chart-3: var(--chart-3);
-  --color-chart-4: var(--chart-4);
-  --color-chart-5: var(--chart-5);
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);
   --color-sidebar-primary: var(--sidebar-primary);
@@ -37,17 +32,17 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
-  --color-nearly-50: #eef2ff;
-  --color-nearly-100: #e0e7ff;
-  --color-nearly-200: #c7d2fe;
-  --color-nearly-300: #a5b4fc;
-  --color-nearly-400: #818cf8;
-  --color-nearly-500: #6366f1;
-  --color-nearly-600: #4f46e5;
-  --color-nearly-700: #4338ca;
-  --color-nearly-800: #3730a3;
-  --color-nearly-900: #312e81;
-  --color-nearly-950: #1e1b4b;
+  --color-nearly-50: #eff3fe;
+  --color-nearly-100: #dbe4fd;
+  --color-nearly-200: #beccfb;
+  --color-nearly-300: #92aaf9;
+  --color-nearly-400: #6e90f8;
+  --color-nearly-500: #4e7df7;
+  --color-nearly-600: #3a65e0;
+  --color-nearly-700: #2f51c0;
+  --color-nearly-800: #28439c;
+  --color-nearly-900: #24397c;
+  --color-nearly-950: #16224b;
   --radius-lg: var(--radius);
   --radius-md: calc(var(--radius) - 2px);
   --radius-sm: calc(var(--radius) - 4px);
@@ -55,8 +50,6 @@
   --font-mono: var(--font-mono), monospace;
   --radius-xl: calc(var(--radius) * 1.4);
   --radius-2xl: calc(var(--radius) * 1.8);
-  --radius-3xl: calc(var(--radius) * 2.2);
-  --radius-4xl: calc(var(--radius) * 2.6);
 }
 
 :root {
@@ -64,8 +57,8 @@
   --card-foreground: oklch(0.145 0 0);
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
+  --primary: #2f51c0;
+  --primary-foreground: #ffffff;
   --secondary: oklch(0.97 0 0);
   --secondary-foreground: oklch(0.205 0 0);
   --muted: oklch(0.97 0 0);
@@ -76,21 +69,16 @@
   --destructive-foreground: oklch(0.985 0 0);
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
+  --ring: #2f51c0;
   --radius: 0.625rem;
-  --chart-1: oklch(0.809 0.105 251.813);
-  --chart-2: oklch(0.623 0.214 259.815);
-  --chart-3: oklch(0.546 0.245 262.881);
-  --chart-4: oklch(0.488 0.243 264.376);
-  --chart-5: oklch(0.424 0.199 265.638);
   --sidebar: oklch(0.985 0 0);
   --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-primary: #2f51c0;
+  --sidebar-primary-foreground: #ffffff;
   --sidebar-accent: oklch(0.97 0 0);
   --sidebar-accent-foreground: oklch(0.205 0 0);
   --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  --sidebar-ring: #2f51c0;
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
 }
@@ -102,8 +90,8 @@
   --card-foreground: #fafafa;
   --popover: #0f0f11;
   --popover-foreground: #fafafa;
-  --primary: #34d399;
-  --primary-foreground: #09090b;
+  --primary: #4e7df7;
+  --primary-foreground: #ffffff;
   --secondary: #1a1a1e;
   --secondary-foreground: #fafafa;
   --muted: #1a1a1e;
@@ -114,20 +102,15 @@
   --destructive-foreground: #fafafa;
   --border: rgba(255, 255, 255, 0.08);
   --input: rgba(255, 255, 255, 0.12);
-  --ring: #34d399;
-  --chart-1: #7eb8da;
-  --chart-2: #5b7bd5;
-  --chart-3: #4a6bc9;
-  --chart-4: #3d5cbf;
-  --chart-5: #324db0;
+  --ring: #4e7df7;
   --sidebar: #0f0f11;
   --sidebar-foreground: #fafafa;
-  --sidebar-primary: #34d399;
-  --sidebar-primary-foreground: #09090b;
+  --sidebar-primary: #4e7df7;
+  --sidebar-primary-foreground: #ffffff;
   --sidebar-accent: #1a1a1e;
   --sidebar-accent-foreground: #fafafa;
   --sidebar-border: rgba(255, 255, 255, 0.08);
-  --sidebar-ring: #34d399;
+  --sidebar-ring: #4e7df7;
 }
 
 * {
@@ -160,7 +143,7 @@ html {
 
 /* Selection */
 ::selection {
-  background: rgba(52, 211, 153, 0.25);
+  background: rgba(78, 125, 247, 0.25);
 }
 
 /* Glass morphism */

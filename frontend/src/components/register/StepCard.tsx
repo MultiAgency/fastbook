@@ -24,7 +24,6 @@ interface StepCardProps {
   badge?: string;
   request?: unknown;
   response?: unknown;
-  mock?: boolean;
   highlightValue?: string;
   children: React.ReactNode;
 }
@@ -60,7 +59,6 @@ export function StepCard({
   badge,
   request,
   response,
-  mock,
   highlightValue,
   children,
 }: StepCardProps) {
@@ -88,11 +86,6 @@ export function StepCard({
                 {badge}
               </Badge>
             )}
-            {mock && status === 'success' && !badge && (
-              <Badge variant="secondary" className="text-[10px]">
-                CORS fallback — mock data
-              </Badge>
-            )}
             <StatusIcon status={status} />
           </div>
         </div>
@@ -113,7 +106,6 @@ export function StepCard({
             label="View raw request / response"
             request={request}
             response={response}
-            mock={mock}
             highlightValue={highlightValue}
           />
         ) : null}

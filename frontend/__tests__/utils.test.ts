@@ -3,12 +3,11 @@ import {
   formatScore,
   formatRelativeTime,
   formatDate,
-  formatDateTime,
-  truncate,
+  truncateAccountId,
   isValidHandle,
-  isValidApiKey,
+  sanitizeHandle,
+  friendlyError,
   getInitials,
-  getAgentUrl,
 } from '@/lib/utils';
 
 describe('Utility Functions', () => {
@@ -49,49 +48,18 @@ describe('Utility Functions', () => {
     });
   });
 
-  describe('truncate', () => {
-    it('returns original string if short enough', () => {
-      expect(truncate('hello', 10)).toBe('hello');
-    });
-
-    it('truncates long strings', () => {
-      expect(truncate('hello world', 8)).toBe('hello...');
-    });
-
-    it('handles empty string', () => {
-      expect(truncate('', 10)).toBe('');
-    });
-
-    it('handles exact length', () => {
-      expect(truncate('hello', 5)).toBe('hello');
-    });
-  });
-
   describe('isValidHandle', () => {
     it('validates correct names', () => {
       expect(isValidHandle('agent123')).toBe(true);
       expect(isValidHandle('my_agent')).toBe(true);
-      expect(isValidHandle('Agent_Bot')).toBe(true);
+      expect(isValidHandle('agent_bot')).toBe(true);
     });
 
     it('rejects invalid names', () => {
       expect(isValidHandle('a')).toBe(false);
       expect(isValidHandle('agent-name')).toBe(false);
       expect(isValidHandle('agent name')).toBe(false);
-    });
-  });
-
-  describe('isValidApiKey', () => {
-    it('validates correct API keys', () => {
-      expect(isValidApiKey('nearly_' + 'a'.repeat(64))).toBe(true);
-      expect(isValidApiKey('nearly_' + 'abcdef0123456789'.repeat(4))).toBe(true);
-    });
-
-    it('rejects invalid API keys', () => {
-      expect(isValidApiKey('invalid_key')).toBe(false);
-      expect(isValidApiKey('nearly_short')).toBe(false);
-      expect(isValidApiKey('nearly_' + 'a'.repeat(63))).toBe(false);
-      expect(isValidApiKey('nearly_' + 'A'.repeat(64))).toBe(false); // uppercase rejected
+      expect(isValidHandle('Agent_Bot')).toBe(false);
     });
   });
 
@@ -106,12 +74,6 @@ describe('Utility Functions', () => {
       expect(getInitials('')).toBe('');
       expect(getInitials('a')).toBe('A');
       expect(getInitials('123')).toBe('1');
-    });
-  });
-
-  describe('URL helpers', () => {
-    it('generates correct agent URL', () => {
-      expect(getAgentUrl('bot')).toBe('/u/bot');
     });
   });
 
@@ -163,11 +125,76 @@ describe('Utility Functions', () => {
     });
   });
 
-  describe('formatDateTime', () => {
-    it('includes both date and time', () => {
-      const result = formatDateTime('2025-03-15T14:30:00Z');
-      expect(result).toMatch(/Mar 15, 2025/);
-      expect(result).toMatch(/\d{1,2}:\d{2}\s*(AM|PM)/i);
+  describe('truncateAccountId', () => {
+    it('returns short IDs unchanged', () => {
+      expect(truncateAccountId('alice.near')).toBe('alice.near');
+    });
+
+    it('truncates long IDs with ellipsis', () => {
+      const long = 'abcdefghijklmnopqrstuvwxyz1234567890.near';
+      const result = truncateAccountId(long);
+      expect(result).toContain('...');
+      expect(result.length).toBeLessThan(long.length);
+    });
+
+    it('respects custom maxLength', () => {
+      const id = 'abcdefghijklmnopqrstuvwxyz.near';
+      const result = truncateAccountId(id, 15);
+      expect(result).toContain('...');
+      expect(result.length).toBeLessThanOrEqual(15);
+    });
+
+    it('returns ID unchanged when exactly at maxLength', () => {
+      const id = 'abcdefghijklmnopqrst'; // 20 chars
+      expect(truncateAccountId(id, 20)).toBe(id);
+    });
+  });
+
+  describe('sanitizeHandle', () => {
+    it('lowercases input', () => {
+      expect(sanitizeHandle('MyAgent')).toBe('myagent');
+    });
+
+    it('strips invalid characters', () => {
+      expect(sanitizeHandle('my-agent!@#')).toBe('myagent');
+    });
+
+    it('allows underscores and numbers', () => {
+      expect(sanitizeHandle('agent_007')).toBe('agent_007');
+    });
+
+    it('returns empty string for all-invalid input', () => {
+      expect(sanitizeHandle('---!!!')).toBe('');
+    });
+  });
+
+  describe('friendlyError', () => {
+    it('maps timeout errors', () => {
+      expect(friendlyError(new Error('Request abort'))).toContain('timed out');
+    });
+
+    it('maps network errors', () => {
+      expect(friendlyError(new Error('fetch failed'))).toContain('NEAR network');
+    });
+
+    it('maps conflict errors', () => {
+      expect(friendlyError(new Error('Handle already taken'))).toContain('already in use');
+    });
+
+    it('maps expired errors', () => {
+      expect(friendlyError(new Error('timestamp expired'))).toContain('expired');
+    });
+
+    it('maps auth errors', () => {
+      expect(friendlyError(new Error('401 unauthorized'))).toContain('Authentication');
+    });
+
+    it('returns generic message for unknown errors', () => {
+      expect(friendlyError(new Error('something weird'))).toContain('Something went wrong');
+    });
+
+    it('handles non-Error objects', () => {
+      expect(friendlyError('string error')).toContain('Something went wrong');
     });
   });
 

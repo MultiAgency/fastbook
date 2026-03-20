@@ -1,28 +1,28 @@
 'use client';
 
-import {
-  ArrowLeft,
-  ExternalLink,
-  Loader2,
-  Shield,
-  Users,
-} from 'lucide-react';
+import { ArrowLeft, ExternalLink, Loader2, Shield, Users } from 'lucide-react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { GlowCard } from '@/components/market';
 import { getAgent } from '@/lib/agent-market';
+import { EXTERNAL_URLS } from '@/lib/constants';
+import { isValidHandle as checkHandle, toErrorMessage } from '@/lib/utils';
 import type { MarketAgent } from '@/types/market';
 
 export default function AgentProfilePage() {
   const params = useParams();
   const handle = params.handle as string;
+  const isValidHandle = checkHandle(handle);
 
   const [agent, setAgent] = useState<MarketAgent | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(isValidHandle);
+  const [error, setError] = useState<string | null>(
+    isValidHandle ? null : 'Invalid handle',
+  );
 
   useEffect(() => {
+    if (!isValidHandle) return;
     async function fetch() {
       setLoading(true);
       setError(null);
@@ -30,7 +30,7 @@ export default function AgentProfilePage() {
         const data = await getAgent(handle);
         setAgent(data);
       } catch (err) {
-        setError((err as Error).message);
+        setError(toErrorMessage(err));
       } finally {
         setLoading(false);
       }
@@ -79,11 +79,11 @@ export default function AgentProfilePage() {
               <h1 className="text-2xl font-bold text-foreground">
                 @{agent.handle}
               </h1>
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full bg-emerald-400/10 text-emerald-400">
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full bg-primary/10 text-primary">
                 <Shield className="h-3 w-3" /> Verified
               </span>
             </div>
-            <p className="text-sm font-mono text-emerald-400">
+            <p className="text-sm font-mono text-primary">
               {agent.near_account_id}
             </p>
           </div>
@@ -94,7 +94,7 @@ export default function AgentProfilePage() {
             {agent.tags.map((tag) => (
               <span
                 key={tag}
-                className="px-2 py-0.5 text-xs rounded-full bg-emerald-400/10 text-emerald-400"
+                className="px-2 py-0.5 text-xs rounded-full bg-primary/10 text-primary"
               >
                 {tag}
               </span>
@@ -121,7 +121,9 @@ export default function AgentProfilePage() {
           <Users className="h-5 w-5 text-primary shrink-0" />
           <div className="text-sm">
             <span className="text-foreground font-medium">NEAR Account:</span>{' '}
-            <span className="font-mono text-emerald-400">{agent.near_account_id}</span>
+            <span className="font-mono text-primary">
+              {agent.near_account_id}
+            </span>
           </div>
         </div>
       </GlowCard>
@@ -134,17 +136,17 @@ export default function AgentProfilePage() {
             href={`https://market.near.ai/agents/${agent.handle}`}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center gap-1.5 text-sm text-emerald-400 hover:underline"
+            className="inline-flex items-center gap-1.5 text-sm text-primary hover:underline"
           >
             View on Agent Market <ExternalLink className="h-3 w-3" />
           </a>
           <a
-            href={`https://nearblocks.io/address/${agent.near_account_id}`}
+            href={EXTERNAL_URLS.NEAR_EXPLORER(agent.near_account_id)}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center gap-1.5 text-sm text-emerald-400 hover:underline"
+            className="inline-flex items-center gap-1.5 text-sm text-primary hover:underline"
           >
-            View on NearBlocks <ExternalLink className="h-3 w-3" />
+            View on Explorer <ExternalLink className="h-3 w-3" />
           </a>
         </div>
       </GlowCard>

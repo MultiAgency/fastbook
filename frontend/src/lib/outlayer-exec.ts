@@ -1,11 +1,11 @@
 import type { Nep413Auth } from '@/types';
+import { API_TIMEOUT_MS } from './constants';
+import { fetchWithTimeout, httpErrorText } from './fetch';
 
-const OUTLAYER_API_URL =
-  process.env.NEXT_PUBLIC_OUTLAYER_API_URL || 'https://api.outlayer.fastnear.com';
-const PROJECT_OWNER =
-  process.env.NEXT_PUBLIC_OUTLAYER_PROJECT_OWNER || '';
-const PROJECT_NAME =
-  process.env.NEXT_PUBLIC_OUTLAYER_PROJECT_NAME || 'nearly';
+// Use the same-origin proxy to avoid sending API keys directly to external APIs
+const OUTLAYER_PROXY_BASE = '/api/outlayer';
+const PROJECT_OWNER = process.env.NEXT_PUBLIC_OUTLAYER_PROJECT_OWNER || '';
+const PROJECT_NAME = process.env.NEXT_PUBLIC_OUTLAYER_PROJECT_NAME || 'nearly';
 
 interface WasmResponse<T = unknown> {
   success: boolean;
@@ -13,8 +13,49 @@ interface WasmResponse<T = unknown> {
   error?: string;
   pagination?: {
     limit: number;
-    next_cursor?: string;
+    nextCursor?: string;
   };
+}
+
+/** Type guard: checks that a value has the shape of a WasmResponse. */
+function isWasmShape(v: unknown): v is WasmResponse {
+  return (
+    typeof v === 'object' &&
+    v !== null &&
+    'success' in v &&
+    typeof (v as Record<string, unknown>).success === 'boolean'
+  );
+}
+
+/**
+ * Decode an OutLayer API response, handling base64 and envelope formats.
+ * Shared by executeWasm (client-side via proxy) and publicRequest (server-side direct).
+ */
+export function decodeOutlayerResponse<T = unknown>(
+  result: unknown,
+): WasmResponse<T> {
+  if (typeof result === 'string') {
+    const parsed: unknown = JSON.parse(atob(result));
+    if (isWasmShape(parsed)) return parsed as WasmResponse<T>;
+    throw new Error('Unexpected OutLayer response format');
+  }
+
+  if (typeof result !== 'object' || result === null) {
+    throw new Error('Unexpected OutLayer response format');
+  }
+
+  const r = result as Record<string, unknown>;
+
+  if (r.output) {
+    const decoded =
+      typeof r.output === 'string' ? JSON.parse(atob(r.output)) : r.output;
+    if (isWasmShape(decoded)) return decoded as WasmResponse<T>;
+    throw new Error('OutLayer output is not a valid WASM response');
+  }
+
+  if (isWasmShape(r)) return r as WasmResponse<T>;
+
+  throw new Error('Unexpected OutLayer response format');
 }
 
 export class OutlayerExecError extends Error {
@@ -30,18 +71,18 @@ export class OutlayerExecError extends Error {
 /**
  * Execute a WASM action on the OutLayer project.
  *
- * @param paymentKey - OutLayer Payment Key (format: owner:nonce:secret)
+ * @param apiKey - OutLayer wallet API key (format: wk_...)
  * @param action - The WASM action name (e.g., 'get_me', 'register', 'follow')
  * @param args - Additional arguments for the action
  * @param auth - NEP-413 auth for authenticated endpoints
  */
 export async function executeWasm<T = unknown>(
-  paymentKey: string,
+  apiKey: string,
   action: string,
   args: Record<string, unknown> = {},
   auth?: Nep413Auth,
 ): Promise<WasmResponse<T>> {
-  const url = `${OUTLAYER_API_URL}/call/${PROJECT_OWNER}/${PROJECT_NAME}`;
+  const url = `${OUTLAYER_PROXY_BASE}/call/${PROJECT_OWNER}/${PROJECT_NAME}`;
 
   const input = {
     action,
@@ -49,49 +90,33 @@ export async function executeWasm<T = unknown>(
     ...(auth ? { auth } : {}),
   };
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Payment-Key': paymentKey,
+  const response = await fetchWithTimeout(
+    url,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(input),
     },
-    body: JSON.stringify(input),
-  });
+    API_TIMEOUT_MS,
+  );
 
   if (!response.ok) {
-    const text = await response.text().catch(() => 'Unknown error');
-    throw new OutlayerExecError(`OutLayer execution failed: ${response.status} ${text}`);
+    const text = await httpErrorText(response);
+    throw new OutlayerExecError(
+      `OutLayer execution failed: ${response.status} ${text}`,
+    );
   }
 
   const result = await response.json();
 
-  // OutLayer wraps the WASM stdout in a result envelope
-  // The actual WASM output is the JSON our module writes to stdout
   let wasmOutput: WasmResponse<T>;
-
-  if (typeof result === 'string') {
-    // Base64-encoded output
-    try {
-      const decoded = atob(result);
-      wasmOutput = JSON.parse(decoded);
-    } catch {
-      throw new OutlayerExecError('Failed to decode WASM output');
-    }
-  } else if (result?.output) {
-    // Output field in the response
-    try {
-      const decoded = typeof result.output === 'string'
-        ? JSON.parse(atob(result.output))
-        : result.output;
-      wasmOutput = decoded;
-    } catch {
-      throw new OutlayerExecError('Failed to parse WASM output');
-    }
-  } else if (result?.success !== undefined) {
-    // Direct JSON response
-    wasmOutput = result;
-  } else {
-    throw new OutlayerExecError('Unexpected OutLayer response format');
+  try {
+    wasmOutput = decodeOutlayerResponse<T>(result);
+  } catch {
+    throw new OutlayerExecError('Failed to decode WASM output');
   }
 
   if (!wasmOutput.success) {
