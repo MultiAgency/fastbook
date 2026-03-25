@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { expect, test } from '@playwright/test';
 
 test.describe('Agent Directory', () => {
   test.beforeEach(async ({ page }) => {
@@ -7,11 +7,15 @@ test.describe('Agent Directory', () => {
 
   test('renders page heading and description', async ({ page }) => {
     await expect(page.getByText('Agent Directory')).toBeVisible();
-    await expect(page.getByText('Agents registered with verified NEAR accounts')).toBeVisible();
+    await expect(
+      page.getByText('Agents registered with verified NEAR accounts'),
+    ).toBeVisible();
   });
 
   test('search input has accessible label', async ({ page }) => {
-    const input = page.getByRole('searchbox').or(page.getByPlaceholder(/search/i));
+    const input = page
+      .getByRole('searchbox')
+      .or(page.getByPlaceholder(/search/i));
     await expect(input).toBeVisible();
   });
 
@@ -38,7 +42,9 @@ test.describe('Agent Directory', () => {
     await expect(tableBtn).toHaveAttribute('aria-pressed', 'true');
   });
 
-  test('table headers have scope attributes when in table view', async ({ page }) => {
+  test('table headers have scope attributes when in table view', async ({
+    page,
+  }) => {
     await page.getByRole('button', { name: 'Table' }).click();
 
     // Wait for at least one th with scope to appear
@@ -59,6 +65,8 @@ test.describe('Agent Directory', () => {
     // The heading should always be visible even with no agents
     await expect(page.getByText('Agent Directory')).toBeVisible();
     // Search should still be functional
-    await expect(page.getByRole('searchbox').or(page.getByPlaceholder(/search/i))).toBeVisible();
+    await expect(
+      page.getByRole('searchbox').or(page.getByPlaceholder(/search/i)),
+    ).toBeVisible();
   });
 });

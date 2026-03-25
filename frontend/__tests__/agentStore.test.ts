@@ -1,4 +1,5 @@
 import { useAgentStore } from '@/store/agentStore';
+import { TEST_SIGN_RESULT } from './fixtures';
 
 beforeEach(() => {
   useAgentStore.getState().reset();
@@ -38,17 +39,12 @@ describe('useAgentStore', () => {
 
   describe('step 2: NEP-413 signing', () => {
     it('completes step 2 with sign result', () => {
-      const signResult = {
-        account_id: 'user.near',
-        public_key: 'ed25519:abc',
-        signature: 'ed25519:sig',
-        nonce: 'bm9uY2U=',
-      };
-
-      useAgentStore.getState().completeStep2(signResult, '{"action":"register"}');
+      useAgentStore
+        .getState()
+        .completeStep2(TEST_SIGN_RESULT, '{"action":"register"}');
 
       const state = useAgentStore.getState();
-      expect(state.signResult).toEqual(signResult);
+      expect(state.signResult).toEqual(TEST_SIGN_RESULT);
       expect(state.signMessage).toBe('{"action":"register"}');
       expect(state.currentStep).toBe(3);
       expect(state.stepStatus[2]).toBe('success');
@@ -57,43 +53,53 @@ describe('useAgentStore', () => {
 
   describe('step 3: registration', () => {
     it('completes step 3 and clears sensitive data', () => {
-      // Set up state as if steps 1 and 2 completed
       useAgentStore.getState().completeStep1({
         api_key: 'wk_secret',
         near_account_id: 'user.near',
         handoff_url: 'https://handoff.url',
         trial: true,
       });
-      useAgentStore.getState().completeStep2(
-        {
-          account_id: 'user.near',
-          public_key: 'ed25519:abc',
-          signature: 'ed25519:sig',
-          nonce: 'bm9uY2U=',
-        },
-        '{"action":"register"}',
-      );
+      useAgentStore
+        .getState()
+        .completeStep2(TEST_SIGN_RESULT, '{"action":"register"}');
 
-      useAgentStore.getState().completeStep3({ handle: 'my_bot', api_key: 'key123', near_account_id: 'bot.near' });
+      useAgentStore.getState().completeStep3({
+        handle: 'my_bot',
+        api_key: 'key123',
+        near_account_id: 'bot.near',
+        market: { api_key: 'sk_live_test' },
+        warnings: [],
+      });
 
       const state = useAgentStore.getState();
       expect(state.handle).toBe('my_bot');
+      expect(state.marketApiKey).toBe('sk_live_test');
+      expect(state.warnings).toEqual([]);
       expect(state.stepStatus[3]).toBe('success');
 
-      // Sensitive data should be cleared
-      expect(state.apiKey).toBeNull();
       expect(state.signResult).toBeNull();
       expect(state.signMessage).toBeNull();
-      expect(state.handoffUrl).toBeNull();
+    });
 
-      // Non-sensitive data should remain
-      expect(state.nearAccountId).toBe('user.near');
+    it('stores warnings when market registration fails', () => {
+      useAgentStore.getState().completeStep3({
+        handle: 'my_bot',
+        api_key: 'key123',
+        near_account_id: 'bot.near',
+        warnings: ['market.near.ai: Handle may already be taken'],
+      });
+
+      const state = useAgentStore.getState();
+      expect(state.handle).toBe('my_bot');
+      expect(state.marketApiKey).toBeNull();
+      expect(state.warnings).toEqual([
+        'market.near.ai: Handle may already be taken',
+      ]);
     });
   });
 
   describe('reset', () => {
     it('resets all state to initial values', () => {
-      // Set up some state
       useAgentStore.getState().completeStep1({
         api_key: 'wk_key',
         near_account_id: 'user.near',
@@ -124,7 +130,7 @@ describe('useAgentStore', () => {
 
       setStepLoading(1);
       expect(useAgentStore.getState().stepStatus[1]).toBe('loading');
-      expect(useAgentStore.getState().stepErrors[1]).toBeNull(); // Error cleared
+      expect(useAgentStore.getState().stepErrors[1]).toBeNull();
 
       completeStep1({
         api_key: 'wk_key',

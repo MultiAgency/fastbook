@@ -1,9 +1,10 @@
 'use client';
 
-import { ArrowRight, Briefcase, Zap, Users } from 'lucide-react';
+import { Briefcase, Users, Zap } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { FadeIn } from './FadeIn';
+import { Section } from './Section';
 
 interface MarketStats {
   totalAgents: string;
@@ -15,66 +16,61 @@ export function MarketSection() {
   const [stats, setStats] = useState<MarketStats | null>(null);
 
   useEffect(() => {
-    fetch('/api/market-stats')
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
+    async function load() {
+      try {
+        const r = await fetch('/api/market-stats');
+        if (!r.ok) return;
+        const data = await r.json();
         if (data && !data.error) setStats(data);
-      })
-      .catch(() => {});
+      } catch (err) {
+        console.warn('Market stats fetch failed:', err);
+      }
+    }
+    load();
   }, []);
 
   return (
-    <section className="max-w-6xl mx-auto px-6 py-16">
+    <Section className="py-16">
       <FadeIn>
         <div className="rounded-2xl border border-border bg-card/50 p-8 md:p-10">
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-8">
-            {/* Stats — left side */}
             <div className="flex gap-8 shrink-0">
-              <Link
-                href="https://market.near.ai/agents"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-center hover:text-[#34d399] transition-colors"
-              >
-                <div className="flex items-center justify-center gap-1.5 text-[#34d399] mb-1">
-                  <Users className="h-4 w-4" />
-                </div>
-                <div className="text-2xl font-bold">
-                  {stats?.totalAgents || '—'}
-                </div>
-                <div className="text-xs text-muted-foreground">Agents</div>
-              </Link>
-              <Link
-                href="https://market.near.ai/jobs"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-center hover:text-[#34d399] transition-colors"
-              >
-                <div className="flex items-center justify-center gap-1.5 text-[#34d399] mb-1">
-                  <Briefcase className="h-4 w-4" />
-                </div>
-                <div className="text-2xl font-bold">
-                  {stats?.openJobs || '—'}
-                </div>
-                <div className="text-xs text-muted-foreground">Open Jobs</div>
-              </Link>
-              <Link
-                href="https://market.near.ai/services"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-center hover:text-[#34d399] transition-colors"
-              >
-                <div className="flex items-center justify-center gap-1.5 text-[#34d399] mb-1">
-                  <Zap className="h-4 w-4" />
-                </div>
-                <div className="text-2xl font-bold">
-                  {stats?.services || '—'}
-                </div>
-                <div className="text-xs text-muted-foreground">Services</div>
-              </Link>
+              {[
+                {
+                  Icon: Users,
+                  value: stats?.totalAgents,
+                  label: 'Agents',
+                  path: 'agents',
+                },
+                {
+                  Icon: Briefcase,
+                  value: stats?.openJobs,
+                  label: 'Open Jobs',
+                  path: 'jobs',
+                },
+                {
+                  Icon: Zap,
+                  value: stats?.services,
+                  label: 'Services',
+                  path: 'services',
+                },
+              ].map(({ Icon, value, label, path }) => (
+                <Link
+                  key={path}
+                  href={`https://market.near.ai/${path}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-center hover:text-emerald-400 transition-colors"
+                >
+                  <div className="flex items-center justify-center gap-1.5 text-emerald-400 mb-1">
+                    <Icon className="h-4 w-4" />
+                  </div>
+                  <div className="text-2xl font-bold">{value || '—'}</div>
+                  <div className="text-xs text-muted-foreground">{label}</div>
+                </Link>
+              ))}
             </div>
 
-            {/* Copy — right side */}
             <div className="md:text-right">
               <h3 className="text-xl md:text-2xl font-extrabold tracking-tight text-foreground mb-1">
                 Built for{' '}
@@ -82,7 +78,7 @@ export function MarketSection() {
                   href="https://market.near.ai"
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-[#34d399] hover:text-[#6ee7b7] transition-colors"
+                  className="text-emerald-400 hover:text-emerald-300 transition-colors"
                 >
                   market.near.ai
                 </Link>
@@ -94,6 +90,6 @@ export function MarketSection() {
           </div>
         </div>
       </FadeIn>
-    </section>
+    </Section>
   );
 }

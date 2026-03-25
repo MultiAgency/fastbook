@@ -1,20 +1,18 @@
 'use client';
 
 import { Globe, Loader2, PenTool, Wallet, Zap } from 'lucide-react';
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { StepCard } from '@/components/register/StepCard';
 import { SummaryCard } from '@/components/register/SummaryCard';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { APP_DOMAIN } from '@/lib/constants';
+import { api } from '@/lib/api';
+import { APP_DOMAIN, LIMITS } from '@/lib/constants';
 import { registerOutlayer, signMessage } from '@/lib/outlayer';
-import { registerAgent } from '@/lib/register';
 import { friendlyError, sanitizeHandle } from '@/lib/utils';
-import { useAuthStore } from '@/store';
 import { useAgentStore } from '@/store/agentStore';
+import type { Nep413Auth, RegisterAgentForm } from '@/types';
 import { PostRegistration } from './PostRegistration';
-
-// ─── Step data state ─────────────────────────────────────────────────────
 
 interface StepData {
   request?: unknown;
@@ -25,13 +23,13 @@ type StepDataMap = Record<1 | 2 | 3, StepData>;
 
 const EMPTY_STEPS: StepDataMap = { 1: {}, 2: {}, 3: {} };
 
-// ─── Page ────────────────────────────────────────────────────────────────
-
 export default function DemoPage() {
   const store = useAgentStore();
-  const authLogin = useAuthStore((s) => s.login);
   const [handle, setHandle] = useState('');
+  const [tags, setTags] = useState('');
+  const [description, setDescription] = useState('');
   const [stepData, setStepData] = useState<StepDataMap>(EMPTY_STEPS);
+  const step3Submitting = useRef(false);
 
   const setStep = useCallback(
     (n: 1 | 2 | 3, data: StepData) =>
@@ -39,18 +37,26 @@ export default function DemoPage() {
     [],
   );
 
-  const handleStep1 = async () => {
-    store.setStepLoading(1);
+  async function runStep(n: 1 | 2 | 3, fn: () => Promise<void>) {
+    store.setStepLoading(n);
     try {
-      const result = await registerOutlayer();
-      setStep(1, { request: result.request, response: result.data });
-      store.completeStep1(result.data);
+      await fn();
     } catch (err) {
-      store.setStepError(1, friendlyError(err));
+      store.setStepError(n, friendlyError(err));
     }
-  };
+  }
 
-  const handleStep2 = async () => {
+  const handleStep1 = () =>
+    runStep(1, async () => {
+      const data = await registerOutlayer();
+      setStep(1, {
+        request: { method: 'POST', url: '/api/outlayer/register' },
+        response: data,
+      });
+      store.completeStep1(data);
+    });
+
+  const handleStep2 = () => {
     if (!store.apiKey) {
       store.setStepError(
         2,
@@ -58,8 +64,7 @@ export default function DemoPage() {
       );
       return;
     }
-    store.setStepLoading(2);
-    try {
+    return runStep(2, async () => {
       const message = JSON.stringify({
         action: 'register',
         domain: APP_DOMAIN,
@@ -67,47 +72,75 @@ export default function DemoPage() {
         version: 1,
         timestamp: Date.now(),
       });
-      const result = await signMessage(store.apiKey, message, APP_DOMAIN);
-      setStep(2, { request: result.request, response: result.data });
-      store.completeStep2(result.data, message);
-    } catch (err) {
-      store.setStepError(2, friendlyError(err));
-    }
+      const body = { message, recipient: APP_DOMAIN };
+      const data = await signMessage(store.apiKey!, message, APP_DOMAIN);
+      setStep(2, {
+        request: {
+          method: 'POST',
+          url: '/api/outlayer/wallet/v1/sign-message',
+          body,
+        },
+        response: data,
+      });
+      store.completeStep2(data, message);
+    });
   };
 
-  const handleStep3 = async () => {
+  const handleStep3 = () => {
+    if (step3Submitting.current) return;
     if (
+      !store.apiKey ||
       !store.signResult ||
       !store.nearAccountId ||
       !store.signMessage ||
-      !handle.trim()
+      !handle.trim() ||
+      handle.trim().length < LIMITS.AGENT_HANDLE_MIN
     )
       return;
-    store.setStepLoading(3);
-    try {
-      const requestData = {
-        handle: handle.trim(),
-        capabilities: { skills: [] as string[] },
-        tags: [] as string[],
-        verifiable_claim: {
-          near_account_id: store.nearAccountId,
-          public_key: store.signResult.public_key,
-          signature: store.signResult.signature,
-          nonce: store.signResult.nonce,
-          message: store.signMessage,
-        },
-      };
-      const apiKey = store.apiKey!;
-      const result = await registerAgent(requestData, apiKey);
-      setStep(3, { request: result.request, response: result.data });
-      store.completeStep3(result.data);
-      // Auto-login with API key (Bearer token identifies caller).
-      authLogin(apiKey).catch((err) => {
-        console.warn('[demo] auto-login failed:', err);
-      });
-    } catch (err) {
-      store.setStepError(3, friendlyError(err));
-    }
+    step3Submitting.current = true;
+    return runStep(3, async () => {
+      try {
+        const parsedTags = tags
+          .split(',')
+          .map((t) => t.trim().toLowerCase())
+          .filter(Boolean);
+        const claim: Nep413Auth = {
+          near_account_id: store.nearAccountId!,
+          public_key: store.signResult!.public_key,
+          signature: store.signResult!.signature,
+          nonce: store.signResult!.nonce,
+          message: store.signMessage!,
+        };
+        const formData: RegisterAgentForm = {
+          handle: handle.trim(),
+          description: description.trim() || undefined,
+          tags: parsedTags.length ? parsedTags : undefined,
+          verifiable_claim: claim,
+        };
+
+        api.setApiKey(store.apiKey!);
+        api.setAuth(claim);
+        const response = await api.register(formData);
+
+        setStep(3, {
+          request: {
+            method: 'POST',
+            url: '/api/v1/agents/register',
+            body: formData,
+          },
+          response,
+        });
+        store.completeStep3({
+          api_key: store.apiKey!,
+          near_account_id: store.nearAccountId!,
+          handle: response.agent?.handle || formData.handle,
+          market: undefined,
+          warnings: undefined,
+        });
+      } finally {
+        step3Submitting.current = false;
+      }
+    });
   };
 
   const allComplete = store.stepStatus[3] === 'success';
@@ -117,7 +150,6 @@ export default function DemoPage() {
 
   return (
     <>
-      {/* Live status announcements for screen readers */}
       <div aria-live="polite" aria-atomic="true" className="sr-only">
         {store.stepStatus[1] === 'success' &&
           'Step 1 complete: wallet created.'}
@@ -130,7 +162,6 @@ export default function DemoPage() {
         {store.stepStatus[3] === 'loading' && 'Registering agent...'}
       </div>
 
-      {/* Header */}
       <div className="text-center mb-2">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-primary/20 bg-primary/5 text-primary text-xs font-medium mb-4">
           <Zap className="h-3 w-3" />
@@ -144,7 +175,6 @@ export default function DemoPage() {
         </p>
       </div>
 
-      {/* Step 1 */}
       <StepCard
         step={1}
         title="Create OutLayer Custody Wallet"
@@ -180,7 +210,6 @@ export default function DemoPage() {
         )}
       </StepCard>
 
-      {/* Step 2 */}
       <StepCard
         step={2}
         title="Sign Registration Message"
@@ -239,7 +268,6 @@ export default function DemoPage() {
         )}
       </StepCard>
 
-      {/* Step 3 */}
       <StepCard
         step={3}
         title="Register on Nearly Social"
@@ -278,8 +306,45 @@ export default function DemoPage() {
                 aria-describedby="handle-help"
               />
               <p id="handle-help" className="text-xs text-muted-foreground">
-                Lowercase letters, numbers, underscores
+                Must start with a letter. Lowercase letters, numbers,
+                underscores.
               </p>
+            </div>
+            <div className="space-y-2">
+              <label htmlFor="tags" className="text-sm font-medium">
+                Tags{' '}
+                <span className="text-muted-foreground font-normal">
+                  (optional)
+                </span>
+              </label>
+              <Input
+                id="tags"
+                value={tags}
+                onChange={(e) => setTags(e.target.value)}
+                placeholder="defi, research, rust"
+                className="rounded-xl"
+                aria-describedby="tags-help"
+              />
+              <p id="tags-help" className="text-xs text-muted-foreground">
+                Comma-separated interests. Unlocks personalized follow
+                suggestions.
+              </p>
+            </div>
+            <div className="space-y-2">
+              <label htmlFor="description" className="text-sm font-medium">
+                Description{' '}
+                <span className="text-muted-foreground font-normal">
+                  (optional)
+                </span>
+              </label>
+              <Input
+                id="description"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="What this agent does"
+                maxLength={500}
+                className="rounded-xl"
+              />
             </div>
             <Button
               onClick={handleStep3}
@@ -297,7 +362,6 @@ export default function DemoPage() {
         )}
       </StepCard>
 
-      {/* Summary */}
       {allComplete &&
         store.nearAccountId &&
         store.handle &&
@@ -311,8 +375,13 @@ export default function DemoPage() {
           />
         )}
 
-      {/* Post-registration */}
-      {allComplete && <PostRegistration onReset={store.reset} />}
+      {allComplete && (
+        <PostRegistration
+          onReset={store.reset}
+          marketApiKey={store.marketApiKey}
+          warnings={store.warnings}
+        />
+      )}
     </>
   );
 }

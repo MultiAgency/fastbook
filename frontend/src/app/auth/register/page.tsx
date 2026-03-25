@@ -31,20 +31,18 @@ export default function RegisterPage() {
 
     if (!isValidHandle(handle)) {
       setError(
-        'Handle must be 2-32 characters, letters, numbers, and underscores only',
+        'Handle must be 3-32 characters: start with a letter, then letters, numbers, or underscores',
       );
       return;
     }
 
     try {
-      // Step 1: Create OutLayer custody wallet
       setStep('wallet');
-      const walletResult = await registerOutlayer();
-      const { api_key: outlayerKey, near_account_id } = walletResult.data;
+      const wallet = await registerOutlayer();
+      const { api_key: outlayerKey, near_account_id } = wallet;
       setNearAccountId(near_account_id);
       setApiKey(outlayerKey);
 
-      // Step 2: Sign NEP-413 registration message
       setStep('signing');
       const message = JSON.stringify({
         action: 'register',
@@ -53,17 +51,16 @@ export default function RegisterPage() {
         version: 1,
         timestamp: Date.now(),
       });
-      const signResult = await signMessage(outlayerKey, message, APP_DOMAIN);
+      const signed = await signMessage(outlayerKey, message, APP_DOMAIN);
 
       const auth: Nep413Auth = {
         near_account_id,
-        public_key: signResult.data.public_key,
-        signature: signResult.data.signature,
-        nonce: signResult.data.nonce,
+        public_key: signed.public_key,
+        signature: signed.signature,
+        nonce: signed.nonce,
         message,
       };
 
-      // Step 3: Register via WASM
       setStep('registering');
       api.setApiKey(outlayerKey);
       api.setAuth(auth);
@@ -76,6 +73,7 @@ export default function RegisterPage() {
       if (response.onboarding) setOnboarding(response.onboarding);
       setStep('success');
     } catch (err) {
+      api.clearCredentials();
       setError(friendlyError(err));
       setStep('form');
     }

@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef } from 'react';
+import { EDGE_COLOR, NODE_COLOR, PULSE_COLOR } from './live-graph/physics';
 
 interface Node {
   x: number;
@@ -19,9 +20,6 @@ interface Pulse {
 }
 
 const EDGE_THRESHOLD = 180;
-const NODE_COLOR = [78, 125, 247]; // nearly-500
-const EDGE_COLOR = [47, 81, 192]; // nearly-700
-const PULSE_COLOR = [146, 170, 249]; // nearly-300
 
 export function NetworkGraph() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -91,7 +89,6 @@ export function NetworkGraph() {
     function draw() {
       ctx!.clearRect(0, 0, w, h);
 
-      // Draw edges
       for (let i = 0; i < nodes.length; i++) {
         for (let j = i + 1; j < nodes.length; j++) {
           const dx = nodes[i].x - nodes[j].x;
@@ -109,7 +106,6 @@ export function NetworkGraph() {
         }
       }
 
-      // Draw pulses
       for (const pulse of pulses) {
         const from = nodes[pulse.fromIdx];
         const to = nodes[pulse.toIdx];
@@ -130,7 +126,6 @@ export function NetworkGraph() {
         ctx!.fill();
       }
 
-      // Draw nodes
       for (const node of nodes) {
         ctx!.fillStyle = `rgba(${NODE_COLOR[0]},${NODE_COLOR[1]},${NODE_COLOR[2]},${node.opacity})`;
         ctx!.beginPath();
@@ -140,25 +135,21 @@ export function NetworkGraph() {
     }
 
     function tick() {
-      // Move nodes
       for (const node of nodes) {
         node.x += node.vx;
         node.y += node.vy;
 
-        // Soft bounce
         if (node.x < 0 || node.x > w) node.vx *= -1;
         if (node.y < 0 || node.y > h) node.vy *= -1;
         node.x = Math.max(0, Math.min(w, node.x));
         node.y = Math.max(0, Math.min(h, node.y));
       }
 
-      // Update pulses
       for (let i = pulses.length - 1; i >= 0; i--) {
         pulses[i].progress += pulses[i].speed;
         if (pulses[i].progress >= 1) pulses.splice(i, 1);
       }
 
-      // Spawn new pulse
       pulseTimer++;
       if (pulseTimer > 120) {
         pulseTimer = 0;
@@ -166,7 +157,6 @@ export function NetworkGraph() {
       }
     }
 
-    // Static mode for reduced motion
     if (prefersReducedMotion) {
       draw();
       return () => ro.disconnect();
@@ -185,5 +175,13 @@ export function NetworkGraph() {
     };
   }, []);
 
-  return <canvas ref={canvasRef} className="w-full h-full" />;
+  return (
+    <canvas
+      ref={canvasRef}
+      className="w-full h-full"
+      aria-label="Animated network graph showing connected agent nodes"
+    >
+      Agent network visualization
+    </canvas>
+  );
 }

@@ -42,12 +42,6 @@
   &:where([data-orientation="vertical"]) { @slot; }
 }
 
-@utility no-scrollbar {
-  -ms-overflow-style: none;
-  scrollbar-width: none;
-  &::-webkit-scrollbar { display: none; }
-}
-
 /* Nearly Social theme */
 @custom-variant dark (&:is(.dark *));
 
@@ -222,6 +216,24 @@ h3 {
 @media (prefers-reduced-motion: reduce) {
   .identity-animate {
     animation: none;
+  }
+}
+
+/* Scroll-triggered fade-in */
+.fade-in-hidden {
+  opacity: 0;
+  transform: translateY(20px);
+  transition: opacity 0.5s ease-out, transform 0.5s ease-out;
+}
+.fade-in-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+@media (prefers-reduced-motion: reduce) {
+  .fade-in-hidden {
+    opacity: 1;
+    transform: none;
+    transition: none;
   }
 }
 

@@ -6,10 +6,12 @@ import { Button } from '@/components/ui/button';
 import { useCopyToClipboard } from '@/hooks';
 import { cn } from '@/lib/utils';
 
+const VISIBLE_PREFIX = 8;
+const MASK_LENGTH = 12;
+
 interface MaskedCopyFieldProps {
   label: string;
   value: string;
-  /** When true (default), shows reveal/hide toggle and masks the value. */
   masked?: boolean;
   className?: string;
 }
@@ -30,7 +32,9 @@ export function MaskedCopyField({
       </label>
       <div className="flex items-center gap-2">
         <code className="flex-1 p-2 rounded-lg bg-muted text-xs font-mono break-all">
-          {revealed ? value : `${value.slice(0, 8)}${'•'.repeat(12)}`}
+          {revealed
+            ? value
+            : `${value.slice(0, VISIBLE_PREFIX)}${'•'.repeat(MASK_LENGTH)}`}
         </code>
         {masked && (
           <Button

@@ -1,15 +1,35 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import useSWR, { type SWRConfiguration } from 'swr';
-import { api } from '@/lib/api';
-import type { Agent } from '@/types';
+import { toErrorMessage } from '@/lib/utils';
 
-// Agent hooks
-export function useAgent(handle: string, config?: SWRConfiguration) {
-  return useSWR<{ agent: Agent; is_following: boolean }>(
-    handle ? ['agent', handle] : null,
-    () => api.getAgent(handle),
-    config,
-  );
+export { type SortKey, useFilteredAgents } from './useFilteredAgents';
+
+export function useApiQuery<T>(fetcher: (signal: AbortSignal) => Promise<T>): {
+  data: T | null;
+  loading: boolean;
+  error: string | null;
+} {
+  const [data, setData] = useState<T | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+    setError(null);
+    fetcher(controller.signal)
+      .then((result) => {
+        if (!controller.signal.aborted) setData(result);
+      })
+      .catch((err) => {
+        if (!controller.signal.aborted) setError(toErrorMessage(err));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, [fetcher]);
+
+  return { data, loading, error };
 }
 
 export function useDebounce<T>(value: T, delayMs: number): T {
@@ -19,21 +39,6 @@ export function useDebounce<T>(value: T, delayMs: number): T {
     return () => clearTimeout(timer);
   }, [value, delayMs]);
   return debounced;
-}
-
-export function useIsMobile() {
-  const [matches, setMatches] = useState(false);
-
-  useEffect(() => {
-    const media = window.matchMedia('(max-width: 639px)');
-    setMatches(media.matches);
-
-    const listener = (e: MediaQueryListEvent) => setMatches(e.matches);
-    media.addEventListener('change', listener);
-    return () => media.removeEventListener('change', listener);
-  }, []);
-
-  return matches;
 }
 
 export function useCopyToClipboard(): [

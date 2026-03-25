@@ -1,0 +1,180 @@
+use super::*;
+
+#[test]
+#[serial]
+fn integration_heartbeat_updates_last_active() {
+    setup_integration("hb.near");
+    let mut reg = test_request(Action::Register);
+    reg.handle = Some("hb_agent".into());
+    handle_register(&reg);
+
+    let before = load_agent("hb_agent").unwrap();
+
+    let future_ns = (before.last_active + 1800) * 1_000_000_000;
+    unsafe { std::env::set_var("NEAR_BLOCK_TIMESTAMP", future_ns.to_string()) };
+
+    let req = test_request(Action::Heartbeat);
+    let resp = handle_heartbeat(&req);
+    assert!(resp.success, "heartbeat should succeed: {:?}", resp.error);
+
+    let data = parse_response(&resp);
+    assert!(data["agent"].is_object(), "heartbeat should return agent");
+    assert!(data["delta"].is_object(), "heartbeat should return delta");
+
+    let after = load_agent("hb_agent").unwrap();
+    assert!(
+        after.last_active > before.last_active,
+        "last_active should advance: {} -> {}",
+        before.last_active,
+        after.last_active
+    );
+
+    unsafe { std::env::remove_var("NEAR_BLOCK_TIMESTAMP") };
+}
+
+#[test]
+#[serial]
+fn integration_heartbeat_delta_contains_new_followers() {
+    setup_integration("hbd_a.near");
+    quick_register("hbd_a.near", "hbd_alice");
+    quick_register("hbd_b.near", "hbd_bob");
+
+    let alice_before = load_agent("hbd_alice").unwrap();
+
+    let follow_ts_ns = (alice_before.last_active + 600) * 1_000_000_000;
+    unsafe { std::env::set_var("NEAR_BLOCK_TIMESTAMP", follow_ts_ns.to_string()) };
+
+    set_signer("hbd_b.near");
+    let freq = RequestBuilder::new(Action::Follow)
+        .handle("hbd_alice")
+        .build();
+    handle_follow(&freq);
+
+    let heartbeat_ts_ns = (alice_before.last_active + 1800) * 1_000_000_000;
+    unsafe { std::env::set_var("NEAR_BLOCK_TIMESTAMP", heartbeat_ts_ns.to_string()) };
+    set_signer("hbd_a.near");
+    let req = test_request(Action::Heartbeat);
+    let resp = handle_heartbeat(&req);
+    assert!(resp.success, "heartbeat should succeed: {:?}", resp.error);
+
+    let data = parse_response(&resp);
+    let delta = &data["delta"];
+    assert!(delta["since"].is_number(), "delta.since should be a number");
+    assert_eq!(
+        delta["new_followers_count"], 1,
+        "should have 1 new follower"
+    );
+
+    let new_followers = delta["new_followers"]
+        .as_array()
+        .expect("new_followers should be array");
+    assert_eq!(
+        new_followers.len(),
+        1,
+        "should have 1 new follower in array"
+    );
+    assert_eq!(
+        new_followers[0]["handle"], "hbd_bob",
+        "new follower should be bob"
+    );
+
+    unsafe { std::env::remove_var("NEAR_BLOCK_TIMESTAMP") };
+}
+
+#[test]
+#[serial]
+fn integration_get_activity_returns_delta() {
+    setup_integration("ga_a.near");
+    quick_register("ga_a.near", "ga_alice");
+
+    let future_ns = 2_000_000_000_000_000_000u64;
+    unsafe { std::env::set_var("NEAR_BLOCK_TIMESTAMP", future_ns.to_string()) };
+    set_signer("ga_a.near");
+    let hb = test_request(Action::Heartbeat);
+    let hb_resp = handle_heartbeat(&hb);
+    assert!(
+        hb_resp.success,
+        "heartbeat should succeed: {:?}",
+        hb_resp.error
+    );
+
+    let mut req = test_request(Action::GetActivity);
+    req.since = Some("0".into());
+    let resp = handle_get_activity(&req);
+    assert!(
+        resp.success,
+        "get_activity should succeed: {:?}",
+        resp.error
+    );
+    let data = parse_response(&resp);
+    assert!(data["since"].is_number());
+    assert!(data["new_followers"].is_array());
+    assert!(data["new_following"].is_array());
+
+    unsafe { std::env::remove_var("NEAR_BLOCK_TIMESTAMP") };
+}
+
+#[test]
+#[serial]
+fn integration_get_activity_returns_follower_handles() {
+    setup_integration("gav_a.near");
+    quick_register("gav_a.near", "gav_alice");
+    quick_register("gav_b.near", "gav_bob");
+
+    set_signer("gav_b.near");
+    let freq = RequestBuilder::new(Action::Follow)
+        .handle("gav_alice")
+        .build();
+    handle_follow(&freq);
+
+    set_signer("gav_a.near");
+    let mut req = test_request(Action::GetActivity);
+    req.since = Some("0".into());
+    let resp = handle_get_activity(&req);
+    assert!(
+        resp.success,
+        "get_activity should succeed: {:?}",
+        resp.error
+    );
+
+    let data = parse_response(&resp);
+    let new_followers = data["new_followers"]
+        .as_array()
+        .expect("new_followers should be array");
+    assert_eq!(new_followers.len(), 1, "should have 1 new follower");
+    assert_eq!(
+        new_followers[0]["handle"], "gav_bob",
+        "new follower should be bob"
+    );
+}
+
+#[test]
+#[serial]
+fn integration_get_network_returns_counts() {
+    setup_integration("gn_a.near");
+    quick_register("gn_a.near", "gn_alice");
+    quick_register("gn_b.near", "gn_bob");
+
+    set_signer("gn_a.near");
+    let freq = RequestBuilder::new(Action::Follow).handle("gn_bob").build();
+    handle_follow(&freq);
+
+    let req = test_request(Action::GetNetwork);
+    let resp = handle_get_network(&req);
+    assert!(resp.success, "get_network should succeed: {:?}", resp.error);
+    let data = parse_response(&resp);
+    assert_eq!(data["following_count"], 1);
+    assert_eq!(data["follower_count"], 0);
+    assert_eq!(data["mutual_count"], 0);
+
+    set_signer("gn_b.near");
+    let freq2 = RequestBuilder::new(Action::Follow)
+        .handle("gn_alice")
+        .build();
+    handle_follow(&freq2);
+
+    set_signer("gn_a.near");
+    let resp2 = handle_get_network(&test_request(Action::GetNetwork));
+    let data2 = parse_response(&resp2);
+    assert_eq!(data2["mutual_count"], 1);
+}

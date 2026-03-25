@@ -1,10 +1,20 @@
-use crate::*;
-use crate::auth::get_caller_from;
+//! Handlers for get_me, get_profile, and update_me.
 
+use crate::agent::*;
+use crate::auth::get_caller_from;
+use crate::response::*;
+use crate::store::*;
+use crate::transaction::Transaction;
+use crate::types::*;
+use crate::validation::*;
+use crate::{
+    require_agent, require_auth, require_caller, require_field, require_handle,
+    require_target_handle, require_timestamp,
+};
+
+// RESPONSE: { agent: Agent, profile_completeness, suggestions: { quality, hint } }
 pub fn handle_get_me(req: &Request) -> Response {
-    let caller = require_caller!(req);
-    let handle = require_handle!(&caller);
-    // Lazy repair: ensure this handle is in the pub:agents index
+    let (_caller, handle) = require_auth!(req);
     let _ = index_append(keys::pub_agents(), &handle);
     match load_agent(&handle) {
         Some(agent) => {
@@ -23,50 +33,102 @@ pub fn handle_get_me(req: &Request) -> Response {
     }
 }
 
+// RESPONSE: { agent: Agent, profile_completeness }
 pub fn handle_update_me(req: &Request) -> Response {
-    let caller = require_caller!(req);
-    let handle = require_handle!(&caller);
+    let (_caller, handle) = require_auth!(req);
+    if let Err(e) = check_rate_limit(
+        "update_me",
+        &handle,
+        UPDATE_RATE_LIMIT,
+        UPDATE_RATE_WINDOW_SECS,
+    ) {
+        return e.into();
+    }
     let before = require_agent!(&handle);
     let mut agent = before.clone();
 
+    let mut warnings = Warnings::new();
+    warnings.extend(match validate_agent_fields(req) {
+        Ok(w) => w,
+        Err(resp) => return resp,
+    });
+
     let mut changed = false;
     if let Some(desc) = &req.description {
-        if let Err(e) = validate_description(desc) { return err_response(&e); }
-        agent.description = desc.clone(); changed = true;
+        agent.description = desc.clone();
+        changed = true;
     }
     if let Some(dn) = &req.display_name {
-        if let Err(e) = validate_display_name(dn) { return err_response(&e); }
-        agent.display_name = dn.clone(); changed = true;
+        agent.display_name = dn.clone();
+        changed = true;
     }
-    if let Some(url) = &req.avatar_url {
-        if let Err(e) = validate_avatar_url(url) { return err_response(&e); }
-        agent.avatar_url = Some(url.clone()); changed = true;
+    if let Some(inner) = &req.avatar_url {
+        agent.avatar_url = inner.clone();
+        changed = true;
     }
     if let Some(tags) = &req.tags {
-        match validate_tags(tags) { Ok(t) => { agent.tags = t; changed = true; } Err(e) => return err_response(&e) }
+        agent.tags = match validate_tags(tags) {
+            Ok(t) => t,
+            Err(e) => return e.into(),
+        };
+        changed = true;
     }
     if let Some(caps) = &req.capabilities {
-        if let Err(e) = validate_capabilities(caps) { return err_response(&e); }
-        agent.capabilities = caps.clone(); changed = true;
+        agent.capabilities = caps.clone();
+        changed = true;
     }
-    if !changed { return err_response("No valid fields to update"); }
+    if !changed {
+        return err_response("No valid fields to update");
+    }
 
-    agent.last_active = now_secs();
-    if let Err(e) = save_agent(&agent, &before) { return err_response(&format!("Failed to save: {e}")); }
+    agent.last_active = require_timestamp!();
+
+    let cascade = if req.tags.is_some() || req.capabilities.is_some() {
+        let old =
+            super::endorse::collect_endorsable(Some(&before.tags), Some(&before.capabilities));
+        let new = super::endorse::collect_endorsable(Some(&agent.tags), Some(&agent.capabilities));
+        let c = super::endorse::EndorsementCascade::from_diff(&old, &new);
+        c.apply_counts(&mut agent);
+        c
+    } else {
+        super::endorse::EndorsementCascade::empty()
+    };
+
+    let mut txn = Transaction::new();
+    if let Some(r) = txn.save_agent("Failed to save agent", &agent, &before) {
+        return r;
+    }
+
+    warnings.extend(cascade.cleanup_storage(&handle));
+
+    crate::registry::update_tag_counts(&before.tags, &agent.tags);
 
     let agent_json = format_agent(&agent);
-    ok_response(serde_json::json!({ "agent": agent_json, "profile_completeness": profile_completeness(&agent) }))
+    let mut resp = serde_json::json!({ "agent": agent_json, "profile_completeness": profile_completeness(&agent) });
+    warnings.attach(&mut resp);
+    ok_response(resp)
 }
 
+// RESPONSE: { agent: Agent, is_following?: bool, my_endorsements?: { ns: [val] } }
 pub fn handle_get_profile(req: &Request) -> Response {
-    let handle = require_field!(req.handle.as_deref(), "Handle is required").to_lowercase();
+    let handle = require_target_handle!(req);
     let agent = require_agent!(&handle);
     let mut data = serde_json::json!({ "agent": format_agent(&agent) });
     if let Ok(caller) = get_caller_from(req) {
-        let is_following = agent_handle_for_account(&caller)
-            .map(|caller_handle| has(&keys::pub_edge(&caller_handle, &handle)))
-            .unwrap_or(false);
-        data["is_following"] = serde_json::json!(is_following);
+        if let Some(caller_handle) = agent_handle_for_account(&caller) {
+            data["is_following"] = serde_json::json!(has(&keys::pub_edge(&caller_handle, &handle)));
+            let raw = index_list(&keys::endorsement_by(&caller_handle, &handle));
+            if !raw.is_empty() {
+                let mut grouped: std::collections::HashMap<&str, Vec<&str>> =
+                    std::collections::HashMap::new();
+                for entry in &raw {
+                    if let Some((ns, val)) = entry.split_once(':') {
+                        grouped.entry(ns).or_default().push(val);
+                    }
+                }
+                data["my_endorsements"] = serde_json::json!(grouped);
+            }
+        }
     }
     ok_response(data)
 }

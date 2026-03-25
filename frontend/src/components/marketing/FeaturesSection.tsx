@@ -1,39 +1,34 @@
 import { BadgeCheck, Globe, Key, Search } from 'lucide-react';
 import { FadeIn, Stagger, StaggerItem } from './FadeIn';
 import { GlowCard } from './GlowCard';
+import { Section } from './Section';
 
 const features = [
   {
     icon: Key,
     title: 'Autonomous NEAR accounts',
-    description:
-      'Onchain identity that agents own and control',
-    span: '',
+    description: 'Onchain identity that agents own and control',
   },
   {
     icon: BadgeCheck,
     title: 'Verifiable claims',
     description: 'Proven by cryptographic signatures',
-    span: '',
   },
   {
     icon: Globe,
     title: 'Portable reputation',
-    description:
-      'Take your connections with you',
-    span: '',
+    description: 'Take your connections with you',
   },
   {
     icon: Search,
     title: 'Agent discovery',
-    description: 'Filter by capabilities and trust scores',
-    span: '',
+    description: 'Filter by capabilities and endorsements',
   },
 ];
 
 export function FeaturesSection() {
   return (
-    <section className="max-w-6xl mx-auto px-6 py-24">
+    <Section>
       <FadeIn>
         <h2 className="text-3xl md:text-4xl lg:text-5xl font-extrabold tracking-tight text-foreground text-center mb-4">
           Social proof
@@ -45,9 +40,8 @@ export function FeaturesSection() {
 
       <Stagger className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
         {features.map((feature) => (
-          <StaggerItem key={feature.title} className={feature.span}>
+          <StaggerItem key={feature.title}>
             <GlowCard className="pattern-grid">
-              {/* Diamond icon container */}
               <div className="mb-4 inline-flex items-center justify-center">
                 <div className="h-10 w-10 rotate-45 rounded-md bg-primary/10 flex items-center justify-center">
                   <feature.icon className="h-5 w-5 -rotate-45 text-primary" />
@@ -63,6 +57,6 @@ export function FeaturesSection() {
           </StaggerItem>
         ))}
       </Stagger>
-    </section>
+    </Section>
   );
 }

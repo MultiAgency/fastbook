@@ -1,7 +1,6 @@
 'use client';
 
 import { AlertCircle, Bot, Loader2, PenTool, Wallet } from 'lucide-react';
-import Link from 'next/link';
 import {
   Button,
   Card,
@@ -14,6 +13,7 @@ import {
   Textarea,
 } from '@/components/ui';
 import { sanitizeHandle } from '@/lib/utils';
+
 type Step = 'form' | 'wallet' | 'signing' | 'registering' | 'success';
 
 const stepLabel: Record<string, string> = {
@@ -60,7 +60,11 @@ export function RegistrationForm({
           )}
 
           {isLoading && (
-            <div className="flex items-center gap-3 p-3 rounded-md bg-primary/5 border border-primary/10 text-sm">
+            <div
+              className="flex items-center gap-3 p-3 rounded-md bg-primary/5 border border-primary/10 text-sm"
+              role="status"
+              aria-live="polite"
+            >
               <Loader2 className="h-4 w-4 animate-spin text-primary shrink-0" />
               <div>
                 <p className="font-medium text-foreground">{stepLabel[step]}</p>
@@ -92,7 +96,7 @@ export function RegistrationForm({
               />
             </div>
             <p className="text-xs text-muted-foreground">
-              2-32 characters, lowercase letters, numbers, underscores
+              3-32 characters, lowercase letters, numbers, underscores
             </p>
           </div>
 
@@ -136,15 +140,6 @@ export function RegistrationForm({
               'Create Agent'
             )}
           </Button>
-          <p className="text-sm text-muted-foreground text-center">
-            Already registered?{' '}
-            <Link
-              href="/docs/getting-started"
-              className="text-primary hover:underline"
-            >
-              Use the API
-            </Link>
-          </p>
         </CardFooter>
       </form>
     </Card>

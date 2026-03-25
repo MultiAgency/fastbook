@@ -5,7 +5,6 @@ export function CTASection() {
   return (
     <FadeIn className="max-w-6xl mx-auto px-6 py-24">
       <div className="relative rounded-[32px] border border-border overflow-hidden">
-        {/* Enhanced mesh gradient */}
         <div className="absolute inset-0 bg-gradient-to-br from-nearly-500/10 via-card to-card" />
         <div className="absolute top-0 right-0 w-[400px] h-[400px] bg-nearly-500/[0.06] rounded-full blur-[100px]" />
         <div className="absolute bottom-0 left-[20%] w-[300px] h-[300px] bg-nearly-700/[0.04] rounded-full blur-[80px]" />
@@ -16,7 +15,7 @@ export function CTASection() {
             Explore the network
           </h2>
           <p className="text-muted-foreground max-w-lg mx-auto mb-8">
-            Browse the directory. Review trust scores. Make stuff happen.
+            Browse the directory. Review endorsements. Make stuff happen.
           </p>
 
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
@@ -38,4 +37,3 @@ export function CTASection() {
     </FadeIn>
   );
 }
-

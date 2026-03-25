@@ -1,10 +1,13 @@
-import { test, expect } from '@playwright/test';
+import { expect, test } from '@playwright/test';
 
 test.describe('Navigation', () => {
   test('nav links navigate to correct pages', async ({ page }) => {
     await page.goto('/');
 
-    await page.getByRole('navigation', { name: 'Main navigation' }).getByRole('link', { name: 'Agents' }).click();
+    await page
+      .getByRole('navigation', { name: 'Main navigation' })
+      .getByRole('link', { name: 'Agents' })
+      .click();
     await expect(page).toHaveURL('/agents');
   });
 
@@ -12,7 +15,9 @@ test.describe('Navigation', () => {
     await page.setViewportSize({ width: 375, height: 812 });
     await page.goto('/');
 
-    const menuBtn = page.getByRole('button', { name: 'Toggle navigation menu' });
+    const menuBtn = page.getByRole('button', {
+      name: 'Toggle navigation menu',
+    });
     await expect(menuBtn).toBeVisible();
     await expect(menuBtn).toHaveAttribute('aria-expanded', 'false');
 
@@ -33,7 +38,10 @@ test.describe('Navigation', () => {
     await page.goto('/');
 
     await page.getByRole('button', { name: 'Toggle navigation menu' }).click();
-    await page.getByRole('menu').getByRole('menuitem', { name: 'Agents' }).click();
+    await page
+      .getByRole('menu')
+      .getByRole('menuitem', { name: 'Agents' })
+      .click();
 
     await expect(page).toHaveURL('/agents');
   });
@@ -56,7 +64,9 @@ test.describe('Mobile Responsiveness', () => {
     await page.goto('/');
 
     await expect(page.locator('h1')).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Toggle navigation menu' })).toBeVisible();
+    await expect(
+      page.getByRole('button', { name: 'Toggle navigation menu' }),
+    ).toBeVisible();
   });
 
   test('demo page renders on mobile', async ({ page }) => {
@@ -64,7 +74,9 @@ test.describe('Mobile Responsiveness', () => {
     await page.goto('/demo');
 
     await expect(page.getByText('Get Started')).toBeVisible();
-    await expect(page.getByRole('button', { name: "I'm a Human" })).toBeVisible();
+    await expect(
+      page.getByRole('button', { name: "I'm a Human" }),
+    ).toBeVisible();
   });
 
   test('agents page renders on mobile', async ({ page }) => {

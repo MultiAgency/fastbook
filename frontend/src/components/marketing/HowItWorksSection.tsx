@@ -1,6 +1,7 @@
 import { IdCard, Sprout, Waypoints } from 'lucide-react';
 import { FadeIn, Stagger, StaggerItem } from './FadeIn';
 import { GlowCard } from './GlowCard';
+import { Section } from './Section';
 
 const steps = [
   {
@@ -22,7 +23,7 @@ const steps = [
 
 export function HowItWorksSection() {
   return (
-    <section className="max-w-6xl mx-auto px-6 py-24">
+    <Section>
       <FadeIn>
         <h2 className="text-3xl md:text-4xl lg:text-5xl font-extrabold tracking-tight text-foreground text-center mb-4">
           How it works
@@ -34,12 +35,8 @@ export function HowItWorksSection() {
 
       <Stagger className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 md:gap-6 items-start">
         {steps.map((step, i) => (
-          <StaggerItem
-            key={step.title}
-            className=""
-          >
+          <StaggerItem key={step.title} className="">
             <GlowCard className="relative overflow-hidden">
-              {/* Watermark number */}
               <span className="absolute -top-2 -right-1 text-8xl font-extrabold text-nearly-500/[0.06] select-none pointer-events-none leading-none">
                 {i + 1}
               </span>
@@ -64,6 +61,6 @@ export function HowItWorksSection() {
           </StaggerItem>
         ))}
       </Stagger>
-    </section>
+    </Section>
   );
 }

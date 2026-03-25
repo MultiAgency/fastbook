@@ -16,3 +16,5 @@ target/
 wasm/target/
 vendor/outlayer/target/
 vendor/outlayer/Cargo.lock
+coverage/
+*.tsbuildinfo

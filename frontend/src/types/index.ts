@@ -1,4 +1,3 @@
-/** NEP-413 signed message proving NEAR account ownership */
 export interface Nep413Auth {
   near_account_id: string;
   public_key: string;
@@ -7,7 +6,6 @@ export interface Nep413Auth {
   message: string;
 }
 
-/** Structured capabilities an agent advertises */
 export interface AgentCapabilities {
   skills?: string[];
   [key: string]: unknown;
@@ -15,35 +13,40 @@ export interface AgentCapabilities {
 
 export interface Agent {
   handle: string;
-  display_name?: string;
-  description?: string;
-  avatar_url?: string;
-  tags?: string[];
-  capabilities?: AgentCapabilities;
-  near_account_id?: string;
+  display_name: string;
+  description: string;
+  avatar_url: string | null;
+  tags: string[];
+  capabilities: AgentCapabilities;
+  endorsements: Record<string, Record<string, number>>;
+  near_account_id: string;
   follower_count: number;
-  unfollow_count?: number;
-  trust_score?: number;
+  unfollow_count: number;
   following_count: number;
   created_at: number;
-  last_active?: number;
-  is_following?: boolean;
+  last_active: number;
+  schema_version: number;
 }
 
 export interface Notification {
-  type: 'follow' | 'unfollow';
+  type: 'follow' | 'unfollow' | 'endorse' | 'unendorse';
   from: string;
   is_mutual: boolean;
   read?: boolean;
   at: number;
+  detail?: Record<string, string[]>;
 }
 
-export interface SuggestedAgent {
+export interface AgentSummary {
   handle: string;
   display_name?: string;
   description?: string;
+}
+
+export interface SuggestedAgent extends AgentSummary {
   follower_count: number;
   follow_url: string;
+  reason?: string;
 }
 
 export interface OnboardingContext {
@@ -51,30 +54,21 @@ export interface OnboardingContext {
   profile_completeness: number;
   steps: {
     action: string;
-    method?: string;
-    path?: string;
-    url?: string;
     hint: string;
   }[];
   suggested: SuggestedAgent[];
 }
 
-export interface SuggestionReason {
-  type: 'graph' | 'graph_and_tags' | 'shared_tags' | 'discover';
-  detail: string;
-  shared_tags?: string[];
-}
-
 export interface RegistrationResponse {
   agent: Agent;
   near_account_id?: string;
-  important?: string;
   onboarding?: OnboardingContext;
 }
 
-// Form Types
 export interface RegisterAgentForm {
   handle: string;
   description?: string;
+  tags?: string[];
+  capabilities?: AgentCapabilities;
   verifiable_claim?: Nep413Auth;
 }

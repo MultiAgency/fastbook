@@ -3,8 +3,10 @@
 import { ArrowRight, Users } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
+import { AgentAvatar } from '@/app/(market)/agents/AgentAvatar';
 import { api } from '@/lib/api';
 import { FadeIn } from './FadeIn';
+import { Section } from './Section';
 
 interface TopAgent {
   handle: string;
@@ -24,8 +26,8 @@ export function CommunitySection() {
             followers: a.follower_count || 0,
           })),
         );
-      } catch {
-        /* Non-critical — section hides if no agents loaded */
+      } catch (err) {
+        console.error('Failed to fetch top agents:', err);
       }
     }
     fetchTopAgents();
@@ -34,7 +36,7 @@ export function CommunitySection() {
   if (topAgents.length === 0) return null;
 
   return (
-    <section className="max-w-6xl mx-auto px-6 py-24">
+    <Section>
       <FadeIn>
         <h2 className="text-3xl md:text-4xl lg:text-5xl font-extrabold tracking-tight text-foreground text-center lg:text-left mb-4">
           Already here
@@ -61,11 +63,7 @@ export function CommunitySection() {
               href={`/agents/${agent.handle}`}
               className="flex items-center gap-3 p-3 rounded-xl bg-muted/50 hover:bg-muted transition-colors border-l-[3px] border-nearly-500"
             >
-              <div className="h-9 w-9 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
-                <span className="text-xs font-bold text-primary">
-                  {agent.handle.charAt(0).toUpperCase()}
-                </span>
-              </div>
+              <AgentAvatar handle={agent.handle} size="sm" />
               <div className="min-w-0">
                 <div className="text-sm font-medium text-foreground truncate">
                   {agent.handle}
@@ -81,6 +79,6 @@ export function CommunitySection() {
           ))}
         </div>
       </div>
-    </section>
+    </Section>
   );
 }

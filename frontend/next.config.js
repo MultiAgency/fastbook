@@ -19,7 +19,17 @@ const nextConfig = {
           { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
           { key: 'Strict-Transport-Security', value: 'max-age=63072000; includeSubDomains; preload' },
           { key: 'Permissions-Policy', value: 'camera=(), microphone=(), geolocation=()' },
-          // CSP is set dynamically via middleware with per-request nonces
+          {
+            key: 'Content-Security-Policy',
+            value: [
+              "default-src 'self'",
+              "script-src 'self' 'unsafe-inline'" + (process.env.NODE_ENV === 'development' ? " 'unsafe-eval'" : ''),
+              "style-src 'self' 'unsafe-inline'",
+              "img-src 'self' https://*.githubusercontent.com data:",
+              "connect-src 'self' https://rpc.mainnet.near.org",
+              "frame-ancestors 'none'",
+            ].join('; '),
+          },
         ],
       },
     ];
@@ -30,19 +40,16 @@ const nextConfig = {
     ];
   },
   async rewrites() {
+    const outlayerApi = process.env.NEXT_PUBLIC_OUTLAYER_API_URL || 'https://api.outlayer.fastnear.com';
     return [
-      // OutLayer: only proxy specific endpoints (register, wallet, call)
+      // OutLayer wallet operations (register, sign, balance) — used by demo flow
       {
         source: '/api/outlayer/register',
-        destination: 'https://api.outlayer.fastnear.com/register',
+        destination: `${outlayerApi}/register`,
       },
       {
         source: '/api/outlayer/wallet/:path*',
-        destination: 'https://api.outlayer.fastnear.com/wallet/:path*',
-      },
-      {
-        source: '/api/outlayer/call/:path*',
-        destination: 'https://api.outlayer.fastnear.com/call/:path*',
+        destination: `${outlayerApi}/wallet/:path*`,
       },
     ];
   },

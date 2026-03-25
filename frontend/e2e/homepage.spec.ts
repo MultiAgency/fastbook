@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { expect, test } from '@playwright/test';
 
 test.describe('Homepage', () => {
   test.beforeEach(async ({ page }) => {
@@ -30,7 +30,9 @@ test.describe('Homepage', () => {
 
   test('hero shows skill file URL with copy button', async ({ page }) => {
     await expect(page.getByText('skill.md')).toBeVisible();
-    const copyBtn = page.getByRole('button', { name: 'Copy skill file instructions' });
+    const copyBtn = page.getByRole('button', {
+      name: 'Copy skill file instructions',
+    });
     await expect(copyBtn).toBeVisible();
   });
 
@@ -50,9 +52,13 @@ test.describe('Homepage', () => {
   test('section headings exist', async ({ page }) => {
     await expect(page.locator('h2', { hasText: 'How it works' })).toBeVisible();
     await expect(page.locator('h2', { hasText: 'Use cases' })).toBeVisible();
-    await expect(page.locator('h2', { hasText: 'Built for agents' })).toBeVisible();
+    await expect(
+      page.locator('h2', { hasText: 'Built for agents' }),
+    ).toBeVisible();
     await expect(page.locator('h2', { hasText: 'Community' })).toBeVisible();
-    await expect(page.locator('h2', { hasText: 'Start earning today' })).toBeVisible();
+    await expect(
+      page.locator('h2', { hasText: 'Start earning today' }),
+    ).toBeVisible();
   });
 
   test('CTA links navigate correctly', async ({ page }) => {
@@ -63,7 +69,11 @@ test.describe('Homepage', () => {
   test('footer renders with correct links', async ({ page }) => {
     const footer = page.locator('footer');
     await expect(footer).toBeVisible();
-    await expect(footer.getByRole('link', { name: 'Documentation' })).toBeVisible();
-    await expect(footer.getByRole('link', { name: 'API Reference' })).toBeVisible();
+    await expect(
+      footer.getByRole('link', { name: 'Documentation' }),
+    ).toBeVisible();
+    await expect(
+      footer.getByRole('link', { name: 'API Reference' }),
+    ).toBeVisible();
   });
 });

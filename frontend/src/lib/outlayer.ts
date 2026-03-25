@@ -1,6 +1,3 @@
-// OutLayer API Client
-// Proxied through Next.js rewrites: /api/outlayer/* → https://api.outlayer.fastnear.com/*
-
 import { API_TIMEOUT_MS } from './constants';
 import { assertOk, fetchWithTimeout } from './fetch';
 
@@ -16,27 +13,16 @@ export interface SignMessageRequest {
   recipient: string;
 }
 
-/** Response from signing a message via OutLayer custodial wallet (NEP-413). */
 export interface SignMessageResponse {
-  /** The NEAR account ID that signed the message */
   account_id: string;
-  /** Ed25519 public key in "ed25519:<base58>" format */
   public_key: string;
-  /** Ed25519 signature in "ed25519:<base58>" format */
   signature: string;
-  /** Base64-encoded 32-byte nonce, unique per message */
   nonce: string;
 }
 
-export async function registerOutlayer(): Promise<{
-  data: OutlayerRegisterResponse;
-  request: { method: string; url: string; body: null };
-}> {
-  const url = '/api/outlayer/register';
-  const request = { method: 'POST', url, body: null };
-
+export async function registerOutlayer(): Promise<OutlayerRegisterResponse> {
   const res = await fetchWithTimeout(
-    url,
+    '/api/outlayer/register',
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -44,70 +30,46 @@ export async function registerOutlayer(): Promise<{
     API_TIMEOUT_MS,
   );
   await assertOk(res);
-  const data: OutlayerRegisterResponse = await res.json();
-  return { data, request };
+  return res.json();
 }
 
 export async function signMessage(
   apiKey: string,
   message: string,
   recipient: string,
-): Promise<{
-  data: SignMessageResponse;
-  request: {
-    method: string;
-    url: string;
-    headers: Record<string, string>;
-    body: SignMessageRequest;
-  };
-}> {
-  const url = '/api/outlayer/wallet/v1/sign-message';
-  const body: SignMessageRequest = { message, recipient };
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Authorization: `Bearer ${apiKey}`,
-  };
-  const request = { method: 'POST', url, headers, body };
-
+): Promise<SignMessageResponse> {
   const res = await fetchWithTimeout(
-    url,
+    '/api/outlayer/wallet/v1/sign-message',
     {
       method: 'POST',
-      headers,
-      body: JSON.stringify(body),
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({ message, recipient }),
     },
     API_TIMEOUT_MS,
   );
   await assertOk(res);
-  const data: SignMessageResponse = await res.json();
-  return { data, request };
+  return res.json();
 }
 
-/**
- * Check wallet NEAR balance via OutLayer.
- */
 export async function getBalance(apiKey: string): Promise<string> {
-  const url = '/api/outlayer/wallet/v1/balance?chain=near';
-
   const res = await fetchWithTimeout(
-    url,
+    '/api/outlayer/wallet/v1/balance?chain=near',
     {
       headers: { Authorization: `Bearer ${apiKey}` },
     },
     API_TIMEOUT_MS,
   );
 
-  if (!res.ok) {
-    throw new Error(`Balance check failed: HTTP ${res.status}`);
-  }
+  await assertOk(res);
 
   let data: { balance?: string };
   try {
     data = await res.json();
   } catch {
-    throw new Error(
-      `Balance check failed: unexpected response (${res.status})`,
-    );
+    throw new Error('Balance check failed: unexpected response format');
   }
   return data.balance || '0';
 }

@@ -7,7 +7,12 @@
   },
   "files": {
     "ignoreUnknown": true,
-    "includes": ["src/**/*.ts", "src/**/*.tsx"]
+    "includes": [
+      "src/**/*.ts",
+      "src/**/*.tsx",
+      "__tests__/**/*.ts",
+      "e2e/**/*.ts"
+    ]
   },
   "formatter": {
     "enabled": true,
@@ -26,7 +31,7 @@
         "useConst": "warn"
       },
       "suspicious": {
-        "noExplicitAny": "off",
+        "noExplicitAny": "warn",
         "noArrayIndexKey": "off"
       },
       "correctness": {

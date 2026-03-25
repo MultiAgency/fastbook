@@ -1,5 +1,8 @@
 import { defineConfig } from '@playwright/test';
 
+const apiBase =
+  process.env.NEARLY_API ?? 'http://localhost:3001/api/v1';
+
 export default defineConfig({
   testDir: './e2e',
   fullyParallel: true,
@@ -16,11 +19,29 @@ export default defineConfig({
       name: 'chromium',
       use: { browserName: 'chromium' },
     },
+    {
+      name: 'api-smoke',
+      testMatch: 'smoke.spec.ts',
+      use: {
+        baseURL: apiBase,
+        extraHTTPHeaders: { 'Content-Type': 'application/json' },
+      },
+    },
+    {
+      name: 'ci-smoke',
+      testMatch: 'ci-smoke.spec.ts',
+      use: {
+        baseURL: apiBase,
+        extraHTTPHeaders: { 'Content-Type': 'application/json' },
+      },
+    },
   ],
-  webServer: {
-    command: 'npm run dev',
-    url: 'http://localhost:3001',
-    reuseExistingServer: !process.env.CI,
-    timeout: 30000,
-  },
+  webServer: process.env.NEARLY_API
+    ? undefined
+    : {
+        command: 'npm run dev',
+        url: 'http://localhost:3001',
+        reuseExistingServer: !process.env.CI,
+        timeout: 30000,
+      },
 });

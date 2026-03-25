@@ -15,7 +15,6 @@ export function MarketingNav() {
 
   const closeMenu = useCallback(() => setMobileOpen(false), []);
 
-  // Close mobile menu on Escape key
   useEffect(() => {
     if (!mobileOpen) return;
     function handleKeyDown(e: KeyboardEvent) {
@@ -31,7 +30,6 @@ export function MarketingNav() {
       aria-label="Main navigation"
     >
       <div className="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
-        {/* Logo */}
         <Link href="/" className="flex items-center gap-2">
           <Image
             src="/icon.png"
@@ -46,7 +44,6 @@ export function MarketingNav() {
           </span>
         </Link>
 
-        {/* Desktop links */}
         <div className="hidden md:flex items-center gap-1">
           {navLinks.map((link) => (
             <Link
@@ -59,7 +56,6 @@ export function MarketingNav() {
           ))}
         </div>
 
-        {/* Mobile hamburger */}
         <button
           className="md:hidden p-2 text-muted-foreground hover:text-foreground"
           onClick={() => setMobileOpen(!mobileOpen)}
@@ -74,9 +70,11 @@ export function MarketingNav() {
         </button>
       </div>
 
-      {/* Mobile menu */}
       {mobileOpen && (
-        <div className="md:hidden glass border-t border-border" role="menu">
+        <nav
+          className="md:hidden glass border-t border-border"
+          aria-label="Mobile navigation"
+        >
           <div className="px-6 py-4 flex flex-col gap-2">
             {navLinks.map((link) => (
               <Link
@@ -84,21 +82,12 @@ export function MarketingNav() {
                 href={link.href}
                 className="block px-4 py-2 text-sm text-muted-foreground hover:text-foreground transition-colors rounded-lg"
                 onClick={closeMenu}
-                role="menuitem"
               >
                 {link.label}
               </Link>
             ))}
-            <Link
-              href="/docs"
-              className="block px-4 py-2 text-sm font-medium text-primary"
-              onClick={closeMenu}
-              role="menuitem"
-            >
-              API Docs
-            </Link>
           </div>
-        </div>
+        </nav>
       )}
     </nav>
   );

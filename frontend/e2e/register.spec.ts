@@ -1,4 +1,6 @@
-import { test, expect } from '@playwright/test';
+import { expect, test } from '@playwright/test';
+
+const STEP_TIMEOUT = 15_000;
 
 test.describe('Registration Flow', () => {
   test.beforeEach(async ({ page }) => {
@@ -24,7 +26,9 @@ test.describe('Registration Flow', () => {
     await page.getByRole('button', { name: "I'm an Agent" }).click();
 
     await expect(page.getByText('NEP-413 Verified Identity')).toBeVisible();
-    await expect(page.getByText('Create OutLayer Custody Wallet')).toBeVisible();
+    await expect(
+      page.getByText('Create OutLayer Custody Wallet'),
+    ).toBeVisible();
     await expect(page.getByText('Sign Registration Message')).toBeVisible();
     await expect(page.getByText('Register on Nearly Social')).toBeVisible();
   });
@@ -40,20 +44,26 @@ test.describe('Registration Flow', () => {
     const createBtn = page.getByRole('button', { name: /Create Wallet/ });
     await createBtn.click();
 
-    await expect(page.getByText('Your NEAR Account')).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText('Your NEAR Account')).toBeVisible({
+      timeout: STEP_TIMEOUT,
+    });
   });
 
   test('step 2 signs message after step 1', async ({ page }) => {
     await page.getByRole('button', { name: "I'm an Agent" }).click();
 
     await page.getByRole('button', { name: /Create Wallet/ }).click();
-    await expect(page.getByText('Your NEAR Account')).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText('Your NEAR Account')).toBeVisible({
+      timeout: STEP_TIMEOUT,
+    });
 
     const signBtn = page.getByRole('button', { name: /Sign Message/ });
     await expect(signBtn).toBeEnabled();
     await signBtn.click();
 
-    await expect(page.getByText('Public Key')).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText('Public Key')).toBeVisible({
+      timeout: STEP_TIMEOUT,
+    });
     await expect(page.getByText('Signature')).toBeVisible();
   });
 
@@ -61,23 +71,33 @@ test.describe('Registration Flow', () => {
     await page.getByRole('button', { name: "I'm an Agent" }).click();
 
     await page.getByRole('button', { name: /Create Wallet/ }).click();
-    await expect(page.getByText('Your NEAR Account')).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText('Your NEAR Account')).toBeVisible({
+      timeout: STEP_TIMEOUT,
+    });
     await page.getByRole('button', { name: /Sign Message/ }).click();
-    await expect(page.getByText('Public Key')).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText('Public Key')).toBeVisible({
+      timeout: STEP_TIMEOUT,
+    });
 
     await page.getByPlaceholder('my_agent').fill('test_agent');
     await page.getByRole('button', { name: /Register Agent/ }).click();
 
-    await expect(page.getByText('Registered as')).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText('Registered as')).toBeVisible({
+      timeout: STEP_TIMEOUT,
+    });
   });
 
   test('handle input validates characters', async ({ page }) => {
     await page.getByRole('button', { name: "I'm an Agent" }).click();
 
     await page.getByRole('button', { name: /Create Wallet/ }).click();
-    await expect(page.getByText('Your NEAR Account')).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText('Your NEAR Account')).toBeVisible({
+      timeout: STEP_TIMEOUT,
+    });
     await page.getByRole('button', { name: /Sign Message/ }).click();
-    await expect(page.getByText('Public Key')).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText('Public Key')).toBeVisible({
+      timeout: STEP_TIMEOUT,
+    });
 
     const handleInput = page.getByPlaceholder('my_agent');
 
@@ -95,29 +115,43 @@ test.describe('Registration Flow', () => {
     await page.getByRole('button', { name: "I'm an Agent" }).click();
 
     await page.getByRole('button', { name: /Create Wallet/ }).click();
-    await expect(page.getByText('Your NEAR Account')).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText('Your NEAR Account')).toBeVisible({
+      timeout: STEP_TIMEOUT,
+    });
     await page.getByRole('button', { name: /Sign Message/ }).click();
-    await expect(page.getByText('Public Key')).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText('Public Key')).toBeVisible({
+      timeout: STEP_TIMEOUT,
+    });
 
     const input = page.locator('#handle');
     await expect(input).toHaveAttribute('aria-describedby', 'handle-help');
-    await expect(page.locator('#handle-help')).toHaveText('Lowercase letters, numbers, underscores');
+    await expect(page.locator('#handle-help')).toHaveText(
+      'Lowercase letters, numbers, underscores',
+    );
   });
 
   test('completion shows what-next cards', async ({ page }) => {
     await page.getByRole('button', { name: "I'm an Agent" }).click();
 
     await page.getByRole('button', { name: /Create Wallet/ }).click();
-    await expect(page.getByText('Your NEAR Account')).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText('Your NEAR Account')).toBeVisible({
+      timeout: STEP_TIMEOUT,
+    });
     await page.getByRole('button', { name: /Sign Message/ }).click();
-    await expect(page.getByText('Public Key')).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText('Public Key')).toBeVisible({
+      timeout: STEP_TIMEOUT,
+    });
     await page.getByPlaceholder('my_agent').fill('test_agent');
     await page.getByRole('button', { name: /Register Agent/ }).click();
-    await expect(page.getByText('Registration Complete')).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText('Registration Complete')).toBeVisible({
+      timeout: STEP_TIMEOUT,
+    });
 
     await expect(page.getByText("What's next?")).toBeVisible();
     // Social links appear in summary card
-    await expect(page.getByText('View your Nearly Social profile')).toBeVisible();
+    await expect(
+      page.getByText('View your Nearly Social profile'),
+    ).toBeVisible();
     await expect(page.getByText('Browse the agent directory')).toBeVisible();
   });
 
@@ -125,15 +159,23 @@ test.describe('Registration Flow', () => {
     await page.getByRole('button', { name: "I'm an Agent" }).click();
 
     await page.getByRole('button', { name: /Create Wallet/ }).click();
-    await expect(page.getByText('Your NEAR Account')).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText('Your NEAR Account')).toBeVisible({
+      timeout: STEP_TIMEOUT,
+    });
     await page.getByRole('button', { name: /Sign Message/ }).click();
-    await expect(page.getByText('Public Key')).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText('Public Key')).toBeVisible({
+      timeout: STEP_TIMEOUT,
+    });
     await page.getByPlaceholder('my_agent').fill('test_agent');
     await page.getByRole('button', { name: /Register Agent/ }).click();
-    await expect(page.getByText('Registration Complete')).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText('Registration Complete')).toBeVisible({
+      timeout: STEP_TIMEOUT,
+    });
 
     await page.getByRole('button', { name: 'Start Over' }).click();
-    await expect(page.getByRole('button', { name: /Create Wallet/ })).toBeVisible();
+    await expect(
+      page.getByRole('button', { name: /Create Wallet/ }),
+    ).toBeVisible();
     // Verify step results are cleared — wallet/signature data should not be visible
     await expect(page.getByText('Your NEAR Account')).not.toBeVisible();
     await expect(page.getByText('Registration Complete')).not.toBeVisible();
@@ -156,11 +198,17 @@ test.describe('Registration Accessibility', () => {
     await page.getByRole('button', { name: "I'm an Agent" }).click();
 
     await page.getByRole('button', { name: /Create Wallet/ }).click();
-    await expect(page.getByText('Your NEAR Account')).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText('Your NEAR Account')).toBeVisible({
+      timeout: STEP_TIMEOUT,
+    });
     await page.getByRole('button', { name: /Sign Message/ }).click();
-    await expect(page.getByText('Public Key')).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText('Public Key')).toBeVisible({
+      timeout: STEP_TIMEOUT,
+    });
 
-    const toggle = page.getByRole('switch', { name: 'Toggle live Nearly Social API' });
+    const toggle = page.getByRole('switch', {
+      name: 'Toggle live Nearly Social API',
+    });
     await expect(toggle).toBeVisible();
     await expect(toggle).toHaveAttribute('aria-checked', 'false');
   });
@@ -173,7 +221,9 @@ test.describe('Registration Accessibility', () => {
     await expect(liveRegion).toBeAttached();
 
     await page.getByRole('button', { name: /Create Wallet/ }).click();
-    await expect(page.getByText('Your NEAR Account')).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText('Your NEAR Account')).toBeVisible({
+      timeout: STEP_TIMEOUT,
+    });
 
     // After step 1 completes, the live region should have updated content
     const text = await liveRegion.textContent();

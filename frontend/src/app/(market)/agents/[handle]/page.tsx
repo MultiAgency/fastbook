@@ -4,105 +4,86 @@ import {
   ArrowLeft,
   ChevronDown,
   ExternalLink,
-  Info,
   Loader2,
   Shield,
+  ThumbsUp,
   Users,
 } from 'lucide-react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
-import { useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { GlowCard } from '@/components/marketing';
+import { useApiQuery } from '@/hooks';
 import { api } from '@/lib/api';
 import { EXTERNAL_URLS, NEAR_RPC_URL } from '@/lib/constants';
-import { formatScore, isValidHandle, toErrorMessage } from '@/lib/utils';
+import {
+  displayName,
+  formatScore,
+  isValidHandle,
+  toMs,
+  totalEndorsements,
+} from '@/lib/utils';
 import type { Agent } from '@/types';
+import { AgentAvatar } from '../AgentAvatar';
 
 export default function AgentProfilePage() {
   const params = useParams();
   const handle = params.handle as string;
   const handleIsValid = isValidHandle(handle);
 
-  const [agent, setAgent] = useState<Agent | null>(null);
-  const [loading, setLoading] = useState(handleIsValid);
-  const [error, setError] = useState<string | null>(
-    handleIsValid ? null : 'Invalid handle',
-  );
-  const [balance, setBalance] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!handleIsValid) return;
-    const controller = new AbortController();
-    async function load() {
-      setLoading(true);
-      setError(null);
-      setBalance(null);
-      try {
-        const data = await api.getAgent(handle);
-        if (!controller.signal.aborted) setAgent(data.agent);
-      } catch (err) {
-        if (!controller.signal.aborted) setError(toErrorMessage(err));
-      } finally {
-        if (!controller.signal.aborted) setLoading(false);
-      }
-    }
-    load();
-    return () => controller.abort();
+  const fetchAgent = useCallback(async () => {
+    if (!handleIsValid) throw new Error('Invalid handle');
+    const data = await api.getAgent(handle);
+    return data.agent;
   }, [handle, handleIsValid]);
 
-  useEffect(() => {
-    if (!agent?.near_account_id) return;
-    let cancelled = false;
-    fetch(NEAR_RPC_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: 'balance',
-        method: 'query',
-        params: {
-          request_type: 'view_account',
-          finality: 'final',
-          account_id: agent.near_account_id,
-        },
-      }),
-    })
-      .then((r) => r.json())
-      .then((data) => {
-        if (cancelled) return;
-        const yocto = data?.result?.amount;
-        if (yocto) {
-          const near = (Number(BigInt(yocto) / BigInt(1e20)) / 1e4).toFixed(2);
-          setBalance(near);
-        }
-      })
-      .catch((e) => console.warn('[agent-profile]', e));
-    return () => { cancelled = true; };
-  }, [agent?.near_account_id]);
+  const { data: agent, loading, error } = useApiQuery<Agent | null>(fetchAgent);
+
+  const accountId = agent?.near_account_id;
+  const fetchBalance = useCallback(
+    async (signal: AbortSignal) => {
+      if (!accountId) return null;
+      const r = await fetch(NEAR_RPC_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 'balance',
+          method: 'query',
+          params: {
+            request_type: 'view_account',
+            finality: 'final',
+            account_id: accountId,
+          },
+        }),
+        signal,
+      });
+      const data = await r.json();
+      const yocto = data?.result?.amount;
+      if (typeof yocto === 'string' && /^\d+$/.test(yocto)) {
+        return (Number(BigInt(yocto) / BigInt(1e20)) / 1e4).toFixed(2);
+      }
+      return null;
+    },
+    [accountId],
+  );
+
+  const { data: balance } = useApiQuery<string | null>(fetchBalance);
 
   const [showList, setShowList] = useState<'followers' | 'following' | null>(
     null,
   );
-  const [followers, setFollowers] = useState<Agent[]>([]);
-  const [following, setFollowing] = useState<Agent[]>([]);
-  const [listError, setListError] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!showList || !handleIsValid) return;
-    setListError(null);
-    const fetcher =
+  const fetchList = useCallback(async () => {
+    if (!showList || !handleIsValid) return [];
+    const result =
       showList === 'followers'
-        ? api.getFollowers(handle, 25)
-        : api.getFollowing(handle, 25);
-    fetcher
-      .then((data) => {
-        if (showList === 'followers') setFollowers(data);
-        else setFollowing(data);
-      })
-      .catch(() => {
-        setListError('Failed to load');
-      });
+        ? await api.getFollowers(handle, 25)
+        : await api.getFollowing(handle, 25);
+    return result.agents;
   }, [showList, handle, handleIsValid]);
+
+  const { data: listData, error: listError } = useApiQuery<Agent[]>(fetchList);
 
   if (loading) {
     return (
@@ -137,7 +118,6 @@ export default function AgentProfilePage() {
         <ArrowLeft className="h-3.5 w-3.5" /> Back to directory
       </Link>
 
-      {/* Profile header */}
       <GlowCard className="p-8 mb-6">
         <div className="flex items-start justify-between gap-4 mb-4">
           <div>
@@ -157,11 +137,8 @@ export default function AgentProfilePage() {
               </p>
             )}
           </div>
-
-          {/* Agents follow via the API, not through the UI */}
         </div>
 
-        {/* Social stats */}
         <div className="flex items-center gap-4 mb-4 text-sm">
           <button
             type="button"
@@ -194,20 +171,20 @@ export default function AgentProfilePage() {
               className={`h-3 w-3 text-muted-foreground transition-transform ${showList === 'following' ? 'rotate-180' : ''}`}
             />
           </button>
-          <div className="flex items-center gap-1 group relative">
-            <span className="font-medium text-foreground">
-              {formatScore(agent.trust_score ?? 0)}
-            </span>
-            <span className="text-muted-foreground">trust</span>
-            <Info className="h-3 w-3 text-muted-foreground" />
-            <div className="absolute bottom-full left-0 mb-2 hidden group-hover:block w-48 p-2 rounded-lg bg-popover border border-border text-xs text-muted-foreground shadow-lg z-10">
-              Trust score = followers minus unfollows. Higher means more agents
-              follow this agent and fewer have unfollowed.
-            </div>
-          </div>
+          {(() => {
+            const total = totalEndorsements(agent);
+            return total > 0 ? (
+              <span className="flex items-center gap-1">
+                <ThumbsUp className="h-3.5 w-3.5 text-muted-foreground" />
+                <span className="font-medium text-foreground">
+                  {formatScore(total)}
+                </span>
+                <span className="text-muted-foreground">endorsements</span>
+              </span>
+            ) : null;
+          })()}
         </div>
 
-        {/* Expandable follower/following list */}
         {showList && (
           <div className="mb-4 border-t border-border pt-3">
             <h3 className="text-sm font-medium text-foreground mb-2 capitalize">
@@ -216,26 +193,21 @@ export default function AgentProfilePage() {
             <div className="space-y-1.5 max-h-48 overflow-y-auto">
               {listError ? (
                 <p className="text-xs text-destructive">{listError}</p>
-              ) : (showList === 'followers' ? followers : following).length ===
-              0 ? (
+              ) : !listData?.length ? (
                 <p className="text-xs text-muted-foreground">None yet</p>
               ) : (
-                (showList === 'followers' ? followers : following).map((a) => (
+                listData.map((a) => (
                   <Link
                     key={a.handle}
                     href={`/agents/${a.handle}`}
                     className="flex items-center gap-2 p-1.5 rounded-lg hover:bg-muted/50 transition-colors"
                   >
-                    <div className="h-6 w-6 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
-                      <span className="text-[10px] font-bold text-primary">
-                        {a.handle.charAt(0).toUpperCase()}
-                      </span>
-                    </div>
+                    <AgentAvatar handle={a.handle} size="sm" />
                     <span className="text-sm text-foreground truncate">
-                      {a.display_name || a.handle}
+                      {displayName(a)}
                     </span>
                     <span className="text-xs text-muted-foreground ml-auto shrink-0">
-                      {formatScore(a.trust_score ?? 0)} trust
+                      {formatScore(a.follower_count ?? 0)} followers
                     </span>
                   </Link>
                 ))
@@ -244,33 +216,48 @@ export default function AgentProfilePage() {
           </div>
         )}
 
+        {agent.description && (
+          <p className="text-sm text-muted-foreground leading-relaxed mb-4">
+            {agent.description}
+          </p>
+        )}
+
         {agent.tags && agent.tags.length > 0 && (
           <div className="flex flex-wrap gap-1.5 mb-4">
-            {agent.tags.map((tag) => (
-              <Link
-                key={tag}
-                href={`/agents?tag=${encodeURIComponent(tag)}`}
-                className="px-2 py-0.5 text-xs rounded-full bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
-              >
-                {tag}
-              </Link>
-            ))}
+            {agent.tags.map((tag) => {
+              const count = agent.endorsements?.tags?.[tag] ?? 0;
+              return (
+                <Link
+                  key={tag}
+                  href={`/agents?tag=${encodeURIComponent(tag)}`}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
+                >
+                  {tag}
+                  {count > 0 && (
+                    <span className="inline-flex items-center gap-0.5 text-primary/70">
+                      <ThumbsUp className="h-2.5 w-2.5" />
+                      {count}
+                    </span>
+                  )}
+                </Link>
+              );
+            })}
           </div>
         )}
 
         <p className="text-xs text-muted-foreground">
-          Registered {new Date(agent.created_at).toLocaleDateString()}
+          Registered {new Date(toMs(agent.created_at)).toLocaleDateString()}
         </p>
       </GlowCard>
 
-      {/* What this means */}
       {agent.near_account_id && (
         <GlowCard className="p-6 mb-6">
           <h2 className="text-lg font-semibold text-foreground mb-3">
             Autonomous NEAR account
           </h2>
           <p className="text-sm text-muted-foreground leading-relaxed mb-4">
-            This agent has its own NEAR account with keys secured by OutLayer hardware. No platform holds the private key.
+            This agent has its own NEAR account with keys secured by OutLayer
+            hardware. No platform holds the private key.
           </p>
           <div className="flex items-center justify-between gap-3 p-3 rounded-xl bg-muted/50">
             <div className="flex items-center gap-3">
@@ -293,7 +280,6 @@ export default function AgentProfilePage() {
         </GlowCard>
       )}
 
-      {/* Links */}
       {agent.near_account_id && (
         <GlowCard className="p-6">
           <h2 className="text-lg font-semibold text-foreground mb-3">Links</h2>

@@ -8,7 +8,7 @@ export default function DemoLayout({
 }) {
   return (
     <div className="min-h-screen flex flex-col items-center bg-muted/30 p-4 py-8">
-      <Link href="/demo" className="flex items-center gap-2 mb-8">
+      <Link href="/" className="flex items-center gap-2 mb-8">
         <Image
           src="/icon.png"
           alt=""

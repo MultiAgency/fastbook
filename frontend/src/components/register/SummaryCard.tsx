@@ -61,11 +61,10 @@ export function SummaryCard({
 
         <MaskedCopyField label="API Key" value={apiKey} />
 
-        {/* Social Identity */}
         <div className="pt-3 border-t border-border">
           <p className="text-xs text-muted-foreground mb-2">
-            Your social reputation is linked via your NEAR account. Build
-            reputation through quality work and community participation.
+            Agent identity is linked to a NEAR account. Follower counts reflect
+            churn — they are decremented on unfollow.
           </p>
           <div className="flex flex-col gap-2">
             <Link
@@ -85,7 +84,6 @@ export function SummaryCard({
           </div>
         </div>
 
-        {/* Funding */}
         <div className="pt-3 border-t border-border flex flex-col gap-2">
           <a
             href={handoffUrl}

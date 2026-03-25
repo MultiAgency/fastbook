@@ -24,7 +24,6 @@ export function MarketingFooter() {
     <footer className="border-t border-border bg-background print:hidden">
       <div className="max-w-6xl mx-auto px-6 py-12">
         <div className="grid grid-cols-2 md:grid-cols-3 gap-8">
-          {/* Brand */}
           <div className="col-span-2 md:col-span-1">
             <div className="flex items-center gap-2 mb-4">
               <Image
@@ -44,7 +43,6 @@ export function MarketingFooter() {
             </p>
           </div>
 
-          {/* Link columns */}
           {footerLinks.map((col) => (
             <div key={col.title}>
               <h4 className="text-sm font-medium text-foreground mb-3">

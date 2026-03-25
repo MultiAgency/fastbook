@@ -1,13 +1,25 @@
 import { type ClassValue, clsx } from 'clsx';
-import { format, parseISO } from 'date-fns';
 import { twMerge } from 'tailwind-merge';
-import { LIMITS } from './constants';
+import {
+  HANDLE_RE,
+  LIMITS,
+  MS_EPOCH_THRESHOLD,
+  RESERVED_HANDLES,
+} from './constants';
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+export function displayName(agent: {
+  display_name?: string;
+  handle: string;
+}): string {
+  return agent.display_name || agent.handle;
+}
+
 export function formatScore(score: number): string {
+  if (!Number.isFinite(score)) return '0';
   const abs = Math.abs(score);
   const sign = score < 0 ? '-' : '';
   if (abs >= 1000000)
@@ -17,34 +29,70 @@ export function formatScore(score: number): string {
   return score.toString();
 }
 
-/** Normalize timestamp to milliseconds (handles seconds or ms). */
-function toMs(ts: number): number {
-  // Timestamps above 1e12 are already milliseconds; below that, treat as seconds
-  return ts > 1e12 ? ts : ts * 1000;
+export function toMs(ts: number): number {
+  return ts > MS_EPOCH_THRESHOLD ? ts : ts * 1000;
 }
 
-/** Convert string/number/Date to Date. */
 function normalizeDate(date: string | Date | number): Date {
   if (typeof date === 'number') return new Date(toMs(date));
-  if (typeof date === 'string') return parseISO(date);
+  if (typeof date === 'string') return new Date(date);
   return date;
 }
 
 function formatDate(date: string | Date | number): string {
-  return format(normalizeDate(date), 'MMM d, yyyy');
+  return normalizeDate(date).toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
 }
 
 export function isValidHandle(handle: string): boolean {
-  // Must match handleSchema regex and length bounds from constants.ts
-  const { AGENT_HANDLE_MIN, AGENT_HANDLE_MAX } = LIMITS;
+  return HANDLE_RE.test(handle) && !RESERVED_HANDLES.has(handle);
+}
+
+export function isValidVerifiableClaim(vc: unknown): boolean {
+  if (typeof vc !== 'object' || vc === null) return false;
+  const v = vc as Record<string, unknown>;
   return (
-    handle.length >= AGENT_HANDLE_MIN &&
-    handle.length <= AGENT_HANDLE_MAX &&
-    /^[a-z0-9_]+$/.test(handle)
+    typeof v.near_account_id === 'string' &&
+    (v.near_account_id as string).length <= LIMITS.MAX_VC_ACCOUNT_ID &&
+    typeof v.public_key === 'string' &&
+    (v.public_key as string).length <= LIMITS.MAX_VC_PUBLIC_KEY &&
+    typeof v.signature === 'string' &&
+    (v.signature as string).length <= LIMITS.MAX_VC_SIGNATURE &&
+    typeof v.nonce === 'string' &&
+    (v.nonce as string).length <= LIMITS.MAX_VC_NONCE &&
+    typeof v.message === 'string' &&
+    (v.message as string).length <= LIMITS.MAX_VC_FIELD
   );
 }
 
-// Truncate NEAR account ID for display (abcd1234...wxyz5678)
+export function isValidCapabilities(
+  caps: unknown,
+): caps is import('@/types').AgentCapabilities {
+  if (typeof caps !== 'object' || caps === null || Array.isArray(caps))
+    return false;
+  const obj = caps as Record<string, unknown>;
+  if ('skills' in obj) {
+    if (
+      !Array.isArray(obj.skills) ||
+      !obj.skills.every((s: unknown) => typeof s === 'string')
+    )
+      return false;
+  }
+  return true;
+}
+
+export function totalEndorsements(agent: {
+  endorsements?: Record<string, Record<string, number>>;
+}): number {
+  return Object.values(agent.endorsements ?? {}).reduce(
+    (sum, ns) => sum + Object.values(ns).reduce((s, v) => s + v, 0),
+    0,
+  );
+}
+
 export function truncateAccountId(accountId: string, maxLength = 20): string {
   if (accountId.length <= maxLength) return accountId;
   const side = Math.max(Math.floor((maxLength - 3) / 2), 4);
@@ -69,35 +117,112 @@ export function formatRelativeTime(date: string | Date | number): string {
   return formatDate(date);
 }
 
-// Sanitize handle input (lowercase, alphanumeric + underscore)
 export function sanitizeHandle(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9_]/g, '');
+  const cleaned = value.toLowerCase().replace(/[^a-z0-9_]/g, '');
+  return cleaned.replace(/^[^a-z]+/, '');
 }
 
-/** Extract error message from unknown thrown value. */
 export function toErrorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   if (typeof err === 'string') return err;
   return String(err);
 }
 
-// Map raw backend errors to user-friendly messages
-const ERROR_PATTERNS = [
-  [/abort|timeout/i, 'Request timed out. Please try again.'],
-  [/rpc|network|fetch/i, "Couldn't reach the NEAR network. Please try again."],
+export type ErrorKind = 'network' | 'auth' | 'generic';
+
+export interface ClassifiedError {
+  kind: ErrorKind;
+  message: string;
+}
+
+const ERROR_PATTERNS: readonly [RegExp, string, ErrorKind][] = [
+  [/\babort|\btimeout/i, 'Request timed out. Please try again.', 'network'],
   [
-    /already taken|conflict/i,
-    'This handle is already in use. Try a different one.',
+    /failed to fetch|networkerror|econnrefused|net::err_/i,
+    'Could not reach the server. Make sure the backend is running.',
+    'network',
   ],
-  [/expired|timestamp/i, 'Your signature has expired. Please sign again.'],
-  [/unauthorized|401/i, 'Authentication failed. Please restart the flow.'],
-  [/rate.?limit|429|too many/i, 'Too many requests. Please wait a moment.'],
-] as const;
+  [
+    /\brpc\b|network\s*error|\bfetch\b/i,
+    'Could not reach the NEAR network. Please try again.',
+    'network',
+  ],
+  [
+    /already taken|Handle already taken|conflict/i,
+    'This handle is already in use. Try a different one.',
+    'generic',
+  ],
+  [
+    /Handle must be|Handle is reserved/i,
+    'Invalid handle. Use 3-32 lowercase letters, numbers, or underscores.',
+    'generic',
+  ],
+  [
+    /already registered/i,
+    'This NEAR account is already registered.',
+    'generic',
+  ],
+  [/Agent not found/i, 'Agent not found.', 'generic'],
+  [
+    /No agent registered/i,
+    'You need to register before performing this action.',
+    'auth',
+  ],
+  [/Cannot follow yourself/i, 'You cannot follow yourself.', 'generic'],
+  [
+    /Cannot endorse yourself|Cannot unendorse yourself/i,
+    'You cannot endorse yourself.',
+    'generic',
+  ],
+  [
+    /nonce has already been used/i,
+    'This signature has already been used. Please sign again.',
+    'auth',
+  ],
+  [
+    /expired|timestamp/i,
+    'Your signature has expired. Please sign again.',
+    'auth',
+  ],
+  [
+    /Auth failed|Authentication required|unauthorized|\b401\b/i,
+    'Authentication failed. Please restart the flow.',
+    'auth',
+  ],
+  [/\b403\b|forbidden/i, 'Access denied.', 'auth'],
+  [
+    /rate.?limit|429|too many/i,
+    'Too many requests. Please wait a moment.',
+    'generic',
+  ],
+  [
+    /WASM execution failed|decode.*output/i,
+    'Backend execution error. Please try again.',
+    'generic',
+  ],
+  [
+    /upstream.*timeout|504/i,
+    'The server took too long to respond. Please try again.',
+    'network',
+  ],
+  [
+    /402|quota|insufficient.*funds?|payment/i,
+    'Insufficient credits. Please check your account balance.',
+    'generic',
+  ],
+];
+
+export function classifyError(err: unknown): ClassifiedError {
+  const msg = toErrorMessage(err);
+  for (const [pattern, message, kind] of ERROR_PATTERNS) {
+    if (pattern.test(msg)) return { kind, message };
+  }
+  return {
+    kind: 'generic',
+    message: 'Something went wrong. Please try again.',
+  };
+}
 
 export function friendlyError(err: unknown): string {
-  const msg = toErrorMessage(err);
-  for (const [pattern, message] of ERROR_PATTERNS) {
-    if (pattern.test(msg)) return message;
-  }
-  return 'Something went wrong. Please try again.';
+  return classifyError(err).message;
 }

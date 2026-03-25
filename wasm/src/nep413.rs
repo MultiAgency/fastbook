@@ -1,17 +1,16 @@
-//! NEP-413 signature verification for Payment Key HTTPS mode.
-//!
-//! Verifies ed25519 signatures over the NEP-413 Borsh-serialized payload
-//! to authenticate users when the platform can't provide signer_account_id().
+//! NEP-413 signature construction and verification for ed25519-signed messages.
 
+use crate::types::AppError;
 use crate::Nep413Auth;
 use ed25519_dalek::{Signature, VerifyingKey};
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 
-const NEP413_TAG: u32 = 2_147_484_061; // 2^31 + 413
+const NEP413_TAG: u32 = 2_147_484_061;
 const RECIPIENT: &str = "nearly.social";
-pub(crate) const TIMESTAMP_WINDOW_MS: u64 = 5 * 60 * 1000; // 5 minutes
+pub(crate) const TIMESTAMP_WINDOW_MS: u64 = 5 * 60 * 1000;
+/// Maximum clock skew tolerated for timestamps in the future.
+const FUTURE_TS_TOLERANCE_MS: u64 = 60_000;
 
-/// Build the Borsh-serialized NEP-413 payload for signing/verification.
 pub(crate) fn build_nep413_payload(message: &[u8], nonce: &[u8], recipient: &[u8]) -> Vec<u8> {
     let mut payload = Vec::new();
     payload.extend_from_slice(&NEP413_TAG.to_le_bytes());
@@ -20,137 +19,179 @@ pub(crate) fn build_nep413_payload(message: &[u8], nonce: &[u8], recipient: &[u8
     payload.extend_from_slice(nonce);
     payload.extend_from_slice(&(recipient.len() as u32).to_le_bytes());
     payload.extend_from_slice(recipient);
-    payload.push(0); // callbackUrl: None
+    payload.push(0);
     payload
 }
 
-/// Verify that the given public key is an access key on the claimed NEAR account.
-/// Uses the NEAR RPC `view-access-key` endpoint.
-/// In test mode, skip the RPC call to verify key ownership (host function unavailable).
-/// SECURITY NOTE: This means integration tests do NOT verify that the public key belongs
-/// to the claimed NEAR account. Public key ownership is only tested in production via the
-/// OutLayer RPC host function. If this bypass is ever accidentally enabled in production,
-/// any ed25519 key could authenticate as any NEAR account.
-#[cfg(test)]
-pub fn verify_public_key_ownership(_account_id: &str, _public_key: &str) -> Result<(), String> {
-    Ok(())
-}
-
-#[cfg(not(test))]
-pub fn verify_public_key_ownership(account_id: &str, public_key: &str) -> Result<(), String> {
-    // Validate account_id format: alphanumeric, dots, dashes, underscores; 2-64 chars
+/// Validate NEAR account ID format: 2-64 chars, alphanumeric plus `.`, `-`, `_`.
+pub(crate) fn validate_near_account_id(account_id: &str) -> Result<(), AppError> {
     if account_id.len() < 2
         || account_id.len() > 64
         || !account_id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
     {
-        return Err("Invalid NEAR account ID format".to_string());
-    }
-    let (result, error) = outlayer::raw::rpc::view_access_key(account_id, public_key, "final");
-    if !error.is_empty() {
-        return Err("RPC error verifying public key".to_string());
-    }
-    if result.is_empty() {
-        return Err("Public key not found on the specified account".to_string());
-    }
-    // Reject function-call-only keys — require FullAccess for account ownership proof.
-    // The RPC result contains a "permission" field: "FullAccess" or {"FunctionCall": {...}}.
-    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&result) {
-        let perm = parsed.get("permission");
-        let is_full_access = perm
-            .and_then(|p| p.as_str())
-            .map(|s| s == "FullAccess")
-            .unwrap_or(false);
-        if !is_full_access {
-            return Err("Only FullAccess keys can prove account ownership".to_string());
-        }
+        return Err(AppError::Auth("Invalid NEAR account ID format".into()));
     }
     Ok(())
 }
 
-/// Verify a NEP-413 authentication claim.
-/// `now_ms` is the current time in milliseconds (caller-provided for TEE consistency).
-/// Returns Ok(()) if the signature is valid, Err(message) otherwise.
-pub fn verify_auth(auth: &Nep413Auth, now_ms: u64) -> Result<(), String> {
+#[cfg(test)]
+pub fn verify_public_key_ownership(account_id: &str, _public_key: &str) -> Result<(), AppError> {
+    validate_near_account_id(account_id)
+}
+
+/// Check whether `account_id` is an implicit account cryptographically
+/// bound to `public_key`. Supports two implicit schemes:
+///
+/// 1. **Raw public key** (OutLayer custody wallets): account_id = hex(pubkey)
+/// 2. **NEAR implicit** (on-chain): account_id = hex(sha256(pubkey))
+///
+/// Both are 64 hex chars. If either matches, no on-chain lookup is needed.
+fn is_implicit_owner(account_id: &str, public_key: &str) -> Result<bool, AppError> {
+    if account_id.len() != 64 || !account_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Ok(false);
+    }
+    let pub_bytes = decode_ed25519_key(public_key)?;
+    // Scheme 1: raw pubkey hex (OutLayer custody)
+    let raw_hex: String = pub_bytes.iter().map(|b| format!("{b:02x}")).collect();
+    if raw_hex == account_id {
+        return Ok(true);
+    }
+    // Scheme 2: sha256(pubkey) hex (NEAR implicit accounts)
+    let hash = <sha2::Sha256 as sha2::Digest>::digest(&pub_bytes);
+    let hash_hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+    Ok(hash_hex == account_id)
+}
+
+#[cfg(not(test))]
+pub fn verify_public_key_ownership(account_id: &str, public_key: &str) -> Result<(), AppError> {
+    validate_near_account_id(account_id)?;
+    // Implicit accounts (64 hex chars = sha256 of ed25519 pubkey) can be
+    // verified mathematically — no on-chain lookup needed. This supports
+    // OutLayer custody wallets which may not have on-chain accounts.
+    if is_implicit_owner(account_id, public_key)? {
+        return Ok(());
+    }
+    let (result, error) = outlayer::raw::rpc::view_access_key(account_id, public_key, "final");
+    if !error.is_empty() {
+        return Err(AppError::Auth(
+            "RPC unreachable while verifying public key".into(),
+        ));
+    }
+    if result.is_empty() {
+        return Err(AppError::Auth(
+            "Public key not found on the specified account".into(),
+        ));
+    }
+    let parsed = serde_json::from_str::<serde_json::Value>(&result)
+        .map_err(|_| AppError::Auth("Failed to parse RPC response".into()))?;
+    let perm = parsed.get("permission");
+    let is_full_access = perm
+        .and_then(|p| p.as_str())
+        .map(|s| s == "FullAccess")
+        .unwrap_or(false);
+    if !is_full_access {
+        return Err(AppError::Auth(
+            "Only FullAccess keys can prove account ownership".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn verify_auth(auth: &Nep413Auth, now_ms: u64, expected_action: &str) -> Result<(), AppError> {
     let parsed: serde_json::Value = serde_json::from_str(&auth.message)
-        .map_err(|_| "Message must be valid JSON")?;
+        .map_err(|_| AppError::Auth("Message must be valid JSON".into()))?;
 
     if parsed.get("domain").and_then(|v| v.as_str()) != Some(RECIPIENT) {
-        return Err(format!("Message domain must be \"{RECIPIENT}\""));
+        return Err(AppError::Auth(format!(
+            "Message domain must be \"{RECIPIENT}\""
+        )));
     }
 
-    // The message must contain the account ID the caller claims to be.
-    // This binds the signature to a specific account — the signer can't
-    // reuse a signature to impersonate a different account.
+    let msg_action = parsed
+        .get("action")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AppError::Auth("Message must contain an action field".into()))?;
+    if msg_action != expected_action {
+        return Err(AppError::Auth(format!(
+            "Message action \"{msg_action}\" does not match expected \"{expected_action}\""
+        )));
+    }
+
     let msg_account = parsed.get("account_id").and_then(|v| v.as_str());
     if msg_account != Some(&auth.near_account_id) {
-        return Err("Message account_id must match near_account_id".to_string());
+        return Err(AppError::Auth(
+            "Message account_id must match near_account_id".into(),
+        ));
     }
 
-    let ts = parsed.get("timestamp").and_then(|v| v.as_u64())
-        .ok_or("Message must contain a numeric timestamp field")?;
+    let ts = parsed
+        .get("timestamp")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or(AppError::Auth(
+            "Message must contain a numeric timestamp field".into(),
+        ))?;
     if now_ms > ts && now_ms - ts > TIMESTAMP_WINDOW_MS {
-        return Err("Timestamp expired".to_string());
+        return Err(AppError::Auth("Timestamp expired".into()));
     }
-    if ts > now_ms + 60_000 {
-        return Err("Timestamp is in the future".to_string());
+    if ts > now_ms + FUTURE_TS_TOLERANCE_MS {
+        return Err(AppError::Auth("Timestamp is in the future".into()));
     }
 
-    // 2. Decode public key from "ed25519:<base58>" format
     let pub_key_bytes = decode_ed25519_key(&auth.public_key)?;
     if pub_key_bytes.len() != 32 {
-        return Err("Public key must be 32 bytes".to_string());
+        return Err(AppError::Auth("Public key must be 32 bytes".into()));
     }
 
-    // 3. Decode signature from "ed25519:<base58>" format
     let sig_bytes = decode_ed25519_key(&auth.signature)?;
     if sig_bytes.len() != 64 {
-        return Err("Signature must be 64 bytes".to_string());
+        return Err(AppError::Auth("Signature must be 64 bytes".into()));
     }
 
-    // 4. Decode nonce from base64 (must be 32 bytes)
-    let nonce_bytes = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        &auth.nonce,
-    ).map_err(|_| "Invalid base64 nonce")?;
+    let nonce_bytes =
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &auth.nonce)
+            .map_err(|_| AppError::Auth("Invalid base64 nonce".into()))?;
 
     if nonce_bytes.len() != 32 {
-        return Err("Nonce must be 32 bytes".to_string());
+        return Err(AppError::Auth("Nonce must be 32 bytes".into()));
     }
 
-    // 5. Build NEP-413 Borsh payload
     let payload = build_nep413_payload(auth.message.as_bytes(), &nonce_bytes, RECIPIENT.as_bytes());
 
-    // 6. SHA-256 hash the payload
     let hash = Sha256::digest(&payload);
 
-    // 7. Verify ed25519 signature
     let verifying_key = VerifyingKey::from_bytes(
-        pub_key_bytes.as_slice().try_into().map_err(|_| "Invalid public key length")?
-    ).map_err(|_| "Invalid public key")?;
+        pub_key_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| AppError::Auth("Invalid public key length".into()))?,
+    )
+    .map_err(|_| AppError::Auth("Invalid public key".into()))?;
 
     let signature = Signature::from_bytes(
-        sig_bytes.as_slice().try_into().map_err(|_| "Invalid signature length")?
+        sig_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| AppError::Auth("Invalid signature length".into()))?,
     );
 
     verifying_key
         .verify_strict(&hash, &signature)
-        .map_err(|_| "ed25519 signature verification failed")?;
+        .map_err(|_| AppError::Auth("ed25519 signature verification failed".into()))?;
 
     Ok(())
 }
 
-/// Decode a NEAR-style "ed25519:<base58>" key string to raw bytes.
-fn decode_ed25519_key(key_str: &str) -> Result<Vec<u8>, String> {
+fn decode_ed25519_key(key_str: &str) -> Result<Vec<u8>, AppError> {
     let prefix = "ed25519:";
     if !key_str.starts_with(prefix) {
-        return Err(format!("Key must start with \"{prefix}\""));
+        return Err(AppError::Auth(format!("Key must start with \"{prefix}\"")));
     }
     let encoded = &key_str[prefix.len()..];
     bs58::decode(encoded)
         .into_vec()
-        .map_err(|e| format!("Invalid base58: {e}"))
+        .map_err(|e| AppError::Auth(format!("Invalid base58: {e}")))
 }
 
 #[cfg(test)]
@@ -158,23 +199,24 @@ pub(crate) mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
 
-    /// Return a valid (auth, now_ms) pair for cross-module tests.
     pub fn make_auth_for_test() -> (Nep413Auth, u64) {
         let now_ms = 1_700_000_000_000u64;
         let (auth, _) = sign_auth("alice.near", "nearly.social", now_ms);
         (auth, now_ms)
     }
 
-    /// Build a valid Nep413Auth by signing with a known keypair.
     fn sign_auth(account_id: &str, domain: &str, now_ms: u64) -> (Nep413Auth, SigningKey) {
         let secret_bytes: [u8; 32] = [
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-            17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32,
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+            25, 26, 27, 28, 29, 30, 31, 32,
         ];
         let signing_key = SigningKey::from_bytes(&secret_bytes);
         let verifying_key = signing_key.verifying_key();
 
-        let pub_key_str = format!("ed25519:{}", bs58::encode(verifying_key.as_bytes()).into_string());
+        let pub_key_str = format!(
+            "ed25519:{}",
+            bs58::encode(verifying_key.as_bytes()).into_string()
+        );
 
         let message = serde_json::json!({
             "action": "register",
@@ -182,21 +224,23 @@ pub(crate) mod tests {
             "account_id": account_id,
             "version": 1,
             "timestamp": now_ms,
-        }).to_string();
+        })
+        .to_string();
 
         let nonce_bytes: [u8; 32] = [
-            42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57,
-            58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73,
+            42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63,
+            64, 65, 66, 67, 68, 69, 70, 71, 72, 73,
         ];
-        let nonce_b64 = base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            &nonce_bytes,
-        );
+        let nonce_b64 =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, nonce_bytes);
 
         let payload = build_nep413_payload(message.as_bytes(), &nonce_bytes, RECIPIENT.as_bytes());
         let hash = Sha256::digest(&payload);
         let signature = signing_key.sign(&hash);
-        let sig_str = format!("ed25519:{}", bs58::encode(signature.to_bytes()).into_string());
+        let sig_str = format!(
+            "ed25519:{}",
+            bs58::encode(signature.to_bytes()).into_string()
+        );
 
         let auth = Nep413Auth {
             near_account_id: account_id.to_string(),
@@ -212,14 +256,16 @@ pub(crate) mod tests {
     fn valid_signature_succeeds() {
         let now_ms = 1_700_000_000_000u64;
         let (auth, _) = sign_auth("alice.near", "nearly.social", now_ms);
-        assert!(verify_auth(&auth, now_ms).is_ok());
+        assert!(verify_auth(&auth, now_ms, "register").is_ok());
     }
 
     #[test]
     fn wrong_domain_rejected() {
         let now_ms = 1_700_000_000_000u64;
         let (auth, _) = sign_auth("alice.near", "evil.site", now_ms);
-        let err = verify_auth(&auth, now_ms).unwrap_err();
+        let err = verify_auth(&auth, now_ms, "register")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("domain"), "expected domain error, got: {err}");
     }
 
@@ -228,25 +274,32 @@ pub(crate) mod tests {
         let now_ms = 1_700_000_000_000u64;
         let (mut auth, _) = sign_auth("alice.near", "nearly.social", now_ms);
         auth.near_account_id = "bob.near".to_string();
-        let err = verify_auth(&auth, now_ms).unwrap_err();
-        assert!(err.contains("account_id"), "expected account_id error, got: {err}");
+        let err = verify_auth(&auth, now_ms, "register")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("account_id"),
+            "expected account_id error, got: {err}"
+        );
     }
 
     #[test]
     fn expired_timestamp_rejected() {
         let sign_time = 1_700_000_000_000u64;
         let (auth, _) = sign_auth("alice.near", "nearly.social", sign_time);
-        // Verify 6 minutes later (beyond 5-minute window)
-        let err = verify_auth(&auth, sign_time + 6 * 60 * 1000).unwrap_err();
+        let err = verify_auth(&auth, sign_time + 6 * 60 * 1000, "register")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("expired"), "expected expiry error, got: {err}");
     }
 
     #[test]
     fn future_timestamp_rejected() {
         let now_ms = 1_700_000_000_000u64;
-        // Sign with timestamp 2 minutes in the future (beyond 60s tolerance)
         let (auth, _) = sign_auth("alice.near", "nearly.social", now_ms + 2 * 60 * 1000);
-        let err = verify_auth(&auth, now_ms).unwrap_err();
+        let err = verify_auth(&auth, now_ms, "register")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("future"), "expected future error, got: {err}");
     }
 
@@ -254,10 +307,12 @@ pub(crate) mod tests {
     fn tampered_message_rejected() {
         let now_ms = 1_700_000_000_000u64;
         let (mut auth, _) = sign_auth("alice.near", "nearly.social", now_ms);
-        // Tamper with the message after signing
         auth.message = auth.message.replace("register", "steal");
-        let err = verify_auth(&auth, now_ms).unwrap_err();
-        assert!(err.contains("verification failed"), "expected sig error, got: {err}");
+        let err = verify_auth(&auth, now_ms, "steal").unwrap_err().to_string();
+        assert!(
+            err.contains("verification failed"),
+            "expected sig error, got: {err}"
+        );
     }
 
     #[test]
@@ -265,8 +320,13 @@ pub(crate) mod tests {
         let now_ms = 1_700_000_000_000u64;
         let (mut auth, _) = sign_auth("alice.near", "nearly.social", now_ms);
         auth.public_key = "rsa:AAAA".to_string();
-        let err = verify_auth(&auth, now_ms).unwrap_err();
-        assert!(err.contains("ed25519:"), "expected prefix error, got: {err}");
+        let err = verify_auth(&auth, now_ms, "register")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("ed25519:"),
+            "expected prefix error, got: {err}"
+        );
     }
 
     #[test]
@@ -274,7 +334,9 @@ pub(crate) mod tests {
         let now_ms = 1_700_000_000_000u64;
         let (mut auth, _) = sign_auth("alice.near", "nearly.social", now_ms);
         auth.nonce = "not-valid-base64!!!".to_string();
-        let err = verify_auth(&auth, now_ms).unwrap_err();
+        let err = verify_auth(&auth, now_ms, "register")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("nonce"), "expected nonce error, got: {err}");
     }
 
@@ -282,15 +344,51 @@ pub(crate) mod tests {
     fn within_timestamp_window_succeeds() {
         let sign_time = 1_700_000_000_000u64;
         let (auth, _) = sign_auth("alice.near", "nearly.social", sign_time);
-        // Verify 4 minutes later (within 5-minute window)
-        assert!(verify_auth(&auth, sign_time + 4 * 60 * 1000).is_ok());
+        assert!(verify_auth(&auth, sign_time + 4 * 60 * 1000, "register").is_ok());
     }
 
     #[test]
     fn slight_future_timestamp_succeeds() {
         let now_ms = 1_700_000_000_000u64;
-        // Sign with timestamp 30 seconds in the future (within 60s tolerance)
         let (auth, _) = sign_auth("alice.near", "nearly.social", now_ms + 30_000);
-        assert!(verify_auth(&auth, now_ms).is_ok());
+        assert!(verify_auth(&auth, now_ms, "register").is_ok());
+    }
+
+    #[test]
+    fn wrong_action_rejected() {
+        let now_ms = 1_700_000_000_000u64;
+        let (auth, _) = sign_auth("alice.near", "nearly.social", now_ms);
+        let err = verify_auth(&auth, now_ms, "follow")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("action"), "expected action error, got: {err}");
+    }
+
+    // H3: validate_near_account_id — extracted from verify_public_key_ownership
+    #[test]
+    fn account_id_too_short_rejected() {
+        assert!(validate_near_account_id("a").is_err());
+    }
+
+    #[test]
+    fn account_id_too_long_rejected() {
+        let long = "a".repeat(65);
+        assert!(validate_near_account_id(&long).is_err());
+    }
+
+    #[test]
+    fn account_id_invalid_chars_rejected() {
+        assert!(validate_near_account_id("alice@near").is_err());
+        assert!(validate_near_account_id("alice near").is_err());
+        assert!(validate_near_account_id("alice:near").is_err());
+    }
+
+    #[test]
+    fn account_id_valid_formats_accepted() {
+        assert!(validate_near_account_id("alice.near").is_ok());
+        assert!(validate_near_account_id("a-b_c.near").is_ok());
+        assert!(validate_near_account_id("ab").is_ok());
+        let max = "a".repeat(64);
+        assert!(validate_near_account_id(&max).is_ok());
     }
 }

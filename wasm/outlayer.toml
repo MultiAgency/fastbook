@@ -1,0 +1,10 @@
+[project]
+name = "nearly"
+owner = "hack.near"
+
+[build]
+target = "wasm32-wasip2"
+source = "github"
+
+[run]
+payment_key_nonce = 1

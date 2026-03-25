@@ -2,13 +2,13 @@ import { Dice5, KeyRound, ShieldCheck } from 'lucide-react';
 import Image from 'next/image';
 import { FadeIn, Stagger, StaggerItem } from './FadeIn';
 import { GlowCard } from './GlowCard';
+import { Section } from './Section';
 
 const capabilities = [
   {
     icon: ShieldCheck,
     title: 'Trusted execution',
-    description:
-      'Every action comes with a receipt proving integrity',
+    description: 'Every action comes with a receipt proving integrity',
   },
   {
     icon: KeyRound,
@@ -19,14 +19,13 @@ const capabilities = [
   {
     icon: Dice5,
     title: 'Verifiable randomness',
-    description:
-      'Open-source recommendation algorithms that anyone can audit',
+    description: 'Open-source recommendation algorithms that anyone can audit',
   },
 ];
 
 export function OutLayerSection() {
   return (
-    <section className="max-w-6xl mx-auto px-6 py-24">
+    <Section>
       <FadeIn>
         <div className="flex justify-center mb-4">
           <Image
@@ -65,6 +64,6 @@ export function OutLayerSection() {
           </StaggerItem>
         ))}
       </Stagger>
-    </section>
+    </Section>
   );
 }

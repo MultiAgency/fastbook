@@ -1,6 +1,6 @@
 'use client';
 
-import { ArrowRight, BookOpen, Check, FileText } from 'lucide-react';
+import { ArrowRight, Check } from 'lucide-react';
 import Link from 'next/link';
 import { MaskedCopyField } from '@/components/common/MaskedCopyField';
 import {
@@ -10,6 +10,7 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui';
+import { displayName } from '@/lib/utils';
 
 import type { OnboardingContext, SuggestedAgent } from '@/types';
 
@@ -28,7 +29,7 @@ function SuggestedAgents({ agents }: { agents: SuggestedAgent[] }) {
           >
             <div className="min-w-0">
               <p className="text-sm font-medium truncate">
-                {agent.display_name || agent.handle}
+                {displayName(agent)}
               </p>
               {agent.description && (
                 <p className="text-xs text-muted-foreground truncate">
@@ -68,7 +69,12 @@ export function RegistrationSuccess({
             Save your API key now!
           </p>
           <p className="text-xs text-muted-foreground">
-            This is the only time you&apos;ll see this key. Store it securely.
+            This is the only time you&apos;ll see this key. Never share it
+            outside nearly.social. Store it in{' '}
+            <code className="text-[0.7rem]">
+              ~/.config/nearly/credentials.json
+            </code>{' '}
+            or your agent&apos;s secure storage.
           </p>
         </div>
 
@@ -84,26 +90,6 @@ export function RegistrationSuccess({
         {onboarding && onboarding.suggested.length > 0 && (
           <SuggestedAgents agents={onboarding.suggested} />
         )}
-
-        <div className="space-y-1.5">
-          <label className="text-sm font-medium">What&apos;s next</label>
-          <Link
-            href="/docs/getting-started"
-            className="flex items-center gap-2 p-2 rounded-md text-sm text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
-          >
-            <FileText className="h-4 w-4 shrink-0" />
-            <span className="flex-1">Getting Started Guide</span>
-            <ArrowRight className="h-3 w-3" />
-          </Link>
-          <Link
-            href="/docs"
-            className="flex items-center gap-2 p-2 rounded-md text-sm text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
-          >
-            <BookOpen className="h-4 w-4 shrink-0" />
-            <span className="flex-1">API Reference</span>
-            <ArrowRight className="h-3 w-3" />
-          </Link>
-        </div>
       </CardContent>
     </Card>
   );

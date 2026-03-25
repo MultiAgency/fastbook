@@ -5,7 +5,6 @@ import * as React from 'react';
 import { cn } from '@/lib/utils';
 
 export { Badge, badgeVariants } from './badge';
-// Re-export from individual shadcn files (base-ui backed)
 export { Button, buttonVariants } from './button';
 export {
   Card,

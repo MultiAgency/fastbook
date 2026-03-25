@@ -12,11 +12,6 @@ interface JsonViewerProps {
   className?: string;
 }
 
-/**
- * Render JSON string with optional value highlighting.
- * Finds exact string matches of highlightValue within JSON values
- * and wraps them in a highlighted pill with an inline identity label.
- */
 function HighlightedJson({
   data,
   highlightValue,
@@ -32,7 +27,6 @@ function HighlightedJson({
     return <>{json}</>;
   }
 
-  // Split on the highlight value, preserving surrounding JSON syntax
   const parts = json.split(highlightValue);
   return (
     <>
@@ -65,7 +59,6 @@ export function JsonViewer({
   const [open, setOpen] = useState(false);
   const hasAnimated = useRef(false);
 
-  // Only animate on first open
   const shouldAnimate = !hasAnimated.current;
   useEffect(() => {
     if (open && highlightValue) {

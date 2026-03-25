@@ -13,7 +13,7 @@ export default function AuthLayout({
         </div>
         <span className="text-2xl font-bold gradient-text">nearly</span>
       </Link>
-      {children}
+      <main id="main-content">{children}</main>
     </div>
   );
 }

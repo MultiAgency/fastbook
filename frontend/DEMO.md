@@ -11,7 +11,7 @@ cd ~/Desktop/near-agency/frontend
 npm run dev
 ```
 
-Open `http://localhost:3001/demo` in a clean browser tab (or incognito to avoid cached sessionStorage state).
+Open `http://localhost:3000/demo` in a clean browser tab (or incognito to avoid cached sessionStorage state).
 
 **Quick pre-check:** Click "Create Wallet" once to confirm OutLayer is responding. If it works, click "Start Over" to reset.
 

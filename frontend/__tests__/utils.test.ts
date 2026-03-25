@@ -1,7 +1,11 @@
 import {
+  formatRelativeTime,
+  formatScore,
+  friendlyError,
   isValidHandle,
   sanitizeHandle,
-  friendlyError,
+  toErrorMessage,
+  truncateAccountId,
 } from '@/lib/utils';
 
 describe('Utility Functions', () => {
@@ -12,11 +16,27 @@ describe('Utility Functions', () => {
       expect(isValidHandle('agent_bot')).toBe(true);
     });
 
+    it('validates boundary lengths', () => {
+      expect(isValidHandle('abc')).toBe(true);
+      expect(isValidHandle('a'.repeat(32))).toBe(true);
+      expect(isValidHandle('ab')).toBe(false);
+      expect(isValidHandle('a'.repeat(33))).toBe(false);
+    });
+
     it('rejects invalid handles', () => {
       expect(isValidHandle('a')).toBe(false);
+      expect(isValidHandle('ab')).toBe(false);
       expect(isValidHandle('agent-name')).toBe(false);
       expect(isValidHandle('agent name')).toBe(false);
       expect(isValidHandle('Agent_Bot')).toBe(false);
+      expect(isValidHandle('123bot')).toBe(false);
+      expect(isValidHandle('_agent')).toBe(false);
+    });
+
+    it('rejects reserved handles', () => {
+      expect(isValidHandle('admin')).toBe(false);
+      expect(isValidHandle('system')).toBe(false);
+      expect(isValidHandle('near')).toBe(false);
     });
   });
 
@@ -40,6 +60,17 @@ describe('Utility Functions', () => {
     it('strips unicode characters', () => {
       expect(sanitizeHandle('agénté')).toBe('agnt');
     });
+
+    it('strips leading digits and underscores', () => {
+      expect(sanitizeHandle('123bot')).toBe('bot');
+      expect(sanitizeHandle('_agent')).toBe('agent');
+      expect(sanitizeHandle('99_agent')).toBe('agent');
+    });
+
+    it('returns empty when all chars are leading non-letters', () => {
+      expect(sanitizeHandle('123')).toBe('');
+      expect(sanitizeHandle('___')).toBe('');
+    });
   });
 
   describe('friendlyError', () => {
@@ -48,27 +79,141 @@ describe('Utility Functions', () => {
     });
 
     it('maps network errors', () => {
-      expect(friendlyError(new Error('fetch failed'))).toContain('NEAR network');
+      expect(friendlyError(new Error('fetch failed'))).toContain(
+        'NEAR network',
+      );
     });
 
     it('maps conflict errors', () => {
-      expect(friendlyError(new Error('Handle already taken'))).toContain('already in use');
+      expect(friendlyError(new Error('Handle already taken'))).toContain(
+        'already in use',
+      );
     });
 
     it('maps expired errors', () => {
-      expect(friendlyError(new Error('timestamp expired'))).toContain('expired');
+      expect(friendlyError(new Error('timestamp expired'))).toContain(
+        'expired',
+      );
     });
 
     it('maps auth errors', () => {
-      expect(friendlyError(new Error('401 unauthorized'))).toContain('Authentication');
+      expect(friendlyError(new Error('401 unauthorized'))).toContain(
+        'Authentication',
+      );
     });
 
     it('returns generic message for unknown errors', () => {
-      expect(friendlyError(new Error('something weird'))).toContain('Something went wrong');
+      expect(friendlyError(new Error('something weird'))).toContain(
+        'Something went wrong',
+      );
     });
 
     it('handles non-Error objects', () => {
       expect(friendlyError('string error')).toContain('Something went wrong');
+    });
+
+    it('maps rate limit errors', () => {
+      expect(friendlyError(new Error('429 too many requests'))).toContain(
+        'Too many requests',
+      );
+    });
+  });
+
+  describe('formatScore', () => {
+    it('returns small numbers as-is', () => {
+      expect(formatScore(0)).toBe('0');
+      expect(formatScore(999)).toBe('999');
+    });
+
+    it('formats thousands with K suffix', () => {
+      expect(formatScore(1000)).toBe('1K');
+      expect(formatScore(1500)).toBe('1.5K');
+      expect(formatScore(10000)).toBe('10K');
+    });
+
+    it('formats millions with M suffix', () => {
+      expect(formatScore(1000000)).toBe('1M');
+      expect(formatScore(2500000)).toBe('2.5M');
+    });
+
+    it('handles negative numbers', () => {
+      expect(formatScore(-1500)).toBe('-1.5K');
+      expect(formatScore(-1000000)).toBe('-1M');
+    });
+  });
+
+  describe('truncateAccountId', () => {
+    it('returns short IDs unchanged', () => {
+      expect(truncateAccountId('alice.near')).toBe('alice.near');
+    });
+
+    it('truncates long IDs with ellipsis', () => {
+      const long = 'abcdefghijklmnopqrstuvwxyz1234567890.near';
+      expect(truncateAccountId(long)).toBe('abcdefgh...890.near');
+    });
+
+    it('respects custom maxLength', () => {
+      const id = 'abcdefghij.near';
+      expect(truncateAccountId(id, 10)).toBe('abcd...near');
+    });
+  });
+
+  describe('formatRelativeTime', () => {
+    it('returns "just now" for recent timestamps', () => {
+      expect(formatRelativeTime(new Date())).toBe('just now');
+    });
+
+    it('formats minutes ago', () => {
+      const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000);
+      expect(formatRelativeTime(fiveMinAgo)).toBe('5 minutes ago');
+    });
+
+    it('formats singular minute', () => {
+      const oneMinAgo = new Date(Date.now() - 61 * 1000);
+      expect(formatRelativeTime(oneMinAgo)).toBe('1 minute ago');
+    });
+
+    it('formats hours ago', () => {
+      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+      expect(formatRelativeTime(twoHoursAgo)).toBe('2 hours ago');
+    });
+
+    it('formats days ago', () => {
+      const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+      expect(formatRelativeTime(threeDaysAgo)).toBe('3 days ago');
+    });
+
+    it('returns formatted date for older than 30 days', () => {
+      const old = new Date('2020-06-15T12:00:00Z');
+      const result = formatRelativeTime(old);
+      expect(result).toMatch(/^Jun 1[45], 2020$/);
+    });
+
+    it('handles unix timestamps in seconds', () => {
+      const nowSecs = Math.floor(Date.now() / 1000);
+      expect(formatRelativeTime(nowSecs)).toBe('just now');
+    });
+  });
+
+  describe('toErrorMessage', () => {
+    it('extracts message from Error instances', () => {
+      expect(toErrorMessage(new Error('test error'))).toBe('test error');
+    });
+
+    it('returns strings as-is', () => {
+      expect(toErrorMessage('raw string')).toBe('raw string');
+    });
+
+    it('converts null to string', () => {
+      expect(toErrorMessage(null)).toBe('null');
+    });
+
+    it('converts undefined to string', () => {
+      expect(toErrorMessage(undefined)).toBe('undefined');
+    });
+
+    it('converts numbers to string', () => {
+      expect(toErrorMessage(42)).toBe('42');
     });
   });
 });
