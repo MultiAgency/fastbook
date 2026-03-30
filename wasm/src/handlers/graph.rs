@@ -5,10 +5,11 @@ use crate::response::*;
 use crate::social_graph::{format_edge, load_unfollow_history_by, load_unfollow_history_for};
 use crate::store::*;
 use crate::types::*;
+use crate::validation::validate_cursor;
 use crate::{require_agent, require_field, require_target_handle};
 use std::collections::HashMap;
 
-fn cursor_offset_by<T>(
+pub(crate) fn cursor_offset_by<T>(
     items: &[T],
     cursor: &Option<String>,
     key_fn: impl Fn(&T) -> &str,
@@ -20,11 +21,6 @@ fn cursor_offset_by<T>(
             None => (0, false),
         },
     }
-}
-
-#[cfg(test)]
-pub(crate) fn cursor_offset(handles: &[String], cursor: &Option<String>) -> usize {
-    cursor_offset_by(handles, cursor, |h| h.as_str()).0
 }
 
 fn paginate_graph(
@@ -55,11 +51,12 @@ fn paginate_graph(
     } else {
         None
     };
-    if cursor_found {
-        ok_paginated(serde_json::json!(results), limit as u32, next, false)
-    } else {
-        ok_paginated(serde_json::json!(results), limit as u32, next, true)
-    }
+    ok_paginated(
+        serde_json::json!(results),
+        limit as u32,
+        next,
+        !cursor_found,
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -70,6 +67,11 @@ enum GraphDir {
 
 fn handle_graph_list(req: &Request, dir: GraphDir) -> Response {
     let handle = require_target_handle!(req);
+    if let Some(c) = req.cursor.as_deref() {
+        if let Err(e) = validate_cursor(c) {
+            return e.into();
+        }
+    }
     if !has(&keys::pub_agent(&handle)) {
         return AppError::NotFound("Agent not found").into();
     }
@@ -115,10 +117,18 @@ pub fn handle_get_following(req: &Request) -> Response {
 //   outgoing_reason? (mutual only), outgoing_at? (mutual only)
 pub fn handle_get_edges(req: &Request) -> Response {
     let handle = require_target_handle!(req);
+    if let Some(c) = req.cursor.as_deref() {
+        if let Err(e) = validate_cursor(c) {
+            return e.into();
+        }
+    }
     let agent = require_agent!(&handle);
     let direction = req.direction.as_deref().unwrap_or("both");
     if !["incoming", "outgoing", "both"].contains(&direction) {
-        return err_response("Invalid direction: use incoming, outgoing, or both");
+        return err_coded(
+            "VALIDATION_ERROR",
+            "Invalid direction: use incoming, outgoing, or both",
+        );
     }
     let include_history = req.include_history.unwrap_or(false);
     let limit = req.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT) as usize;
@@ -204,6 +214,8 @@ pub fn handle_get_edges(req: &Request) -> Response {
         }
     }
 
+    // Pagination is nested inside `data` (not top-level) because get_edges
+    // returns extra fields (edge_count, truncated, history) alongside the list.
     let mut pagination = serde_json::json!({ "limit": limit, "next_cursor": next });
     if !cursor_found {
         pagination["cursor_reset"] = serde_json::json!(true);
@@ -212,6 +224,7 @@ pub fn handle_get_edges(req: &Request) -> Response {
         "handle": handle,
         "edges": edges,
         "edge_count": total_edges,
+        "truncated": total_edges >= MAX_EDGE_SCAN,
         "history": if include_history { serde_json::json!(history) } else { serde_json::json!(null) },
         "pagination": pagination,
     }))

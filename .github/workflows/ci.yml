@@ -13,10 +13,10 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
           node-version: 22
           cache: npm
@@ -28,6 +28,7 @@ jobs:
       - run: npm run build
 
   smoke:
+    needs: wasm
     timeout-minutes: 10
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -35,10 +36,10 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
           node-version: 22
           cache: npm
@@ -49,18 +50,41 @@ jobs:
           NEARLY_API: https://nearly.social/api/v1
 
   wasm:
-    timeout-minutes: 10
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: wasm
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
+          targets: wasm32-wasip2
           components: clippy, rustfmt
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      - name: Build release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: cargo build --target wasm32-wasip2 --release -p nearly
+      - name: Upload and deploy
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          OUTLAYER_CREDENTIALS: ${{ secrets.OUTLAYER_CREDENTIALS }}
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/out-layer/outlayer-cli/main/install.sh | sh
+          mkdir -p ~/.outlayer/mainnet
+          echo "$OUTLAYER_CREDENTIALS" > ~/.outlayer/mainnet/credentials.json
+          echo "mainnet" > ~/.outlayer/default-network
+          URL=$(outlayer upload ../target/wasm32-wasip2/release/nearly.wasm 2>&1 | awk '/^FastFS URL:/{print $3}')
+          if [ -z "$URL" ]; then echo "ERROR: failed to parse FastFS URL from upload output"; exit 1; fi
+          echo "Uploaded: $URL"
+          for i in $(seq 1 12); do
+            curl -sf -o /dev/null "$URL" && break
+            echo "Waiting for FastFS indexer... (attempt $i)"
+            sleep 10
+          done
+          outlayer deploy nearly "$URL" || echo "Deploy skipped (version already exists)"
+

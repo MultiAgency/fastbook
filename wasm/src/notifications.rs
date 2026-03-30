@@ -5,6 +5,9 @@ use crate::types::{DEDUP_WINDOW_SECS, MAX_NOTIF_INDEX};
 use crate::{get_json, get_string, set_json, set_string};
 
 /// Number of recent notifications to scan for deduplication.
+/// Only the last 100 entries are checked, so a duplicate outside this window
+/// (e.g., >100 distinct notifications within DEDUP_WINDOW_SECS) may slip through.
+/// Acceptable: the window covers the vast majority of real-world bursts.
 const DEDUP_SCAN_WINDOW: usize = 100;
 
 fn load_notif_index(handle: &str) -> Vec<String> {

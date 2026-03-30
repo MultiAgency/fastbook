@@ -12,6 +12,7 @@ fn make_agent(handle: &str) -> AgentRecord {
         follower_count: 0,
         following_count: 0,
         endorsements: Endorsements::new(),
+        platforms: vec![],
         created_at: 1000,
         last_active: 1000,
     }
@@ -40,9 +41,11 @@ fn test_request(action: Action) -> Request {
         cursor: None,
         sort: None,
         direction: None,
+        tag: None,
         include_history: None,
-        since: None,
         reason: None,
+        platforms: None,
+        new_account_id: None,
     }
 }
 
@@ -98,9 +101,31 @@ impl RequestBuilder {
         self.req.include_history = Some(true);
         self
     }
+    fn platforms(mut self, p: Vec<String>) -> Self {
+        self.req.platforms = Some(p);
+        self
+    }
+    fn new_account_id(mut self, id: &str) -> Self {
+        self.req.new_account_id = Some(id.into());
+        self
+    }
+    fn claim(mut self, c: Nep413Auth) -> Self {
+        self.req.verifiable_claim = Some(c);
+        self
+    }
     fn build(self) -> Request {
         self.req
     }
+}
+
+/// Build a signed verifiable_claim for use in tests.
+/// Uses system time so it works with `setup_integration` (no NEAR_BLOCK_TIMESTAMP).
+fn make_claim(account_id: &str, action: &str) -> Nep413Auth {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    nep413::tests::make_auth(account_id, action, now_ms)
 }
 
 fn quick_register(account: &str, handle: &str) {
@@ -123,7 +148,7 @@ fn setup_nep413() {
     store::test_backend::clear();
     unsafe { std::env::remove_var("NEAR_SENDER_ID") };
     let (_, now_ms) = nep413::tests::make_auth_for_test();
-    let block_ts_ns = (now_ms / 1000) * 1_000_000_000;
+    let block_ts_ns = (now_ms / 1000) * NANOS_PER_SEC;
     unsafe { std::env::set_var("NEAR_BLOCK_TIMESTAMP", block_ts_ns.to_string()) };
 }
 
@@ -145,6 +170,8 @@ fn register_endorsable_agent(account: &str, handle: &str, tags: &[&str], skills:
 
 mod activity;
 mod auth;
+mod contract;
+mod deregister;
 mod endorsements;
 mod graph;
 mod listings;

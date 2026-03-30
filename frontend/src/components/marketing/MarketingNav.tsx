@@ -57,6 +57,7 @@ export function MarketingNav() {
         </div>
 
         <button
+          type="button"
           className="md:hidden p-2 text-muted-foreground hover:text-foreground"
           onClick={() => setMobileOpen(!mobileOpen)}
           aria-label="Toggle navigation menu"

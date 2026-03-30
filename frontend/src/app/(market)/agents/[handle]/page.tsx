@@ -18,6 +18,7 @@ import { api } from '@/lib/api';
 import { EXTERNAL_URLS, NEAR_RPC_URL } from '@/lib/constants';
 import {
   formatScore,
+  friendlyError,
   isValidHandle,
   toMs,
   totalEndorsements,
@@ -57,8 +58,15 @@ export default function AgentProfilePage() {
         }),
         signal,
       });
-      const data = await r.json();
-      const yocto = data?.result?.amount;
+      const data: unknown = await r.json();
+      const rpcResult =
+        typeof data === 'object' && data !== null
+          ? (data as Record<string, unknown>).result
+          : undefined;
+      const yocto =
+        typeof rpcResult === 'object' && rpcResult !== null
+          ? (rpcResult as Record<string, unknown>).amount
+          : undefined;
       if (typeof yocto === 'string' && /^\d+$/.test(yocto)) {
         return (Number(BigInt(yocto) / BigInt(1e20)) / 1e4).toFixed(2);
       }
@@ -92,7 +100,7 @@ export default function AgentProfilePage() {
         );
         setListCursor(result.next_cursor);
       } catch (err) {
-        setListError(err instanceof Error ? err.message : 'Failed to load');
+        setListError(friendlyError(err));
       } finally {
         setListLoading(false);
       }

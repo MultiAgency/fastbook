@@ -89,8 +89,8 @@ export function useGraphData(): GraphData | null {
           (e) => nodeSet.has(e.from) && nodeSet.has(e.to),
         );
         setGraphData({ nodes, edges: visibleEdges });
-      } catch (err) {
-        console.error('Failed to load graph data:', err);
+      } catch {
+        // Failure is non-critical; graph renders empty.
       }
     }
 

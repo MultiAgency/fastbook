@@ -1,13 +1,20 @@
 //! Shared types, constants, and domain limits used across the crate.
+//!
+//! ## NEAR account ID naming conventions
+//!
+//! - `near_account_id`: stored on `AgentRecord` and `Nep413Auth` — the canonical NEAR account
+//! - `caller`: resolved account ID used inside handlers (the "who" for this request)
+//! - `signer` / `env::signer_account_id()`: raw value from the OutLayer runtime before
+//!   owner extraction (may be `owner:nonce:secret` for payment keys)
 
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::ops::Index;
 
-/// Deserialize a field that can be absent, null, or a value.
-/// - Absent → `None` (via `#[serde(default)]`)
-/// - `null` → `Some(None)` (clear the field)
-/// - `"value"` → `Some(Some("value"))` (set the field)
+/// Deserialize a field that can be absent, null, or a value (PATCH semantics).
+/// - Absent → `None` (via `#[serde(default)]`): field left unchanged
+/// - `null` → `Some(None)`: clear the field
+/// - `"value"` → `Some(Some("value"))`: set the field to value
 fn nullable_string<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
 where
     D: Deserializer<'de>,
@@ -48,7 +55,13 @@ pub(crate) enum Action {
     Endorse,
     Unendorse,
     GetEndorsers,
+    FilterEndorsers,
+    Deregister,
+    MigrateAccount,
+    CheckHandle,
+    SetPlatforms,
     ReconcileAll,
+    AdminDeregister,
 }
 
 impl Action {
@@ -75,7 +88,13 @@ impl Action {
             Self::Endorse => "endorse",
             Self::Unendorse => "unendorse",
             Self::GetEndorsers => "get_endorsers",
+            Self::FilterEndorsers => "filter_endorsers",
+            Self::Deregister => "deregister",
+            Self::MigrateAccount => "migrate_account",
+            Self::CheckHandle => "check_handle",
+            Self::SetPlatforms => "set_platforms",
             Self::ReconcileAll => "reconcile_all",
+            Self::AdminDeregister => "admin_deregister",
         }
     }
 }
@@ -99,16 +118,20 @@ pub(crate) struct Request {
     pub sort: Option<String>,
     #[serde(default)]
     pub limit: Option<u32>,
-    #[serde(default)]
+    #[serde(default, alias = "since")]
     pub cursor: Option<String>,
     #[serde(default)]
-    pub since: Option<String>,
-    #[serde(default)]
     pub reason: Option<String>,
+    #[serde(default)]
+    pub tag: Option<String>,
     #[serde(default)]
     pub direction: Option<String>,
     #[serde(default)]
     pub include_history: Option<bool>,
+    #[serde(default)]
+    pub platforms: Option<Vec<String>>,
+    #[serde(default)]
+    pub new_account_id: Option<String>,
 }
 
 #[derive(Serialize, Default)]
@@ -122,6 +145,8 @@ pub(crate) struct Response {
     pub code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<Box<str>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pagination: Option<Box<Pagination>>,
 }
@@ -197,8 +222,40 @@ impl Endorsements {
         self.get(ns).and_then(|m| m.get(val).copied()).unwrap_or(0)
     }
 
+    pub fn set_count(&mut self, ns: &str, val: &str, count: i64) {
+        *self
+            .0
+            .entry(ns.to_string())
+            .or_default()
+            .entry(val.to_string())
+            .or_insert(0) = count;
+    }
+
     pub fn total_count(&self) -> i64 {
         self.0.values().flat_map(|ns| ns.values()).sum()
+    }
+
+    /// Structural equality of positive counts (ignores zero/negative entries).
+    pub fn eq_counts(&self, other: &Self) -> bool {
+        let pos_count = |e: &Self| -> usize {
+            e.0.iter()
+                .filter(|(_, inner)| inner.values().any(|&v| v > 0))
+                .count()
+        };
+        if pos_count(self) != pos_count(other) {
+            return false;
+        }
+        self.0.iter().all(|(ns, inner)| {
+            let Some(other_inner) = other.0.get(ns) else {
+                return inner.values().all(|&v| v <= 0);
+            };
+            inner
+                .iter()
+                .all(|(k, &v)| v <= 0 || other_inner.get(k).copied().unwrap_or(0) == v)
+                && other_inner
+                    .iter()
+                    .all(|(k, &v)| v <= 0 || inner.get(k).is_some())
+        })
     }
 }
 
@@ -225,6 +282,8 @@ pub(crate) struct AgentRecord {
     pub following_count: i64,
     #[serde(default)]
     pub endorsements: Endorsements,
+    #[serde(default)]
+    pub platforms: Vec<String>,
     pub created_at: u64,
     pub last_active: u64,
 }
@@ -266,9 +325,33 @@ pub(crate) const UPDATE_RATE_LIMIT: u32 = 10;
 pub(crate) const UPDATE_RATE_WINDOW_SECS: u64 = 60;
 pub(crate) const HEARTBEAT_RATE_LIMIT: u32 = 5;
 pub(crate) const HEARTBEAT_RATE_WINDOW_SECS: u64 = 60;
+pub(crate) const SUGGEST_RATE_LIMIT: u32 = 10;
+pub(crate) const SUGGEST_RATE_WINDOW_SECS: u64 = 60;
+pub(crate) const MIGRATE_RATE_LIMIT: u32 = 3;
+pub(crate) const MIGRATE_RATE_WINDOW_SECS: u64 = 60;
+pub(crate) const DEREGISTER_RATE_LIMIT: u32 = 1;
+pub(crate) const DEREGISTER_RATE_WINDOW_SECS: u64 = 300;
+
+/// Rate-limited action names that store **per-handle** keys.
+/// Used by deregister to clean up rate-limit state.
+///
+/// Excludes `deregister` (keyed on NEAR account, not handle, so it
+/// intentionally survives re-registration) and `suggested` (keyed on
+/// caller and cleaned separately in `delete_aux_data`).
+pub(crate) const RATE_LIMITED_ACTIONS: &[&str] = &[
+    "follow",
+    "unfollow",
+    "endorse",
+    "unendorse",
+    "update_me",
+    "heartbeat",
+    "migrate_account",
+];
 const _: () = assert!(FOLLOW_RATE_WINDOW_SECS > 0, "rate window must be nonzero");
 const _: () = assert!(ENDORSE_RATE_WINDOW_SECS > 0, "rate window must be nonzero");
 
+pub(crate) const MAX_PLATFORMS: usize = 10;
+pub(crate) const MAX_PLATFORM_ID_LEN: usize = 64;
 pub(crate) const MAX_CAPABILITY_DEPTH: usize = 4;
 
 pub(crate) const MAX_NOTIF_INDEX: usize = 500;
@@ -293,9 +376,9 @@ pub(crate) enum AppError {
     Validation(String),
     NotFound(&'static str),
     Auth(String),
-    RateLimit(String),
+    RateLimit(String, u64),
     Storage(String),
-    Clock(String),
+    Clock,
 }
 
 impl std::fmt::Display for AppError {
@@ -304,16 +387,10 @@ impl std::fmt::Display for AppError {
             Self::Validation(msg) => write!(f, "{msg}"),
             Self::NotFound(msg) => write!(f, "{msg}"),
             Self::Auth(msg) => write!(f, "{msg}"),
-            Self::RateLimit(msg) => write!(f, "{msg}"),
+            Self::RateLimit(msg, _) => write!(f, "{msg}"),
             Self::Storage(msg) => write!(f, "{msg}"),
-            Self::Clock(msg) => write!(f, "{msg}"),
+            Self::Clock => write!(f, "Internal timing error"),
         }
-    }
-}
-
-impl From<String> for AppError {
-    fn from(s: String) -> Self {
-        Self::Storage(s)
     }
 }
 
@@ -373,6 +450,11 @@ mod enum_consistency_tests {
             Action::Endorse,
             Action::Unendorse,
             Action::GetEndorsers,
+            Action::FilterEndorsers,
+            Action::Deregister,
+            Action::MigrateAccount,
+            Action::CheckHandle,
+            Action::SetPlatforms,
             Action::ReconcileAll,
         ];
         for action in &all_actions {

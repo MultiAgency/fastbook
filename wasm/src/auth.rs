@@ -10,10 +10,34 @@ use outlayer::env;
 /// Nonce GC fires when `nonce_byte % GC_SAMPLE_DIVISOR < 1`, i.e. ~2% of calls.
 const GC_SAMPLE_DIVISOR: u8 = 50;
 
+/// Verify that the caller is the configured admin account.
+/// Verify that the caller is the configured admin account.
+///
+/// Checks `OUTLAYER_ADMIN_ACCOUNT` env var first (set via .env or secrets),
+/// then falls back to the hardcoded project owner. This ensures admin auth
+/// works regardless of whether secrets are injected into the TEE runtime.
+pub(crate) fn require_admin(caller: &str) -> Result<(), Response> {
+    let admin = std::env::var("OUTLAYER_ADMIN_ACCOUNT")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "hack.near".to_string());
+    if caller == admin {
+        Ok(())
+    } else {
+        Err(err_coded(
+            "AUTH_FAILED",
+            "Unauthorized: admin access required",
+        ))
+    }
+}
+
 /// Extract the NEAR account from a payment-key signer.
 /// Payment keys: `owner.near:nonce:secret` → `owner.near`.
 fn extract_owner(signer: &str) -> Option<&str> {
-    signer.split_once(':').map(|(owner, _)| owner).filter(|o| !o.is_empty())
+    signer
+        .split_once(':')
+        .map(|(owner, _)| owner)
+        .filter(|o| !o.is_empty())
 }
 
 /// Resolve the authenticated caller for this request.
@@ -61,7 +85,11 @@ pub(crate) fn get_caller_from(req: &Request) -> Result<String, Response> {
         };
 
         // If claim is absent or matches the signer, trust the runtime.
-        if req.verifiable_claim.as_ref().is_none_or(|a| a.near_account_id == account) {
+        if req
+            .verifiable_claim
+            .as_ref()
+            .is_none_or(|a| a.near_account_id == account)
+        {
             return Ok(account);
         }
     }
@@ -84,11 +112,20 @@ pub(crate) fn get_caller_from(req: &Request) -> Result<String, Response> {
     })?;
 
     nep413::verify_public_key_ownership(&auth.near_account_id, &auth.public_key).map_err(|e| {
-        err_hint(
-            "AUTH_FAILED",
-            &format!("Auth failed: {e}"),
-            "Public key must exist on the claimed NEAR account with FullAccess permission",
-        )
+        let msg = e.to_string();
+        let hint = if msg.contains("RPC unreachable") {
+            "NEAR RPC is temporarily unavailable — generate a new nonce and retry"
+        } else if msg.contains("not found on") {
+            "Ensure the ed25519 public key is added to the NEAR account with FullAccess \
+             permission, then generate a new nonce and retry"
+        } else if msg.contains("FullAccess") {
+            "Only FullAccess keys can prove ownership — FunctionCall keys are not accepted. \
+             Generate a new nonce and retry with a FullAccess key"
+        } else {
+            "Public key must exist on the claimed NEAR account with FullAccess permission. \
+             Generate a new nonce and retry"
+        };
+        err_hint("AUTH_FAILED", &format!("Auth failed: {msg}"), hint)
     })?;
 
     const _: () = assert!(
@@ -130,7 +167,12 @@ pub(crate) fn get_caller_from(req: &Request) -> Result<String, Response> {
                 "Generate a new 32-byte random nonce and re-sign",
             ))
         }
-        Err(_) => return Err(err_response("Internal error")),
+        Err(_) => {
+            return Err(err_coded(
+                "INTERNAL_ERROR",
+                "Nonce verification failed — please retry",
+            ))
+        }
     }
 
     Ok(auth.near_account_id.clone())

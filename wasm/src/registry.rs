@@ -10,6 +10,9 @@ pub(crate) fn load_registry() -> Vec<String> {
     index_list(keys::pub_agents())
 }
 
+/// Cold-start bootstrap: loads every agent record by iterating the registry.
+/// After the first reconciliation, sorted indices and tag counts exist,
+/// so the callers (`load_agents_sorted`, `list_tags`) never hit this path.
 pub(crate) fn load_all_agents() -> Vec<AgentRecord> {
     load_registry()
         .iter()
@@ -24,12 +27,16 @@ pub(crate) fn registry_count() -> u64 {
 }
 
 pub(crate) fn add_to_registry(handle: &str) -> Result<(), AppError> {
-    index_append(keys::pub_agents(), handle)?;
-    let count = index_list(keys::pub_agents()).len();
-    let count_bytes = count.to_string();
-    set_public(keys::pub_meta_count(), count_bytes.as_bytes())?;
-    let ts_bytes = now_secs()?.to_string();
-    set_public(keys::pub_meta_updated(), ts_bytes.as_bytes())
+    // Read the index once, append, write back, and derive count from the
+    // same Vec — avoids a second index_list read (saves one storage I/O).
+    let mut idx = index_list(keys::pub_agents());
+    if !idx.iter().any(|e| e == handle) {
+        idx.push(handle.to_string());
+        let bytes = serde_json::to_vec(&idx).map_err(|e| AppError::Storage(e.to_string()))?;
+        set_public(keys::pub_agents(), &bytes)?;
+    }
+    let count_bytes = idx.len().to_string();
+    set_public(keys::pub_meta_count(), count_bytes.as_bytes())
 }
 
 fn sorted_entries(agent: &AgentRecord) -> [(String, String); 4] {
@@ -47,7 +54,7 @@ fn sorted_entries(agent: &AgentRecord) -> [(String, String); 4] {
             format!("{inv_endorsed:020}:{}", agent.handle),
         ),
         (
-            keys::pub_sorted("created"),
+            keys::pub_sorted("newest"),
             format!("{inv_created:020}:{}", agent.handle),
         ),
         (
@@ -103,20 +110,9 @@ impl SortKey {
         match self {
             Self::Followers => "followers",
             Self::Endorsements => "endorsements",
-            Self::Newest => "created",
+            Self::Newest => "newest",
             Self::Active => "active",
         }
-    }
-}
-
-fn sort_agents(agents: &mut [AgentRecord], sort: SortKey) {
-    match sort {
-        SortKey::Followers => agents.sort_by_key(|a| std::cmp::Reverse(a.follower_count)),
-        SortKey::Endorsements => {
-            agents.sort_by_key(|a| std::cmp::Reverse(a.endorsements.total_count()))
-        }
-        SortKey::Newest => agents.sort_by(|a, b| b.created_at.cmp(&a.created_at)),
-        SortKey::Active => agents.sort_by(|a, b| b.last_active.cmp(&a.last_active)),
     }
 }
 
@@ -131,8 +127,19 @@ pub(crate) fn load_agents_sorted(
     let entries = index_list(&keys::pub_sorted(sort_key));
 
     if entries.is_empty() {
+        // Cold-start fallback: sorted indices are empty before the first
+        // `reconcile_all` run.  This in-memory sort is O(n) in agent count
+        // and should only fire on initial deployment.  Run `reconcile_all`
+        // (admin action) after deploy to populate sorted indices.
         let mut agents = load_all_agents();
-        sort_agents(&mut agents, sort);
+        match sort {
+            SortKey::Followers => agents.sort_by_key(|a| std::cmp::Reverse(a.follower_count)),
+            SortKey::Endorsements => {
+                agents.sort_by_key(|a| std::cmp::Reverse(a.endorsements.total_count()))
+            }
+            SortKey::Newest => agents.sort_by(|a, b| b.created_at.cmp(&a.created_at)),
+            SortKey::Active => agents.sort_by(|a, b| b.last_active.cmp(&a.last_active)),
+        }
         let filtered: Vec<AgentRecord> = agents.into_iter().filter(|a| filter(a)).collect();
         let take = limit + 1;
         let start = cursor

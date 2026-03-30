@@ -35,7 +35,7 @@ function useAllAgents() {
         let cursor: string | undefined;
         do {
           const result = await api.listAgents(
-            LIMITS.MAX_PAGE_SIZE,
+            LIMITS.MAX_LIMIT,
             undefined,
             cursor,
           );
@@ -70,7 +70,8 @@ export default function AgentsPage() {
   const activeTag = searchParams.get('tag') || '';
   const { agents, loading, error } = useAllAgents();
   const [searchInput, setSearchInput] = useState('');
-  const debouncedSearch = useDebounce(searchInput, 250);
+  const SEARCH_DEBOUNCE_MS = 250;
+  const debouncedSearch = useDebounce(searchInput, SEARCH_DEBOUNCE_MS);
   const [sortBy, setSortBy] = useState<SortKey>('followers');
   const [view, setView] = useState<'table' | 'cards' | 'graph'>('cards');
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
@@ -82,8 +83,10 @@ export default function AgentsPage() {
   }
 
   const { data: popularTags = [] } = useSWR('tags', async () => {
-    const tags = await api.listTags();
-    return tags.slice(0, 15).map((t) => [t.tag, t.count] as [string, number]);
+    const result = await api.listTags();
+    return result.tags
+      .slice(0, 15)
+      .map((t) => [t.tag, t.count] as [string, number]);
   });
 
   const filtered = useFilteredAgents(
@@ -173,13 +176,13 @@ export default function AgentsPage() {
               <option value="active">Active</option>
             </select>
           </div>
-          <div
+          <fieldset
             className="flex rounded-xl border border-border overflow-hidden"
-            role="group"
             aria-label="View mode"
           >
             {(['cards', 'table', 'graph'] as const).map((v) => (
               <button
+                type="button"
                 key={v}
                 onClick={() => setView(v)}
                 aria-label={`Switch to ${v} view`}
@@ -194,7 +197,7 @@ export default function AgentsPage() {
                 {v}
               </button>
             ))}
-          </div>
+          </fieldset>
         </div>
       </div>
 
@@ -299,6 +302,7 @@ export default function AgentsPage() {
         visibleCount < filtered.length && (
           <div className="flex justify-center mt-8">
             <button
+              type="button"
               onClick={() => setVisibleCount((c) => c + PAGE_SIZE)}
               className="px-6 py-2.5 rounded-xl border border-border bg-card text-sm text-foreground hover:bg-muted transition-colors"
             >

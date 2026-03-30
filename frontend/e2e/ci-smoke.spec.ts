@@ -11,7 +11,7 @@ import { expect, test } from '@playwright/test';
  */
 
 test('health', async ({ request }) => {
-  const res = await request.get('/health');
+  const res = await request.get('health');
   expect(res.ok()).toBe(true);
   const json = await res.json();
   expect(json.data.status).toBe('ok');
@@ -19,7 +19,7 @@ test('health', async ({ request }) => {
 });
 
 test('list_agents', async ({ request }) => {
-  const res = await request.get('/agents?limit=5');
+  const res = await request.get('agents?limit=5');
   expect(res.ok()).toBe(true);
   const json = await res.json();
   expect(json.success).toBe(true);
@@ -27,7 +27,7 @@ test('list_agents', async ({ request }) => {
 });
 
 test('list_tags', async ({ request }) => {
-  const res = await request.get('/tags');
+  const res = await request.get('tags');
   expect(res.ok()).toBe(true);
   const json = await res.json();
   expect(json.success).toBe(true);
@@ -36,14 +36,14 @@ test('list_tags', async ({ request }) => {
 
 test('get_profile — returns agent for known handle', async ({ request }) => {
   // Fetch the first agent from list_agents to get a valid handle
-  const listRes = await request.get('/agents?limit=1');
+  const listRes = await request.get('agents?limit=1');
   expect(listRes.ok()).toBe(true);
   const listJson = await listRes.json();
   const agents = Array.isArray(listJson.data) ? listJson.data : [];
   test.skip(agents.length === 0, 'No agents registered — skip profile test');
   const handle = agents[0].handle;
 
-  const res = await request.get(`/agents/${handle}`);
+  const res = await request.get(`agents/${handle}`);
   expect(res.ok()).toBe(true);
   const json = await res.json();
   expect(json.success).toBe(true);
@@ -51,21 +51,21 @@ test('get_profile — returns agent for known handle', async ({ request }) => {
 });
 
 test('get_profile — 404 for nonexistent handle', async ({ request }) => {
-  const res = await request.get('/agents/zzz_nonexistent_handle_999');
+  const res = await request.get('agents/zzz_nonexistent_handle_999');
   expect(res.status()).toBe(404);
   const json = await res.json();
   expect(json.success).toBe(false);
 });
 
 test('get_followers — public', async ({ request }) => {
-  const listRes = await request.get('/agents?limit=1&sort=followers');
+  const listRes = await request.get('agents?limit=1&sort=followers');
   expect(listRes.ok()).toBe(true);
   const listJson = await listRes.json();
   const agents = Array.isArray(listJson.data) ? listJson.data : [];
   test.skip(agents.length === 0, 'No agents registered');
   const handle = agents[0].handle;
 
-  const res = await request.get(`/agents/${handle}/followers?limit=5`);
+  const res = await request.get(`agents/${handle}/followers?limit=5`);
   expect(res.ok()).toBe(true);
   const json = await res.json();
   expect(json.success).toBe(true);
@@ -73,14 +73,14 @@ test('get_followers — public', async ({ request }) => {
 });
 
 test('get_following — public', async ({ request }) => {
-  const listRes = await request.get('/agents?limit=1&sort=followers');
+  const listRes = await request.get('agents?limit=1&sort=followers');
   expect(listRes.ok()).toBe(true);
   const listJson = await listRes.json();
   const agents = Array.isArray(listJson.data) ? listJson.data : [];
   test.skip(agents.length === 0, 'No agents registered');
   const handle = agents[0].handle;
 
-  const res = await request.get(`/agents/${handle}/following?limit=5`);
+  const res = await request.get(`agents/${handle}/following?limit=5`);
   expect(res.ok()).toBe(true);
   const json = await res.json();
   expect(json.success).toBe(true);
@@ -88,14 +88,14 @@ test('get_following — public', async ({ request }) => {
 });
 
 test('get_edges — public', async ({ request }) => {
-  const listRes = await request.get('/agents?limit=1&sort=followers');
+  const listRes = await request.get('agents?limit=1&sort=followers');
   expect(listRes.ok()).toBe(true);
   const listJson = await listRes.json();
   const agents = Array.isArray(listJson.data) ? listJson.data : [];
   test.skip(agents.length === 0, 'No agents registered');
   const handle = agents[0].handle;
 
-  const res = await request.get(`/agents/${handle}/edges?direction=both`);
+  const res = await request.get(`agents/${handle}/edges?direction=both`);
   expect(res.ok()).toBe(true);
   const json = await res.json();
   expect(json.success).toBe(true);
@@ -104,14 +104,14 @@ test('get_edges — public', async ({ request }) => {
 });
 
 test('get_endorsers — public', async ({ request }) => {
-  const listRes = await request.get('/agents?limit=1&sort=endorsements');
+  const listRes = await request.get('agents?limit=1&sort=endorsements');
   expect(listRes.ok()).toBe(true);
   const listJson = await listRes.json();
   const agents = Array.isArray(listJson.data) ? listJson.data : [];
   test.skip(agents.length === 0, 'No agents registered');
   const handle = agents[0].handle;
 
-  const res = await request.get(`/agents/${handle}/endorsers`);
+  const res = await request.get(`agents/${handle}/endorsers`);
   expect(res.ok()).toBe(true);
   const json = await res.json();
   expect(json.success).toBe(true);
@@ -120,13 +120,13 @@ test('get_endorsers — public', async ({ request }) => {
 });
 
 test('auth required — 401 without credentials', async ({ request }) => {
-  const res = await request.get('/agents/me');
+  const res = await request.get('agents/me');
   expect(res.status()).toBe(401);
   const json = await res.json();
   expect(json.success).toBe(false);
 });
 
 test('invalid route — 404', async ({ request }) => {
-  const res = await request.get('/nonexistent');
+  const res = await request.get('nonexistent');
   expect(res.status()).toBe(404);
 });

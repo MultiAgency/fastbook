@@ -26,7 +26,7 @@ pub(crate) fn validate_handle(handle: &str) -> Result<String, AppError> {
     Ok(lower)
 }
 
-fn reject_unsafe_unicode(s: &str, allow_newline: bool) -> Result<(), AppError> {
+pub(crate) fn reject_unsafe_unicode(s: &str, allow_newline: bool) -> Result<(), AppError> {
     for c in s.chars() {
         if c.is_control() && !(allow_newline && c == '\n') {
             return Err(AppError::Validation(format!(
@@ -59,31 +59,30 @@ pub(crate) fn validate_description(desc: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn is_ipv6_loopback_or_unspecified(host: &str) -> bool {
-    if !host.contains(':') {
-        return false;
-    }
-    let stripped: String = host.chars().filter(|&c| c != ':' && c != '0').collect();
-    stripped.is_empty() || stripped == "1"
-}
-
-fn is_rfc1918_172(host: &str) -> bool {
-    if let Some(rest) = host.strip_prefix("172.") {
-        if let Some(second_octet) = rest.split('.').next().and_then(|s| s.parse::<u8>().ok()) {
-            return (16..=31).contains(&second_octet);
-        }
-    }
-    false
-}
-
 fn is_private_host(host: &str) -> bool {
+    // IPv6 loopback / unspecified (compressed forms like "::0:0:1")
+    let is_ipv6_loopback = || -> bool {
+        if !host.contains(':') {
+            return false;
+        }
+        let stripped: String = host.chars().filter(|&c| c != ':' && c != '0').collect();
+        stripped.is_empty() || stripped == "1"
+    };
+
+    // RFC-1918 172.16.0.0/12
+    let is_rfc1918_172 = |h: &str| -> bool {
+        h.strip_prefix("172.")
+            .and_then(|rest| rest.split('.').next()?.parse::<u8>().ok())
+            .is_some_and(|oct| (16..=31).contains(&oct))
+    };
+
     // Loopback and unspecified
     host == "localhost"
         || host == "127.0.0.1"
         || host == "0.0.0.0"
         || host == "::"
         || host == "::1"
-        || is_ipv6_loopback_or_unspecified(host)
+        || is_ipv6_loopback()
         // Link-local and RFC-1918
         || host.starts_with("169.254.")
         || host.starts_with("10.")
@@ -164,8 +163,7 @@ pub(crate) fn validate_reason(reason: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-pub(crate) fn validate_agent_fields(req: &Request) -> Result<Vec<String>, Response> {
-    let warnings = Vec::new();
+pub(crate) fn validate_agent_fields(req: &Request) -> Result<(), Response> {
     if let Some(desc) = &req.description {
         validate_description(desc).map_err(Response::from)?;
     }
@@ -175,7 +173,7 @@ pub(crate) fn validate_agent_fields(req: &Request) -> Result<Vec<String>, Respon
     if let Some(caps) = &req.capabilities {
         validate_capabilities(caps).map_err(Response::from)?;
     }
-    Ok(warnings)
+    Ok(())
 }
 
 fn walk_capabilities(
@@ -264,6 +262,39 @@ fn validate_capabilities_content(val: &serde_json::Value, depth: usize) -> Resul
             }
         }
         _ => {}
+    }
+    Ok(())
+}
+
+/// Validate a pagination cursor: must be a handle-like string (1-32 `[a-z0-9_]`) or a
+/// numeric timestamp (1-20 digits).  Matches the proxy-side `CURSOR_RE`.
+pub(crate) fn validate_cursor(cursor: &str) -> Result<(), AppError> {
+    if cursor.is_empty() {
+        return Ok(());
+    }
+    let ok = if cursor.bytes().all(|b| b.is_ascii_digit()) {
+        cursor.len() <= 20
+    } else {
+        cursor.len() <= MAX_HANDLE_LEN
+            && cursor
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    };
+    if !ok {
+        return Err(AppError::Validation("Invalid cursor format".into()));
+    }
+    Ok(())
+}
+
+/// Validate a tag used as a query filter (single tag, already lowercased).
+pub(crate) fn validate_tag_filter(tag: &str) -> Result<(), AppError> {
+    if tag.is_empty()
+        || tag.len() > MAX_TAG_LEN
+        || !tag.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return Err(AppError::Validation(
+            "Invalid tag filter: lowercase alphanumeric with hyphens, max 30 chars".into(),
+        ));
     }
     Ok(())
 }

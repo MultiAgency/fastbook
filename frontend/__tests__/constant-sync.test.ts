@@ -30,8 +30,8 @@ describe('Frontend ↔ Rust constant sync', () => {
     ['DESCRIPTION_MAX', 'MAX_DESCRIPTION_LEN'],
     ['AVATAR_URL_MAX', 'MAX_AVATAR_URL_LEN'],
     ['CAPABILITIES_MAX', 'MAX_CAPABILITIES_LEN'],
-    ['DEFAULT_PAGE_SIZE', 'DEFAULT_LIMIT'],
-    ['MAX_PAGE_SIZE', 'MAX_LIMIT'],
+    ['DEFAULT_LIMIT', 'DEFAULT_LIMIT'],
+    ['MAX_LIMIT', 'MAX_LIMIT'],
   ] as const)('LIMITS.%s matches Rust %s', (tsKey, rsKey) => {
     expect(LIMITS[tsKey]).toBe(rsConst(rsKey));
   });
@@ -41,6 +41,8 @@ describe('Frontend ↔ Rust constant sync', () => {
     ['MAX_TAG_LEN', 30],
     ['MAX_REASON_LEN', 280],
     ['MAX_SUGGESTION_LIMIT', 50],
+    ['DEREGISTER_RATE_LIMIT', 1],
+    ['DEREGISTER_RATE_WINDOW_SECS', 300],
   ] as const)('Rust %s is %d', (rsKey, expected) => {
     expect(rsConst(rsKey)).toBe(expected);
   });
@@ -49,6 +51,60 @@ describe('Frontend ↔ Rust constant sync', () => {
     const rust = rsReservedHandles();
     const onlyInTs = [...RESERVED_HANDLES].filter((h) => !rust.has(h));
     const onlyInRust = [...rust].filter((h) => !RESERVED_HANDLES.has(h));
+    expect(onlyInTs).toEqual([]);
+    expect(onlyInRust).toEqual([]);
+  });
+
+  it('VALID_SORTS matches Rust SortKey::parse', () => {
+    const registrySrc = readFileSync(
+      resolve(__dirname, '../../wasm/src/registry.rs'),
+      'utf8',
+    );
+    const block = registrySrc.match(
+      /fn parse\(s: &str\)[\s\S]*?match s \{([\s\S]*?)_ =>/,
+    );
+    if (!block) throw new Error('SortKey::parse not found in registry.rs');
+    const rustSorts = new Set(
+      [...block[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]),
+    );
+    const routeSrc = readFileSync(
+      resolve(__dirname, '../src/app/api/v1/[...path]/route.ts'),
+      'utf8',
+    );
+    const sortMatch = routeSrc.match(/VALID_SORTS\s*=\s*new Set\(\[(.*?)]\)/);
+    if (!sortMatch) throw new Error('VALID_SORTS not found in route.ts');
+    const tsSorts = new Set(
+      [...sortMatch[1].matchAll(/'([^']+)'/g)].map((m) => m[1]),
+    );
+    const onlyInTs = [...tsSorts].filter((s) => !rustSorts.has(s));
+    const onlyInRust = [...rustSorts].filter((s) => !tsSorts.has(s));
+    expect(onlyInTs).toEqual([]);
+    expect(onlyInRust).toEqual([]);
+  });
+
+  it('VALID_DIRECTIONS matches Rust get_edges validation', () => {
+    const graphSrc = readFileSync(
+      resolve(__dirname, '../../wasm/src/handlers/graph.rs'),
+      'utf8',
+    );
+    const block = graphSrc.match(/!\[([^\]]*)\]\.contains\(&direction\)/);
+    if (!block) throw new Error('direction validation not found in graph.rs');
+    const rustDirs = new Set(
+      [...block[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]),
+    );
+    const routeSrc = readFileSync(
+      resolve(__dirname, '../src/app/api/v1/[...path]/route.ts'),
+      'utf8',
+    );
+    const dirMatch = routeSrc.match(
+      /VALID_DIRECTIONS\s*=\s*new Set\(\[(.*?)]\)/,
+    );
+    if (!dirMatch) throw new Error('VALID_DIRECTIONS not found in route.ts');
+    const tsDirs = new Set(
+      [...dirMatch[1].matchAll(/'([^']+)'/g)].map((m) => m[1]),
+    );
+    const onlyInTs = [...tsDirs].filter((d) => !rustDirs.has(d));
+    const onlyInRust = [...rustDirs].filter((d) => !tsDirs.has(d));
     expect(onlyInTs).toEqual([]);
     expect(onlyInRust).toEqual([]);
   });
@@ -92,7 +148,18 @@ const HANDLER_TO_ACTION: Record<string, string> = {
   handle_endorse: 'endorse',
   handle_unendorse: 'unendorse',
   handle_get_endorsers: 'get_endorsers',
+  handle_check_handle: 'check_handle',
+  handle_deregister: 'deregister',
+  handle_migrate_account: 'migrate_account',
 };
+
+// Handlers with RESPONSE comments but intentionally excluded from openapi.json
+// (admin-only actions documented in AGENTS.md only).
+const EXCLUDED_HANDLERS = new Set([
+  'handle_reconcile_all',
+  'handle_set_platforms',
+  'handle_admin_deregister',
+]);
 
 const ACTION_TO_PATH: Record<string, [string, string]> = {
   register: ['post', '/agents/register'],
@@ -116,6 +183,9 @@ const ACTION_TO_PATH: Record<string, [string, string]> = {
   endorse: ['post', '/agents/{handle}/endorse'],
   unendorse: ['delete', '/agents/{handle}/endorse'],
   get_endorsers: ['get', '/agents/{handle}/endorsers'],
+  check_handle: ['get', '/agents/check/{handle}'],
+  deregister: ['delete', '/agents/me'],
+  migrate_account: ['post', '/agents/me/migrate'],
 };
 
 function extractResponseComments(): {
@@ -169,7 +239,9 @@ describe('RESPONSE comments ↔ OpenAPI sync', () => {
   });
 
   it('every RESPONSE comment maps to a known action', () => {
-    const unknown = comments.filter((c) => !HANDLER_TO_ACTION[c.handler]);
+    const unknown = comments.filter(
+      (c) => !HANDLER_TO_ACTION[c.handler] && !EXCLUDED_HANDLERS.has(c.handler),
+    );
     expect(unknown.map((c) => c.handler)).toEqual([]);
   });
 

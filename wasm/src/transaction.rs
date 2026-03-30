@@ -1,4 +1,11 @@
 //! Transactional write batching with automatic rollback on step failure.
+//!
+//! Rollback is best-effort within a single WASM invocation: if a step fails,
+//! all prior steps are undone in reverse order. However, if the process crashes
+//! (OOM, timeout) between steps, completed writes persist without rollback.
+//! The heartbeat handler's probabilistic reconciliation (~2% of heartbeats)
+//! self-heals any drift in follower/following counts, and `reconcile_all`
+//! corrects endorsement counts and sorted indices.
 
 use crate::agent::save_agent;
 use crate::response::*;
@@ -25,11 +32,11 @@ impl Transaction {
     ) -> Option<Response> {
         if let Err(e) = forward() {
             let (rb_text, rb_failed) = self.rollback_all();
-            let full_msg = format!("{msg}: {e}{rb_text}");
+            eprintln!("[transaction] {msg}: {e}{rb_text}");
             if rb_failed {
-                return Some(err_coded("ROLLBACK_PARTIAL", &full_msg));
+                return Some(err_coded("ROLLBACK_PARTIAL", "Storage operation failed"));
             }
-            return Some(err_response(&full_msg));
+            return Some(err_coded("STORAGE_ERROR", "Storage operation failed"));
         }
         self.rollbacks.push(Box::new(rollback));
         None
@@ -51,11 +58,11 @@ impl Transaction {
 
     pub fn rollback_response(&mut self, msg: &str) -> Response {
         let (rb_text, rb_failed) = self.rollback_all();
-        let full_msg = format!("{msg}{rb_text}");
+        eprintln!("[transaction] {msg}{rb_text}");
         if rb_failed {
-            err_coded("ROLLBACK_PARTIAL", &full_msg)
+            err_coded("ROLLBACK_PARTIAL", "Storage operation failed")
         } else {
-            err_response(&full_msg)
+            err_coded("STORAGE_ERROR", "Storage operation failed")
         }
     }
 
@@ -75,7 +82,7 @@ impl Transaction {
         self.step(
             msg,
             || index_append(key, entry),
-            move || index_remove(&k, &e),
+            move || index_remove(&k, &e).map(|_| ()),
         )
     }
 
@@ -84,7 +91,7 @@ impl Transaction {
         let e = entry.to_string();
         self.step(
             msg,
-            || index_remove(key, entry),
+            || index_remove(key, entry).map(|_| ()),
             move || index_append(&k, &e),
         )
     }

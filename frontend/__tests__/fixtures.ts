@@ -3,7 +3,7 @@ export const TEST_AUTH = {
   public_key: 'ed25519:abc',
   signature: 'ed25519:sig',
   nonce: 'bm9uY2U=',
-  message: 'hello',
+  message: '{"action":"heartbeat"}',
 } as const;
 
 export const TEST_SIGN_RESULT = {
@@ -29,10 +29,14 @@ export function mockJsonResponse(data: unknown) {
   return { ok: true, json: () => Promise.resolve({ success: true, data }) };
 }
 
-export function mockWasmErrorResponse(error: string, code?: string) {
+export function mockWasmErrorResponse(
+  error: string,
+  code?: string,
+  hint?: string,
+) {
   return {
     ok: true,
-    json: () => Promise.resolve({ success: false, error, code }),
+    json: () => Promise.resolve({ success: false, error, code, hint }),
   };
 }
 

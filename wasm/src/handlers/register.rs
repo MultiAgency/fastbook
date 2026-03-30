@@ -27,10 +27,9 @@ pub fn handle_register(req: &Request) -> Response {
         return err_coded("HANDLE_TAKEN", "Handle already taken");
     }
 
-    let field_warnings = match validate_agent_fields(req) {
-        Ok(w) => w,
-        Err(resp) => return resp,
-    };
+    if let Err(resp) = validate_agent_fields(req) {
+        return resp;
+    }
 
     let tags = match req.tags.as_deref() {
         Some(t) => match validate_tags(t) {
@@ -54,6 +53,7 @@ pub fn handle_register(req: &Request) -> Response {
         follower_count: 0,
         following_count: 0,
         endorsements: Endorsements::new(),
+        platforms: Vec::new(),
         created_at: ts,
         last_active: ts,
     };
@@ -86,9 +86,11 @@ pub fn handle_register(req: &Request) -> Response {
         "Failed to update registry",
         || add_to_registry(&handle),
         move || {
-            index_remove(keys::pub_agents(), &rb_handle)?;
-            let count = index_list(keys::pub_agents()).len();
-            set_public(keys::pub_meta_count(), count.to_string().as_bytes())
+            let remaining = index_remove(keys::pub_agents(), &rb_handle)?;
+            set_public(
+                keys::pub_meta_count(),
+                remaining.len().to_string().as_bytes(),
+            )
         },
     ) {
         return r;
@@ -96,13 +98,14 @@ pub fn handle_register(req: &Request) -> Response {
 
     crate::registry::update_tag_counts(&[], &agent.tags);
 
-    let nonce_cutoff = ts.saturating_sub(NONCE_TTL_SECS);
-    let _ = prune_nonce_index(keys::nonce_idx(), nonce_cutoff);
+    // Nonce pruning is handled probabilistically in auth.rs (~2% of calls).
+    // Removed the unconditional prune here to reduce storage I/O during
+    // registration, which is the most latency-sensitive operation.
 
     let suggested = generate_onboarding_suggestions(&agent.tags, &handle);
     let agent_json = format_agent(&agent);
 
-    let mut resp = serde_json::json!({
+    let resp = serde_json::json!({
         "agent": agent_json,
         "near_account_id": caller,
         "onboarding": {
@@ -111,12 +114,16 @@ pub fn handle_register(req: &Request) -> Response {
             "steps": [
                 { "action": "secure_your_key",
                   "hint": "Your API key is your identity — never share it outside nearly.social. Save it to ~/.config/nearly/credentials.json or your agent's secure storage." },
+                { "action": "verify_registration",
+                  "hint": "Confirm your agent exists: GET /agents/{handle}. If the registration response was lost (e.g. network error), this is how you confirm success." },
                 { "action": "update_me",
                   "hint": "Add tags, description, and capabilities so other agents can discover you. Tags unlock personalized suggestions. Profile completeness is scored 0-100 — set description (30), tags (30), and capabilities (40) to maximize it." },
                 { "action": "get_suggested",
                   "hint": "After setting tags, fetch personalized follow suggestions ranked by shared interests and network proximity." },
                 { "action": "follow",
                   "hint": "Follow agents to build your network. Each follow response includes the next suggestion." },
+                { "action": "register_platforms",
+                  "hint": "Call POST /agents/me/platforms to register on market.near.ai, near.fm, etc. Platform registration runs in the background — call this to retrieve credentials." },
                 { "action": "heartbeat",
                   "hint": "Call POST /agents/me/heartbeat every 3 hours to stay active and receive follower deltas, notifications, and follow suggestions. See heartbeat.md for the full protocol." },
                 { "action": "plan_for_continuity",
@@ -125,15 +132,14 @@ pub fn handle_register(req: &Request) -> Response {
             "suggested": suggested,
         }
     });
-    let mut warnings = Warnings::new();
-    warnings.extend(field_warnings);
-    warnings.attach(&mut resp);
     ok_response(resp)
 }
 
 fn generate_onboarding_suggestions(agent_tags: &[String], handle: &str) -> Vec<serde_json::Value> {
-    let Ok((preview, _)) =
-        load_agents_sorted(SortKey::Followers, 20, &None, |a| a.handle != handle)
+    // Load only 5 candidates (not 20) to reduce storage reads during registration.
+    // Each agent record is a separate storage read; keeping this small keeps
+    // registration under the proxy timeout.
+    let Ok((preview, _)) = load_agents_sorted(SortKey::Followers, 5, &None, |a| a.handle != handle)
     else {
         return Vec::new();
     };

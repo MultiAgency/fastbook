@@ -1,18 +1,31 @@
 import { type NextRequest, NextResponse } from 'next/server';
-import { clearCache, getCached, makeCacheKey, setCache } from '@/lib/cache';
-import { LIMITS, MARKET_API_URL } from '@/lib/constants';
+import {
+  clearByAction,
+  clearCache,
+  currentGeneration,
+  getCached,
+  makeCacheKey,
+  setCache,
+} from '@/lib/cache';
+import { LIMITS } from '@/lib/constants';
 import {
   callOutlayer,
   getOutlayerPaymentKey,
+  mintClaimForWalletKey,
   sanitizePublic,
-} from '@/lib/outlayer-route';
+} from '@/lib/outlayer-server';
+import {
+  handleRegisterPlatforms,
+  PLATFORM_META,
+  tryPlatformRegistrationsOnRegister,
+} from '@/lib/platforms';
 import {
   CACHE_BUSTING_ACTIONS,
   PUBLIC_ACTIONS,
   type ResolvedRoute,
   resolveRoute,
 } from '@/lib/routes';
-import { isValidCapabilities, isValidVerifiableClaim } from '@/lib/utils';
+import { isValidVerifiableClaim } from '@/lib/utils';
 
 const INT_FIELDS = new Set(['limit']);
 const VALID_SORTS = new Set(['followers', 'endorsements', 'newest', 'active']);
@@ -23,10 +36,19 @@ const MAX_BODY_BYTES = LIMITS.MAX_BODY_BYTES;
 const RATE_WINDOW_MS = 60_000;
 const RATE_LIMIT_PER_IP = 120;
 const REGISTER_RATE_LIMIT_PER_IP = 5;
+const REGISTER_PLATFORMS_RATE_LIMIT_PER_IP = 5;
 const MAX_IP_ENTRIES = 10_000;
+// Per-IP rate tracking.  Action-specific counters (registerCount, etc.) are
+// inlined for the current small set.  If more per-action limits are added,
+// generalize to a Map<string, number> keyed by action name.
 const ipCounts = new Map<
   string,
-  { count: number; registerCount: number; resetAt: number }
+  {
+    count: number;
+    registerCount: number;
+    registerPlatformsCount: number;
+    resetAt: number;
+  }
 >();
 
 function checkProxyRateLimit(ip: string, action?: string): boolean {
@@ -36,6 +58,7 @@ function checkProxyRateLimit(ip: string, action?: string): boolean {
     ipCounts.set(ip, {
       count: 1,
       registerCount: action === 'register' ? 1 : 0,
+      registerPlatformsCount: action === 'register_platforms' ? 1 : 0,
       resetAt: now + RATE_WINDOW_MS,
     });
     evictStaleEntries(now);
@@ -45,6 +68,11 @@ function checkProxyRateLimit(ip: string, action?: string): boolean {
   if (action === 'register') {
     entry.registerCount += 1;
     if (entry.registerCount > REGISTER_RATE_LIMIT_PER_IP) return false;
+  }
+  if (action === 'register_platforms') {
+    entry.registerPlatformsCount += 1;
+    if (entry.registerPlatformsCount > REGISTER_PLATFORMS_RATE_LIMIT_PER_IP)
+      return false;
   }
   return entry.count <= RATE_LIMIT_PER_IP;
 }
@@ -78,6 +106,9 @@ function clientIp(request: NextRequest): string {
       .filter(Boolean);
     return parts.length > 1 ? parts[parts.length - 1] : (parts[0] ?? 'unknown');
   }
+  // x-real-ip is set by many reverse proxies (nginx, Vercel, Cloudflare).
+  const realIp = request.headers.get('x-real-ip');
+  if (realIp) return realIp.trim();
   return 'unknown';
 }
 
@@ -104,10 +135,14 @@ function extractQueryParams(
       if (VALID_SORTS.has(value)) params[key] = value;
     } else if (key === 'cursor') {
       if (value === '' || CURSOR_RE.test(value)) params[key] = value;
-    } else if (key === 'direction') {
-      if (VALID_DIRECTIONS.has(value)) params[key] = value;
     } else if (key === 'since') {
       if (/^\d{1,20}$/.test(value)) params[key] = value;
+    } else if (key === 'direction') {
+      if (VALID_DIRECTIONS.has(value)) params[key] = value;
+    } else if (key === 'tag') {
+      if (value.length <= 30 && /^[a-z0-9-]+$/.test(value)) params[key] = value;
+    } else {
+      params[key] = value;
     }
   }
   return params;
@@ -126,6 +161,7 @@ function tooLargeResponse(): NextResponse {
       {
         success: false,
         error: `Request body too large (max ${MAX_BODY_BYTES / 1024} KB)`,
+        code: 'VALIDATION_ERROR',
       },
       { status: 413 },
     ),
@@ -142,7 +178,7 @@ async function dispatch(
   if (!route) {
     return applyHeaders(
       NextResponse.json(
-        { success: false, error: 'Not found' },
+        { success: false, error: 'Not found', code: 'NOT_FOUND' },
         { status: 404 },
       ),
     );
@@ -174,11 +210,34 @@ async function dispatch(
     try {
       const text = await request.text();
       if (text.length > MAX_BODY_BYTES) return tooLargeResponse();
-      if (text) body = JSON.parse(text);
+      if (text) {
+        const parsed: unknown = JSON.parse(text);
+        if (
+          typeof parsed !== 'object' ||
+          parsed === null ||
+          Array.isArray(parsed)
+        ) {
+          return applyHeaders(
+            NextResponse.json(
+              {
+                success: false,
+                error: 'Request body must be a JSON object',
+                code: 'VALIDATION_ERROR',
+              },
+              { status: 400 },
+            ),
+          );
+        }
+        body = parsed as Record<string, unknown>;
+      }
     } catch {
       return applyHeaders(
         NextResponse.json(
-          { success: false, error: 'Invalid JSON body' },
+          {
+            success: false,
+            error: 'Invalid JSON body',
+            code: 'VALIDATION_ERROR',
+          },
           { status: 400 },
         ),
       );
@@ -197,10 +256,21 @@ async function dispatchPublic(
   route: ResolvedRoute,
   wasmBody: Record<string, unknown>,
 ): Promise<NextResponse> {
+  if (route.action === 'list_platforms') {
+    return NextResponse.json({
+      success: true,
+      data: { platforms: PLATFORM_META },
+    });
+  }
+
   const paymentKey = getOutlayerPaymentKey();
   if (!paymentKey) {
     return NextResponse.json(
-      { success: false, error: 'Public API not configured' },
+      {
+        success: false,
+        error: 'Public API not configured',
+        code: 'INTERNAL_ERROR',
+      },
       { status: 503 },
     );
   }
@@ -212,14 +282,20 @@ async function dispatchPublic(
   }
   if (!checkProxyRateLimit(clientIp(request), route.action)) {
     return NextResponse.json(
-      { success: false, error: 'Rate limit exceeded' },
+      {
+        success: false,
+        error: 'Rate limit exceeded',
+        code: 'RATE_LIMITED',
+        retry_after: 60,
+      },
       { status: 429 },
     );
   }
+  const gen = currentGeneration();
   const result = await callOutlayer(sanitized, paymentKey);
   if (result.status === 200) {
     const data = await result.json();
-    setCache(route.action, cacheKey, data);
+    setCache(route.action, cacheKey, data, gen);
     return NextResponse.json(data);
   }
   return result;
@@ -232,17 +308,53 @@ async function dispatchAuthenticated(
   userAuthKey: string | undefined,
 ): Promise<NextResponse> {
   let authKey = userAuthKey;
+
+  // Auto-sign for trial wallet keys: when a wk_ key is provided without a
+  // verifiable_claim, mint one by calling OutLayer's free sign-message
+  // endpoint, inject it into the WASM body, and switch to the server payment
+  // key so the WASM falls through to NEP-413 verification for correct
+  // identity resolution.  This is transparent to the caller.
+  if (
+    authKey?.startsWith('wk_') &&
+    !wasmBody.verifiable_claim &&
+    route.action !== 'register_platforms'
+  ) {
+    const claim = await mintClaimForWalletKey(authKey, route.action);
+    if (claim) {
+      wasmBody.verifiable_claim = {
+        near_account_id: claim.near_account_id,
+        public_key: claim.public_key,
+        signature: claim.signature,
+        nonce: claim.nonce,
+        message: claim.message,
+      };
+      const serverKey = getOutlayerPaymentKey();
+      if (serverKey) authKey = serverKey;
+    }
+    // If minting fails, fall through with the original wk_ key —
+    // the WASM will resolve "trial" and return NOT_REGISTERED, which
+    // is a clearer signal than a proxy error.
+  }
+
   if (!authKey && wasmBody.verifiable_claim) {
     if (!isValidVerifiableClaim(wasmBody.verifiable_claim)) {
       return NextResponse.json(
-        { success: false, error: 'Invalid verifiable_claim structure' },
+        {
+          success: false,
+          error: 'Invalid verifiable_claim structure',
+          code: 'VALIDATION_ERROR',
+        },
         { status: 400 },
       );
     }
     const serverKey = getOutlayerPaymentKey();
     if (!serverKey) {
       return NextResponse.json(
-        { success: false, error: 'API not configured' },
+        {
+          success: false,
+          error: 'API not configured',
+          code: 'INTERNAL_ERROR',
+        },
         { status: 503 },
       );
     }
@@ -251,20 +363,53 @@ async function dispatchAuthenticated(
 
   if (!checkProxyRateLimit(clientIp(request), route.action)) {
     return NextResponse.json(
-      { success: false, error: 'Rate limit exceeded' },
+      {
+        success: false,
+        error: 'Rate limit exceeded',
+        code: 'RATE_LIMITED',
+        retry_after: 60,
+      },
       { status: 429 },
     );
   }
 
   if (authKey) {
+    // Platform registration is handled entirely by the proxy and requires
+    // multiple WASM calls (get_me → external APIs → set_platforms).  A
+    // verifiable_claim is single-use (nonce replay protection), so it cannot
+    // authenticate the additional calls.  Require a reusable credential.
+    if (route.action === 'register_platforms') {
+      if (!userAuthKey) {
+        return NextResponse.json(
+          {
+            success: false,
+            error:
+              'Platform registration requires a wallet key (Authorization: Bearer wk_...) or payment key (X-Payment-Key). Verifiable claims cannot be used for this multi-step endpoint.',
+            code: 'AUTH_REQUIRED',
+          },
+          { status: 401 },
+        );
+      }
+      return handleRegisterPlatforms(authKey, wasmBody, userAuthKey);
+    }
+
     const result = await callOutlayer(wasmBody, authKey);
 
     if (CACHE_BUSTING_ACTIONS.has(route.action) && result.status === 200) {
       clearCache();
+    } else if (route.action === 'heartbeat' && result.status === 200) {
+      clearByAction('list_agents');
     }
 
     if (route.action === 'register' && result.status === 200) {
-      return tryMarketRegistration(wasmBody, result);
+      // Fire platform registrations in the background — don't block the
+      // registration response.  Agents can call POST /agents/me/platforms
+      // later to retrieve platform credentials.
+      void tryPlatformRegistrationsOnRegister(
+        wasmBody,
+        new NextResponse(result.clone().body, result),
+        userAuthKey,
+      );
     }
 
     return result;
@@ -276,67 +421,10 @@ async function dispatchAuthenticated(
       success: false,
       error:
         'Authentication required. Provide Authorization: Bearer wk_... or X-Payment-Key header, or verifiable_claim in body.',
+      code: 'AUTH_REQUIRED',
     },
     { status: 401 },
   );
-}
-
-async function tryMarketRegistration(
-  wasmBody: Record<string, unknown>,
-  result: NextResponse,
-): Promise<NextResponse> {
-  const handle =
-    typeof wasmBody.handle === 'string' ? wasmBody.handle : undefined;
-  if (!handle) return result;
-
-  const nearlyData = await result.json();
-  const tags = Array.isArray(wasmBody.tags)
-    ? wasmBody.tags.filter((t): t is string => typeof t === 'string')
-    : undefined;
-  const rawCaps = wasmBody.capabilities;
-  const capabilities = isValidCapabilities(rawCaps) ? rawCaps : undefined;
-
-  try {
-    const marketRes = await fetch(`${MARKET_API_URL}/agents/register`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        handle,
-        ...(nearlyData?.data?.near_account_id
-          ? { near_account_id: nearlyData.data.near_account_id }
-          : {}),
-        ...(tags?.length ? { tags } : {}),
-        ...(capabilities ? { capabilities } : {}),
-      }),
-      signal: AbortSignal.timeout(1_500),
-    });
-    if (marketRes.ok) {
-      const marketData = await marketRes.json();
-      if (nearlyData?.data && marketData && typeof marketData === 'object') {
-        nearlyData.data.market = {
-          api_key: marketData.api_key ?? undefined,
-          agent_id: marketData.agent_id ?? undefined,
-          near_account_id: marketData.near_account_id ?? undefined,
-        };
-      }
-    } else {
-      const errorData = await marketRes.json().catch(() => null);
-      const msg = errorData?.error || 'Handle may already be taken';
-      console.error(`[market] registration failed for ${handle}: ${msg}`);
-      nearlyData.warnings = [
-        ...(nearlyData.warnings || []),
-        `market.near.ai: ${msg}`,
-      ];
-    }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : 'unknown error';
-    console.error(`[market] registration failed for ${handle}: ${msg}`);
-    nearlyData.warnings = [
-      ...(nearlyData.warnings || []),
-      'market.near.ai: could not reserve handle (service unreachable)',
-    ];
-  }
-  return NextResponse.json(nearlyData);
 }
 
 function OPTIONS() {

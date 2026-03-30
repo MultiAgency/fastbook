@@ -1,3 +1,4 @@
+/// <reference types="node" />
 import { expect, test } from '@playwright/test';
 
 /*
@@ -29,7 +30,7 @@ test.describe.configure({ mode: 'serial' });
 // ── 0. Health ──────────────────────────────────────────────────────
 
 test('health', async ({ request }) => {
-  const res = await request.get('/health');
+  const res = await request.get('health');
   expect(res.ok()).toBe(true);
   const json = await res.json();
   expect(json.data.status).toBe('ok');
@@ -40,7 +41,7 @@ test('health', async ({ request }) => {
 
 test('get_me(A) — discover handle', async ({ request }) => {
   expect(KEY_A).toBeTruthy();
-  const res = await request.get('/agents/me', { headers: auth(KEY_A) });
+  const res = await request.get('agents/me', { headers: auth(KEY_A) });
   expect(res.ok()).toBe(true);
   const json = await res.json();
   expect(json.success).toBe(true);
@@ -50,7 +51,7 @@ test('get_me(A) — discover handle', async ({ request }) => {
 
 test('get_me(B) — discover handle', async ({ request }) => {
   expect(KEY_B).toBeTruthy();
-  const res = await request.get('/agents/me', { headers: auth(KEY_B) });
+  const res = await request.get('agents/me', { headers: auth(KEY_B) });
   expect(res.ok()).toBe(true);
   const json = await res.json();
   expect(json.success).toBe(true);
@@ -62,7 +63,7 @@ test('get_me(B) — discover handle', async ({ request }) => {
 // ── 3–4. Update profiles with tags ─────────────────────────────────
 
 test('update_me(A) — set tags and description', async ({ request }) => {
-  const res = await request.patch('/agents/me', {
+  const res = await request.patch('agents/me', {
     headers: auth(KEY_A),
     data: { description: 'Smoke test agent alpha', tags: ['rust', 'ai'] },
   });
@@ -74,7 +75,7 @@ test('update_me(A) — set tags and description', async ({ request }) => {
 });
 
 test('update_me(B) — set tags and description', async ({ request }) => {
-  const res = await request.patch('/agents/me', {
+  const res = await request.patch('agents/me', {
     headers: auth(KEY_B),
     data: { description: 'Smoke test agent beta', tags: ['ai', 'security'] },
   });
@@ -88,7 +89,7 @@ test('update_me(B) — set tags and description', async ({ request }) => {
 // ── 5. List agents ─────────────────────────────────────────────────
 
 test('list_agents', async ({ request }) => {
-  const res = await request.get('/agents?limit=100');
+  const res = await request.get('agents?limit=100');
   expect(res.ok()).toBe(true);
   const json = await res.json();
   expect(json.data.length).toBeGreaterThanOrEqual(2);
@@ -100,7 +101,7 @@ test('list_agents', async ({ request }) => {
 // ── 6. List tags ───────────────────────────────────────────────────
 
 test('list_tags', async ({ request }) => {
-  const res = await request.get('/tags');
+  const res = await request.get('tags');
   expect(res.ok()).toBe(true);
   const json = await res.json();
   expect(json.data.tags.length).toBeGreaterThanOrEqual(1);
@@ -111,7 +112,7 @@ test('list_tags', async ({ request }) => {
 // ── 7. Suggestions ─────────────────────────────────────────────────
 
 test('get_suggested(A)', async ({ request }) => {
-  const res = await request.get('/agents/suggested?limit=10', {
+  const res = await request.get('agents/suggested?limit=10', {
     headers: auth(KEY_A),
   });
   expect(res.ok()).toBe(true);
@@ -210,7 +211,7 @@ test('get_endorsers(B) — A endorsed ai', async ({ request }) => {
 // ── 16. Heartbeat ──────────────────────────────────────────────────
 
 test('heartbeat(B) — sees delta', async ({ request }) => {
-  const res = await request.post('/agents/me/heartbeat', {
+  const res = await request.post('agents/me/heartbeat', {
     headers: auth(KEY_B),
   });
   expect(res.ok()).toBe(true);
@@ -223,7 +224,7 @@ test('heartbeat(B) — sees delta', async ({ request }) => {
 // ── 17. Notifications ──────────────────────────────────────────────
 
 test('get_notifications(B)', async ({ request }) => {
-  const res = await request.get('/agents/me/notifications', {
+  const res = await request.get('agents/me/notifications', {
     headers: auth(KEY_B),
   });
   expect(res.ok()).toBe(true);
@@ -235,7 +236,7 @@ test('get_notifications(B)', async ({ request }) => {
 // ── 18. Read notifications ─────────────────────────────────────────
 
 test('read_notifications(B)', async ({ request }) => {
-  const res = await request.post('/agents/me/notifications/read', {
+  const res = await request.post('agents/me/notifications/read', {
     headers: auth(KEY_B),
   });
   expect(res.ok()).toBe(true);
@@ -246,7 +247,7 @@ test('read_notifications(B)', async ({ request }) => {
 // ── 19. Activity ───────────────────────────────────────────────────
 
 test('get_activity(A)', async ({ request }) => {
-  const res = await request.get('/agents/me/activity', {
+  const res = await request.get('agents/me/activity', {
     headers: auth(KEY_A),
   });
   expect(res.ok()).toBe(true);
@@ -259,7 +260,7 @@ test('get_activity(A)', async ({ request }) => {
 // ── 20. Network stats ──────────────────────────────────────────────
 
 test('get_network(A)', async ({ request }) => {
-  const res = await request.get('/agents/me/network', {
+  const res = await request.get('agents/me/network', {
     headers: auth(KEY_A),
   });
   expect(res.ok()).toBe(true);

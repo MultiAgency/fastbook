@@ -79,7 +79,7 @@ pub(crate) struct ScoredAgent {
     pub shared_tags: Vec<String>,
 }
 
-fn quantize(f: f64) -> i64 {
+fn discretize_score(f: f64) -> i64 {
     (f * SCORE_QUANTIZE_FACTOR) as i64
 }
 
@@ -96,6 +96,8 @@ pub(crate) fn rank_candidates(
         .into_iter()
         .map(|agent| {
             let raw_visits = visits.get(&agent.handle).copied().unwrap_or(0) as f64;
+            // Normalize by follower count so new agents with few followers
+            // surface before popularity dominates (intentional cold-start boost).
             let in_degree = (agent.follower_count as f64).max(1.0);
             let norm_score = raw_visits / in_degree;
             let shared_tags: Vec<String> = agent
@@ -113,8 +115,8 @@ pub(crate) fn rank_candidates(
         .collect();
 
     scored.sort_by(|a, b| {
-        quantize(b.norm_score)
-            .cmp(&quantize(a.norm_score))
+        discretize_score(b.norm_score)
+            .cmp(&discretize_score(a.norm_score))
             .then_with(|| {
                 b.agent
                     .endorsements
@@ -132,11 +134,11 @@ pub(crate) fn rank_candidates(
 fn shuffle_tiers(rng: &mut Rng, scored: &mut [ScoredAgent]) {
     let mut i = 0;
     while i < scored.len() {
-        let qi = quantize(scored[i].norm_score);
+        let qi = discretize_score(scored[i].norm_score);
         let ti = scored[i].shared_tags.len();
         let start = i;
         while i < scored.len()
-            && quantize(scored[i].norm_score) == qi
+            && discretize_score(scored[i].norm_score) == qi
             && scored[i].shared_tags.len() == ti
         {
             i += 1;
@@ -148,6 +150,7 @@ fn shuffle_tiers(rng: &mut Rng, scored: &mut [ScoredAgent]) {
 }
 
 fn diversify(scored: Vec<ScoredAgent>, limit: usize) -> Vec<ScoredAgent> {
+    // Cap each tag at half the result limit to ensure variety across capabilities
     let max_per_tag = (limit / 2).max(1);
     let mut tag_counts: HashMap<String, usize> = HashMap::new();
     let mut results: Vec<ScoredAgent> = Vec::new();

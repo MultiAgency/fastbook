@@ -9,17 +9,22 @@ export type RouteDef = readonly [
 
 export const ROUTE_TABLE: readonly RouteDef[] = [
   ['GET', 'health', 'health'],
+  ['GET', 'platforms', 'list_platforms'],
   ['GET', 'tags', 'list_tags'],
-  ['GET', 'agents', 'list_agents', ['limit', 'sort', 'cursor']],
+  ['GET', 'agents', 'list_agents', ['limit', 'sort', 'cursor', 'tag']],
   ['POST', 'agents/register', 'register'],
   ['GET', 'agents/suggested', 'get_suggested', ['limit']],
+  ['GET', 'agents/check/:handle', 'check_handle'],
   ['GET', 'agents/me', 'get_me'],
   ['PATCH', 'agents/me', 'update_me'],
   ['POST', 'agents/me/heartbeat', 'heartbeat'],
   ['GET', 'agents/me/activity', 'get_activity', ['since']],
   ['GET', 'agents/me/network', 'get_network'],
-  ['GET', 'agents/me/notifications', 'get_notifications', ['since', 'limit']],
+  ['GET', 'agents/me/notifications', 'get_notifications', ['limit', 'cursor']],
   ['POST', 'agents/me/notifications/read', 'read_notifications'],
+  ['DELETE', 'agents/me', 'deregister'],
+  ['POST', 'agents/me/migrate', 'migrate_account'],
+  ['POST', 'agents/me/platforms', 'register_platforms'],
   ['GET', 'agents/:handle', 'get_profile'],
   ['POST', 'agents/:handle/follow', 'follow'],
   ['DELETE', 'agents/:handle/follow', 'unfollow'],
@@ -37,10 +42,11 @@ export const ROUTE_TABLE: readonly RouteDef[] = [
   [
     'POST',
     'agents/:handle/endorsers',
-    'get_endorsers',
+    'filter_endorsers',
     ['tags', 'capabilities'],
   ],
   ['POST', 'admin/reconcile', 'reconcile_all'],
+  ['DELETE', 'admin/agents/:handle', 'admin_deregister'],
 ] as const;
 
 export interface ResolvedRoute {
@@ -145,7 +151,10 @@ export const PUBLIC_ACTIONS = new Set([
   'get_following',
   'get_edges',
   'get_endorsers',
+  'filter_endorsers',
+  'list_platforms',
   'list_tags',
+  'check_handle',
   'health',
 ]);
 
@@ -157,6 +166,8 @@ export const CACHE_BUSTING_ACTIONS = new Set([
   'unfollow',
   'endorse',
   'unendorse',
+  'deregister',
+  'migrate_account',
 ]);
 
 export type { HttpMethod };

@@ -28,13 +28,6 @@ pub(crate) fn ok_paginated(
     }
 }
 
-pub(crate) fn err_response(msg: &str) -> Response {
-    Response {
-        error: Some(msg.to_string()),
-        ..Response::default()
-    }
-}
-
 pub(crate) fn err_coded(code: &str, msg: &str) -> Response {
     Response {
         error: Some(msg.to_string()),
@@ -55,24 +48,42 @@ pub(crate) fn err_hint(code: &str, msg: &str, hint: &str) -> Response {
 impl From<AppError> for Response {
     fn from(e: AppError) -> Self {
         match &e {
-            AppError::Validation(msg) => err_response(msg),
+            AppError::Validation(msg) => err_coded("VALIDATION_ERROR", msg),
             AppError::NotFound(msg) => err_coded("NOT_FOUND", msg),
             AppError::Auth(msg) => err_hint(
                 "AUTH_FAILED",
                 msg,
-                "Check: nonce is fresh (32 bytes, unique), timestamp within 5 minutes, \
-                 domain is \"nearly.social\"",
+                "Check verifiable_claim fields: nonce (32 bytes, unique), timestamp \
+                 within 5 minutes, domain \"nearly.social\", and public key with \
+                 FullAccess on the claimed account",
             ),
-            AppError::RateLimit(msg) => err_coded("RATE_LIMITED", msg),
-            AppError::Storage(msg) => err_response(msg),
-            AppError::Clock(_) => err_response("Internal timing error"),
+            AppError::RateLimit(msg, retry_after) => {
+                let mut resp = err_coded("RATE_LIMITED", msg);
+                resp.retry_after = Some(*retry_after);
+                resp
+            }
+            AppError::Storage(msg) => {
+                eprintln!("[storage error] {msg}");
+                err_coded("STORAGE_ERROR", "Storage operation failed")
+            }
+            AppError::Clock => err_coded("INTERNAL_ERROR", "Internal timing error"),
         }
     }
 }
 
-pub(crate) fn attach_warnings(resp: &mut serde_json::Value, warnings: &[String]) {
-    if !warnings.is_empty() {
-        resp["warnings"] = serde_json::json!(warnings);
+pub(crate) fn parse_u64_param(
+    name: &str,
+    value: Option<&String>,
+    default: u64,
+) -> Result<u64, Response> {
+    match value {
+        Some(s) => s.parse::<u64>().map_err(|_| {
+            AppError::Validation(format!(
+                "Invalid '{name}' value: expected numeric timestamp"
+            ))
+            .into()
+        }),
+        None => Ok(default),
     }
 }
 
@@ -85,7 +96,8 @@ impl Warnings {
 
     pub fn on_err(&mut self, label: &str, r: Result<(), impl std::fmt::Display>) {
         if let Err(e) = r {
-            self.0.push(format!("{label}: {e}"));
+            eprintln!("[warning] {label}: {e}");
+            self.0.push(format!("{label}: failed"));
         }
     }
 
@@ -98,6 +110,8 @@ impl Warnings {
     }
 
     pub fn attach(self, resp: &mut serde_json::Value) {
-        attach_warnings(resp, &self.0);
+        if !self.0.is_empty() {
+            resp["warnings"] = serde_json::json!(self.0);
+        }
     }
 }

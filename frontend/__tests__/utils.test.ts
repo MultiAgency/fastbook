@@ -3,6 +3,7 @@ import {
   formatScore,
   friendlyError,
   isValidHandle,
+  isValidVerifiableClaim,
   sanitizeHandle,
   toErrorMessage,
   truncateAccountId,
@@ -117,6 +118,61 @@ describe('Utility Functions', () => {
         'Too many requests',
       );
     });
+
+    it('maps SELF_UNFOLLOW error', () => {
+      expect(friendlyError(new Error('Cannot unfollow yourself'))).toContain(
+        'cannot unfollow',
+      );
+    });
+
+    it('maps VALIDATION_ERROR code', () => {
+      expect(friendlyError(new Error('VALIDATION_ERROR'))).toContain(
+        'Invalid input',
+      );
+    });
+
+    it('maps STORAGE_ERROR code', () => {
+      expect(friendlyError(new Error('STORAGE_ERROR'))).toContain(
+        'storage error',
+      );
+    });
+
+    it('maps INTERNAL_ERROR code', () => {
+      expect(friendlyError(new Error('INTERNAL_ERROR'))).toContain(
+        'internal error',
+      );
+    });
+
+    it('maps ROLLBACK_PARTIAL code', () => {
+      expect(friendlyError(new Error('ROLLBACK_PARTIAL'))).toContain(
+        'partially failed',
+      );
+    });
+
+    it('maps NONCE_REPLAY error', () => {
+      expect(friendlyError(new Error('nonce has already been used'))).toContain(
+        'already been used',
+      );
+    });
+
+    it('maps 503 service unavailable', () => {
+      expect(friendlyError(new Error('503 service unavailable'))).toContain(
+        'temporarily unavailable',
+      );
+    });
+
+    it('maps upstream unreachable', () => {
+      expect(friendlyError(new Error('Upstream unreachable'))).toContain(
+        'reach the backend',
+      );
+    });
+
+    it('prefers ApiError.code over message text for classification', () => {
+      const err = Object.assign(new Error('Something obscure'), {
+        code: 'RATE_LIMITED',
+      });
+      expect(friendlyError(err)).toContain('Too many requests');
+    });
   });
 
   describe('formatScore', () => {
@@ -192,6 +248,49 @@ describe('Utility Functions', () => {
     it('handles unix timestamps in seconds', () => {
       const nowSecs = Math.floor(Date.now() / 1000);
       expect(formatRelativeTime(nowSecs)).toBe('just now');
+    });
+  });
+
+  describe('isValidVerifiableClaim', () => {
+    const validClaim = {
+      near_account_id: 'alice.near',
+      public_key: 'ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp',
+      signature: 'ed25519:4dJh6gFuoNBibN3JMfASqTzwCLEB1JmhFDrk5mGwWwHZ',
+      nonce: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+      message: '{"action":"register","domain":"nearly.social"}',
+    };
+
+    it('accepts a well-formed claim', () => {
+      expect(isValidVerifiableClaim(validClaim)).toBe(true);
+    });
+
+    it('rejects null and non-objects', () => {
+      expect(isValidVerifiableClaim(null)).toBe(false);
+      expect(isValidVerifiableClaim('string')).toBe(false);
+      expect(isValidVerifiableClaim(42)).toBe(false);
+    });
+
+    it('rejects missing fields', () => {
+      const { public_key: _, ...noKey } = validClaim;
+      expect(isValidVerifiableClaim(noKey)).toBe(false);
+    });
+
+    it('rejects public_key without ed25519: prefix', () => {
+      expect(
+        isValidVerifiableClaim({ ...validClaim, public_key: 'rsa:AAAA' }),
+      ).toBe(false);
+    });
+
+    it('rejects signature without ed25519: prefix', () => {
+      expect(isValidVerifiableClaim({ ...validClaim, signature: 'AAAA' })).toBe(
+        false,
+      );
+    });
+
+    it('rejects non-JSON message', () => {
+      expect(
+        isValidVerifiableClaim({ ...validClaim, message: 'not json' }),
+      ).toBe(false);
     });
   });
 

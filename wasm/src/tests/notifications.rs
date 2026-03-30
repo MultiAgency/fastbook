@@ -79,3 +79,91 @@ fn notification_dedup_within_window() {
     );
 }
 
+#[test]
+#[serial]
+fn notification_cursor_pagination_advances() {
+    setup_integration("pag_a.near");
+    quick_register("pag_a.near", "pag_alice");
+    quick_register("pag_b.near", "pag_bob");
+    quick_register("pag_c.near", "pag_carol");
+    quick_register("pag_d.near", "pag_dave");
+
+    // Three different agents follow pag_alice at distinct timestamps.
+    unsafe { std::env::set_var("NEAR_BLOCK_TIMESTAMP", "1000000000000") };
+    set_signer("pag_b.near");
+    handle_follow(
+        &RequestBuilder::new(Action::Follow)
+            .handle("pag_alice")
+            .build(),
+    );
+
+    unsafe { std::env::set_var("NEAR_BLOCK_TIMESTAMP", "2000000000000") };
+    set_signer("pag_c.near");
+    handle_follow(
+        &RequestBuilder::new(Action::Follow)
+            .handle("pag_alice")
+            .build(),
+    );
+
+    unsafe { std::env::set_var("NEAR_BLOCK_TIMESTAMP", "3000000000000") };
+    set_signer("pag_d.near");
+    handle_follow(
+        &RequestBuilder::new(Action::Follow)
+            .handle("pag_alice")
+            .build(),
+    );
+
+    unsafe { std::env::remove_var("NEAR_BLOCK_TIMESTAMP") };
+    set_signer("pag_a.near");
+
+    // Page 1: limit=2, should get 2 newest and a cursor
+    let mut req = test_request(Action::GetNotifications);
+    req.limit = Some(2);
+    let resp = handle_get_notifications(&req);
+    assert!(resp.success);
+    let data = parse_response(&resp);
+    let notifs = data["notifications"].as_array().unwrap();
+    assert_eq!(notifs.len(), 2, "page 1 should have 2 notifications");
+    let cursor = resp.pagination.as_ref().unwrap().next_cursor.clone();
+    assert!(cursor.is_some(), "page 1 should have a next_cursor");
+
+    // Page 2: use cursor, should get the remaining notification
+    let mut req2 = test_request(Action::GetNotifications);
+    req2.limit = Some(2);
+    req2.cursor = cursor;
+    let resp2 = handle_get_notifications(&req2);
+    assert!(resp2.success);
+    let data2 = parse_response(&resp2);
+    let notifs2 = data2["notifications"].as_array().unwrap();
+    assert_eq!(notifs2.len(), 1, "page 2 should have 1 notification");
+    assert!(
+        resp2.pagination.as_ref().unwrap().next_cursor.is_none(),
+        "page 2 should have no next_cursor"
+    );
+
+    // Verify pages don't overlap
+    let page1_from: Vec<&str> = notifs.iter().map(|n| n["from"].as_str().unwrap()).collect();
+    let page2_from: Vec<&str> = notifs2
+        .iter()
+        .map(|n| n["from"].as_str().unwrap())
+        .collect();
+    for h in &page2_from {
+        assert!(
+            !page1_from.contains(h),
+            "page 2 notification from '{h}' should not appear in page 1"
+        );
+    }
+}
+
+#[test]
+#[serial]
+fn notification_rejects_non_numeric_cursor() {
+    setup_integration("ncur.near");
+    quick_register("ncur.near", "ncur_agent");
+
+    let mut req = test_request(Action::GetNotifications);
+    req.cursor = Some("not_a_timestamp".into());
+    let resp = handle_get_notifications(&req);
+    assert!(!resp.success, "should reject non-numeric cursor");
+    assert_eq!(resp.code.as_deref(), Some("VALIDATION_ERROR"));
+}

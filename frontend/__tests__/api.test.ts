@@ -34,13 +34,6 @@ describe('ApiClient', () => {
       await expect(api.getMe()).rejects.toMatchObject({ statusCode: 401 });
       expect(mockFetch).not.toHaveBeenCalled();
     });
-
-    it('throws after clearing credentials', async () => {
-      api.clearCredentials();
-
-      await expect(api.getMe()).rejects.toThrow(ApiError);
-      expect(mockFetch).not.toHaveBeenCalled();
-    });
   });
 
   describe('public reads without API key', () => {
@@ -110,6 +103,42 @@ describe('ApiClient', () => {
         statusCode: 400,
         message: 'Request failed',
       });
+    });
+
+    it('forwards hint field from WASM error response', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            success: false,
+            error: 'Auth failed',
+            code: 'AUTH_FAILED',
+            hint: 'Re-sign with a fresh nonce',
+          }),
+      });
+
+      try {
+        await api.getMe();
+        throw new Error('Expected to throw');
+      } catch (err) {
+        expect(err).toBeInstanceOf(ApiError);
+        expect((err as ApiError).hint).toBe('Re-sign with a fresh nonce');
+        expect((err as ApiError).code).toBe('AUTH_FAILED');
+      }
+    });
+
+    it.each([
+      ['VALIDATION_ERROR maps to 400', 'VALIDATION_ERROR', 400],
+      ['STORAGE_ERROR maps to 500', 'STORAGE_ERROR', 500],
+      ['ROLLBACK_PARTIAL maps to 500', 'ROLLBACK_PARTIAL', 500],
+    ])('%s', async (_label, code, expected) => {
+      mockWasmError('error', code);
+      try {
+        await api.getMe();
+        throw new Error('Expected to throw');
+      } catch (err) {
+        expect((err as ApiError).statusCode).toBe(expected);
+      }
     });
 
     it('throws ApiError on non-ok HTTP response', async () => {
@@ -226,8 +255,8 @@ describe('ApiClient', () => {
     it('returns updated agent', async () => {
       mockSuccess({ agent: { handle: 'bot', description: 'Updated bot' } });
 
-      const agent = await api.updateMe({ description: 'Updated bot' });
-      expect(agent.description).toBe('Updated bot');
+      const result = await api.updateMe({ description: 'Updated bot' });
+      expect(result.agent.description).toBe('Updated bot');
     });
   });
 
@@ -262,7 +291,7 @@ describe('ApiClient', () => {
         following_count: 3,
         mutual_count: 2,
         last_active: 1700000000,
-        member_since: 1690000000,
+        created_at: 1690000000,
       });
 
       await api.getNetwork();
@@ -278,7 +307,7 @@ describe('ApiClient', () => {
         following_count: 3,
         mutual_count: 2,
         last_active: 1700000000,
-        member_since: 1690000000,
+        created_at: 1690000000,
       });
 
       const result = await api.getNetwork();
@@ -340,15 +369,15 @@ describe('ApiClient', () => {
     });
   });
 
-  describe('getSuggestedFollows', () => {
+  describe('getSuggested', () => {
     it('extracts agents array from nested response', async () => {
       mockSuccess({
         agents: [{ handle: 'rec_1' }, { handle: 'rec_2' }],
         vrf: { output: 'abc', proof: 'def', alpha: 'ghi' },
       });
 
-      const agents = await api.getSuggestedFollows(5);
-      expect(agents).toEqual([{ handle: 'rec_1' }, { handle: 'rec_2' }]);
+      const result = await api.getSuggested(5);
+      expect(result.agents).toEqual([{ handle: 'rec_1' }, { handle: 'rec_2' }]);
       expect(lastFetchCall(mockFetch).url).toContain(
         '/api/v1/agents/suggested',
       );
@@ -356,7 +385,7 @@ describe('ApiClient', () => {
   });
 
   describe('getNotifications', () => {
-    it('sends GET with since and limit in query string', async () => {
+    it('sends GET with cursor and limit in query string', async () => {
       mockSuccess({ notifications: [{ type: 'follow' }], unread_count: 1 });
 
       const result = await api.getNotifications('1700000000', 20);
@@ -365,17 +394,17 @@ describe('ApiClient', () => {
 
       const call = lastFetchCall(mockFetch);
       expect(call.url).toContain('/api/v1/agents/me/notifications');
-      expect(call.url).toContain('since=1700000000');
+      expect(call.url).toContain('cursor=1700000000');
       expect(call.url).toContain('limit=20');
     });
 
-    it('omits since from query when not provided', async () => {
+    it('omits cursor from query when not provided', async () => {
       mockSuccess({ notifications: [], unread_count: 0 });
 
       await api.getNotifications();
 
       const call = lastFetchCall(mockFetch);
-      expect(call.url).not.toContain('since=');
+      expect(call.url).not.toContain('cursor=');
       expect(call.url).toContain('limit=50');
     });
   });
@@ -439,8 +468,8 @@ describe('ApiClient', () => {
         ],
       });
 
-      const tags = await api.listTags();
-      expect(tags).toEqual([
+      const result = await api.listTags();
+      expect(result.tags).toEqual([
         { tag: 'ai', count: 5 },
         { tag: 'defi', count: 3 },
       ]);
@@ -564,6 +593,53 @@ describe('ApiClient', () => {
       const call = lastFetchCall(mockFetch);
       expect(call.url).toContain('/agents/bot_1/endorsers');
       expect(call.method).toBe('GET');
+    });
+  });
+
+  describe('checkHandle', () => {
+    it('sends GET to /api/v1/agents/check/:handle without auth', async () => {
+      api.clearCredentials();
+      mockSuccess({ handle: 'new_bot', available: true });
+
+      const result = await api.checkHandle('new_bot');
+
+      const call = lastFetchCall(mockFetch);
+      expect(call.url).toContain('/agents/check/new_bot');
+      expect(call.method).toBe('GET');
+      expect(call.headers?.Authorization).toBeUndefined();
+      expect(result.available).toBe(true);
+    });
+  });
+
+  describe('deregister', () => {
+    it('sends DELETE to /api/v1/agents/me', async () => {
+      mockSuccess({ action: 'deregistered', handle: 'bot_1' });
+
+      const result = await api.deregister();
+
+      const call = lastFetchCall(mockFetch);
+      expect(call.url).toBe('/api/v1/agents/me');
+      expect(call.method).toBe('DELETE');
+      expect(result.action).toBe('deregistered');
+    });
+  });
+
+  describe('migrateAccount', () => {
+    it('sends POST to /api/v1/agents/me/migrate', async () => {
+      mockSuccess({
+        action: 'migrated',
+        agent: { handle: 'bot_1' },
+        old_account: 'old.near',
+        new_account: 'new.near',
+      });
+
+      const result = await api.migrateAccount('new.near');
+
+      const call = lastFetchCall(mockFetch);
+      expect(call.url).toBe('/api/v1/agents/me/migrate');
+      expect(call.method).toBe('POST');
+      expect(call.body?.new_account_id).toBe('new.near');
+      expect(result.old_account).toBe('old.near');
     });
   });
 });

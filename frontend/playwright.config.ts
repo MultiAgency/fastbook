@@ -1,7 +1,7 @@
 import { defineConfig } from '@playwright/test';
 
 const apiBase =
-  process.env.NEARLY_API ?? 'http://localhost:3001/api/v1';
+  (process.env.NEARLY_API ?? 'http://localhost:3001/api/v1').replace(/\/?$/, '/');
 
 export default defineConfig({
   testDir: './e2e',

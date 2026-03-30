@@ -1,4 +1,4 @@
-//! Handlers for get_me, get_profile, and update_me.
+//! Handlers for get_me, get_profile, update_me, and set_platforms.
 
 use crate::agent::*;
 use crate::auth::get_caller_from;
@@ -29,7 +29,7 @@ pub fn handle_get_me(req: &Request) -> Response {
                 }
             }))
         }
-        None => err_response("Agent data not found"),
+        None => err_coded("NOT_FOUND", "Agent data not found"),
     }
 }
 
@@ -47,11 +47,10 @@ pub fn handle_update_me(req: &Request) -> Response {
     let before = require_agent!(&handle);
     let mut agent = before.clone();
 
+    if let Err(resp) = validate_agent_fields(req) {
+        return resp;
+    }
     let mut warnings = Warnings::new();
-    warnings.extend(match validate_agent_fields(req) {
-        Ok(w) => w,
-        Err(resp) => return resp,
-    });
 
     let mut changed = false;
     if let Some(desc) = &req.description {
@@ -74,7 +73,10 @@ pub fn handle_update_me(req: &Request) -> Response {
         changed = true;
     }
     if !changed {
-        return err_response("No valid fields to update");
+        return err_coded(
+            "VALIDATION_ERROR",
+            "No valid fields to update (supported: description, avatar_url, tags, capabilities)",
+        );
     }
 
     agent.last_active = require_timestamp!();
@@ -95,6 +97,8 @@ pub fn handle_update_me(req: &Request) -> Response {
         return r;
     }
 
+    increment_rate_limit("update_me", &handle, UPDATE_RATE_WINDOW_SECS);
+
     warnings.extend(cascade.cleanup_storage(&handle));
 
     crate::registry::update_tag_counts(&before.tags, &agent.tags);
@@ -103,6 +107,46 @@ pub fn handle_update_me(req: &Request) -> Response {
     let mut resp = serde_json::json!({ "agent": agent_json, "profile_completeness": profile_completeness(&agent) });
     warnings.attach(&mut resp);
     ok_response(resp)
+}
+
+// RESPONSE: { agent: Agent }
+// Admin-only: sets verified platform IDs after external registration.
+pub fn handle_set_platforms(req: &Request) -> Response {
+    let caller = require_caller!(req);
+    if let Err(e) = crate::auth::require_admin(&caller) {
+        return e;
+    }
+    let handle = require_target_handle!(req);
+    let before = require_agent!(&handle);
+    let Some(platforms) = &req.platforms else {
+        return err_coded("VALIDATION_ERROR", "platforms array is required");
+    };
+    if platforms.len() > MAX_PLATFORMS {
+        return err_coded(
+            "VALIDATION_ERROR",
+            &format!("Too many platforms (max {MAX_PLATFORMS})"),
+        );
+    }
+    for p in platforms {
+        if p.is_empty() || p.len() > MAX_PLATFORM_ID_LEN {
+            return err_coded("VALIDATION_ERROR", "Invalid platform ID length");
+        }
+        if let Err(e) = reject_unsafe_unicode(p, false) {
+            return e.into();
+        }
+    }
+    let mut agent = before.clone();
+    let mut seen = std::collections::HashSet::new();
+    agent.platforms = platforms
+        .iter()
+        .filter(|p| seen.insert(p.as_str()))
+        .cloned()
+        .collect();
+    let mut txn = Transaction::new();
+    if let Some(r) = txn.save_agent("Failed to save agent", &agent, &before) {
+        return r;
+    }
+    ok_response(serde_json::json!({ "agent": format_agent(&agent) }))
 }
 
 // RESPONSE: { agent: Agent, is_following?: bool, my_endorsements?: { ns: [val] } }

@@ -6,16 +6,19 @@ import { NextRequest } from 'next/server';
 import { setupFetchMock, TEST_AUTH } from './fixtures';
 
 const mockCallOutlayer = jest.fn();
-jest.mock('@/lib/outlayer-route', () => ({
+jest.mock('@/lib/outlayer-server', () => ({
   getOutlayerPaymentKey: () => 'pk_test',
-  sanitizePublic: jest.requireActual('@/lib/outlayer-route').sanitizePublic,
+  sanitizePublic: jest.requireActual('@/lib/outlayer-server').sanitizePublic,
   callOutlayer: (...args: unknown[]) => mockCallOutlayer(...args),
+  mintClaimForWalletKey: jest.fn().mockResolvedValue(null),
 }));
 
 jest.mock('@/lib/cache', () => ({
   getCached: jest.fn().mockReturnValue(undefined),
   setCache: jest.fn(),
   clearCache: jest.fn(),
+  clearByAction: jest.fn(),
+  currentGeneration: jest.fn().mockReturnValue(0),
   makeCacheKey: jest.fn((body: Record<string, unknown>) =>
     JSON.stringify(body),
   ),
@@ -68,7 +71,7 @@ afterEach(() => {
 });
 
 describe('sanitizePublic', () => {
-  const { sanitizePublic } = jest.requireActual('@/lib/outlayer-route') as {
+  const { sanitizePublic } = jest.requireActual('@/lib/outlayer-server') as {
     sanitizePublic: (body: Record<string, unknown>) => Record<string, unknown>;
   };
 
@@ -121,7 +124,7 @@ describe('sanitizePublic', () => {
 
   it('allows structured values for endorser filters', () => {
     const result = sanitizePublic({
-      action: 'get_endorsers',
+      action: 'filter_endorsers',
       handle: 'alice',
       tags: ['rust', 'ai'],
       capabilities: { skills: ['chat'] },
@@ -162,7 +165,7 @@ describe('route resolution', () => {
     ['POST', 'agents/alice/endorse', 'endorse'],
     ['DELETE', 'agents/alice/endorse', 'unendorse'],
     ['GET', 'agents/alice/endorsers', 'get_endorsers'],
-    ['POST', 'agents/alice/endorsers', 'get_endorsers'],
+    ['POST', 'agents/alice/endorsers', 'filter_endorsers'],
   ])('%s %s → %s', async (method: string, path: string, expectedAction: string) => {
     const handlers: Record<string, typeof GET> = { GET, POST, PATCH, DELETE };
     const handler = handlers[method]!;
@@ -235,6 +238,14 @@ describe('query params', () => {
     const wasmBody = mockCallOutlayer.mock.calls[0][0];
     expect(wasmBody.sort).toBe('newest');
     expect(wasmBody.cursor).toBe('agent_42');
+  });
+
+  it('passes tag as string to WASM', async () => {
+    const [req, params] = makeRequest('GET', 'agents?tag=ai');
+    await GET(req, params);
+
+    const wasmBody = mockCallOutlayer.mock.calls[0][0];
+    expect(wasmBody.tag).toBe('ai');
   });
 
   it('drops non-parseable integer params', async () => {
@@ -366,7 +377,7 @@ describe('auth dispatch', () => {
       public_key: 'ed25519:abc',
       signature: 'ed25519:sig',
       nonce: 'bm9uY2U=',
-      message: 'hello',
+      message: '{"action":"heartbeat"}',
       recipient: 'social',
     };
     const [req, params] = makeRequest('POST', 'agents/me/heartbeat', {
@@ -403,6 +414,24 @@ describe('auth dispatch', () => {
     });
     const res = await POST(req, params);
     expect(res.status).toBe(400);
+    expect(mockCallOutlayer).not.toHaveBeenCalled();
+  });
+
+  it('rejects register_platforms with verifiable_claim (multi-step needs reusable key)', async () => {
+    const claim = {
+      near_account_id: 'alice.near',
+      public_key: 'ed25519:abc',
+      signature: 'ed25519:sig',
+      nonce: 'bm9uY2U=',
+      message: '{"action":"register_platforms"}',
+    };
+    const [req, params] = makeRequest('POST', 'agents/me/platforms', {
+      verifiable_claim: claim,
+    });
+    const res = await POST(req, params);
+    const body = await json(res);
+    expect(res.status).toBe(401);
+    expect(body.error).toMatch(/wallet key/i);
     expect(mockCallOutlayer).not.toHaveBeenCalled();
   });
 
@@ -477,7 +506,7 @@ describe('error handling', () => {
   });
 });
 
-describe('market auto-registration on register', () => {
+describe('platform auto-registration on register (background)', () => {
   let marketFetch: ReturnType<typeof setupFetchMock>;
 
   beforeEach(() => {
@@ -494,7 +523,7 @@ describe('market auto-registration on register', () => {
 
   afterEach(() => marketFetch.restore());
 
-  it('merges market credentials into response on success', async () => {
+  it('returns registration response immediately without platform data', async () => {
     marketFetch.mockFetch.mockResolvedValue({
       ok: true,
       json: () =>
@@ -514,82 +543,11 @@ describe('market auto-registration on register', () => {
     const res = await POST(req, params);
     const body = await json(res);
 
-    expect(body.success).toBe(true);
-    expect(body.data.market).toEqual({
-      api_key: 'sk_live_x',
-      agent_id: 'uuid',
-      near_account_id: 'mkt.near',
-    });
-    expect(body.warnings).toBeUndefined();
-  });
-
-  it('adds warning when market handle is taken', async () => {
-    marketFetch.mockFetch.mockResolvedValue({
-      ok: false,
-      json: () => Promise.resolve({ error: 'Handle already registered' }),
-    });
-
-    const [req, params] = makeRequest(
-      'POST',
-      'agents/register',
-      { handle: 'my_bot' },
-      { 'x-payment-key': 'pk_user' },
-    );
-    const res = await POST(req, params);
-    const body = await json(res);
-
+    // Registration succeeds immediately — platform data is not included
+    // (platforms register in the background; use POST /agents/me/platforms
+    // to retrieve credentials)
     expect(body.success).toBe(true);
     expect(body.data.market).toBeUndefined();
-    expect(body.warnings).toEqual([
-      'market.near.ai: Handle already registered',
-    ]);
-  });
-
-  it('adds warning when market is unreachable', async () => {
-    marketFetch.mockFetch.mockRejectedValue(new Error('Network error'));
-
-    const [req, params] = makeRequest(
-      'POST',
-      'agents/register',
-      { handle: 'my_bot' },
-      { 'x-payment-key': 'pk_user' },
-    );
-    const res = await POST(req, params);
-    const body = await json(res);
-
-    expect(body.success).toBe(true);
-    expect(body.warnings).toEqual([
-      'market.near.ai: could not reserve handle (service unreachable)',
-    ]);
-  });
-
-  it('forwards tags and capabilities to market registration', async () => {
-    marketFetch.mockFetch.mockResolvedValue({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          api_key: 'sk_live_x',
-          agent_id: 'uuid',
-          near_account_id: 'mkt.near',
-        }),
-    });
-
-    const [req, params] = makeRequest(
-      'POST',
-      'agents/register',
-      {
-        handle: 'my_bot',
-        tags: ['ai', 'rust'],
-        capabilities: { skills: ['chat'] },
-      },
-      { 'x-payment-key': 'pk_user' },
-    );
-    await POST(req, params);
-
-    const marketBody = JSON.parse(marketFetch.mockFetch.mock.calls[0][1].body);
-    expect(marketBody.handle).toBe('my_bot');
-    expect(marketBody.tags).toEqual(['ai', 'rust']);
-    expect(marketBody.capabilities).toEqual({ skills: ['chat'] });
   });
 
   it('does not call market for non-register actions', async () => {
@@ -602,6 +560,53 @@ describe('market auto-registration on register', () => {
     await POST(req, params);
 
     expect(marketFetch.mockFetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('cache invalidation', () => {
+  it('passes generation to setCache on public reads', async () => {
+    const { currentGeneration, setCache } = jest.requireMock('@/lib/cache');
+    (currentGeneration as jest.Mock).mockReturnValue(42);
+
+    const [req, params] = makeRequest('GET', 'agents');
+    await GET(req, params);
+
+    expect(setCache).toHaveBeenCalledWith(
+      'list_agents',
+      expect.any(String),
+      expect.anything(),
+      42,
+    );
+  });
+
+  it('clears only list_agents on heartbeat', async () => {
+    const { clearCache, clearByAction } = jest.requireMock('@/lib/cache');
+
+    const [req, params] = makeRequest(
+      'POST',
+      'agents/me/heartbeat',
+      {},
+      { authorization: 'Bearer wk_test' },
+    );
+    await POST(req, params);
+
+    expect(clearCache).not.toHaveBeenCalled();
+    expect(clearByAction).toHaveBeenCalledWith('list_agents');
+  });
+
+  it('clears entire cache on follow', async () => {
+    const { clearCache, clearByAction } = jest.requireMock('@/lib/cache');
+
+    const [req, params] = makeRequest(
+      'POST',
+      'agents/alice/follow',
+      {},
+      { authorization: 'Bearer wk_test' },
+    );
+    await POST(req, params);
+
+    expect(clearCache).toHaveBeenCalled();
+    expect(clearByAction).not.toHaveBeenCalled();
   });
 });
 

@@ -23,20 +23,26 @@ fn edge_timestamp_invalid() {
 
 #[test]
 fn cursor_offset_returns_zero_when_no_cursor() {
-    let handles = vec!["alice".into(), "bob".into()];
-    assert_eq!(cursor_offset(&handles, &None), 0);
+    let handles: Vec<String> = vec!["alice".into(), "bob".into()];
+    assert_eq!(cursor_offset_by(&handles, &None, |h| h.as_str()).0, 0);
 }
 
 #[test]
 fn cursor_offset_returns_position_after_match() {
-    let handles = vec!["alice".into(), "bob".into(), "carol".into()];
-    assert_eq!(cursor_offset(&handles, &Some("bob".into())), 2);
+    let handles: Vec<String> = vec!["alice".into(), "bob".into(), "carol".into()];
+    assert_eq!(
+        cursor_offset_by(&handles, &Some("bob".into()), |h| h.as_str()).0,
+        2
+    );
 }
 
 #[test]
 fn cursor_offset_returns_zero_when_cursor_not_found() {
-    let handles = vec!["alice".into(), "bob".into()];
-    assert_eq!(cursor_offset(&handles, &Some("unknown".into())), 0);
+    let handles: Vec<String> = vec!["alice".into(), "bob".into()];
+    assert_eq!(
+        cursor_offset_by(&handles, &Some("unknown".into()), |h| h.as_str()).0,
+        0
+    );
 }
 
 #[test]
@@ -155,6 +161,10 @@ fn integration_get_edges_by_direction() {
     assert!(resp_both.success);
     let data_both = parse_response(&resp_both);
     assert!(!data_both["edges"].as_array().unwrap().is_empty());
+    assert_eq!(
+        data_both["truncated"], false,
+        "small graph should not be truncated"
+    );
 }
 
 #[test]
@@ -297,5 +307,55 @@ fn integration_get_followers_pagination() {
     assert_ne!(
         page1[0]["handle"], page2[0]["handle"],
         "pages should return different followers"
+    );
+}
+
+/// When a cursor handle is removed from the follower index between
+/// paginated calls, the response should include cursor_reset: true
+/// and restart from the beginning.
+#[test]
+#[serial]
+fn integration_get_followers_cursor_reset_on_missing_handle() {
+    setup_integration("cr_target.near");
+    quick_register("cr_target.near", "cr_target");
+    quick_register("cr_f1.near", "cr_f1");
+    quick_register("cr_f2.near", "cr_f2");
+    quick_register("cr_f3.near", "cr_f3");
+
+    for account in &["cr_f1.near", "cr_f2.near", "cr_f3.near"] {
+        set_signer(account);
+        handle_follow(
+            &RequestBuilder::new(Action::Follow)
+                .handle("cr_target")
+                .build(),
+        );
+    }
+
+    // Page 1: limit=1, get first follower and cursor
+    let mut req = RequestBuilder::new(Action::GetFollowers)
+        .handle("cr_target")
+        .limit(1)
+        .build();
+    let resp1 = handle_get_followers(&req);
+    assert!(resp1.success);
+    let pagination1 = resp1.pagination.as_ref().expect("should have pagination");
+    let cursor = pagination1
+        .next_cursor
+        .as_ref()
+        .expect("should have next_cursor")
+        .clone();
+
+    // Remove the cursor handle from the follower index (simulates deregistration)
+    index_remove(&keys::pub_followers("cr_target"), &cursor).unwrap();
+
+    // Page 2: stale cursor should trigger cursor_reset
+    req.cursor = Some(cursor);
+    let resp2 = handle_get_followers(&req);
+    assert!(resp2.success);
+    let pagination2 = resp2.pagination.as_ref().expect("should have pagination");
+    assert_eq!(
+        pagination2.cursor_reset,
+        Some(true),
+        "should signal cursor_reset when cursor handle not found in index"
     );
 }

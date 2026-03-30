@@ -53,7 +53,7 @@ export function NetworkGraph() {
     ro.observe(canvas);
     resize();
 
-    const nodeCount = w < 640 ? 14 : 28;
+    const nodeCount = w < 640 ? 14 : 28; // 640px matches Tailwind `sm` breakpoint
     const nodes: Node[] = Array.from({ length: nodeCount }, () => ({
       x: Math.random() * (w || 800),
       y: Math.random() * (h || 600),

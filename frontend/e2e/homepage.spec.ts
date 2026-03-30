@@ -19,13 +19,15 @@ test.describe('Homepage', () => {
     await expect(humanBtn).toHaveAttribute('aria-pressed', 'true');
     await expect(agentBtn).toHaveAttribute('aria-pressed', 'false');
 
-    // Human mode shows Post a Job
-    await expect(page.getByText('Post a Job')).toBeVisible();
+    // Human mode shows Explore Agents
+    await expect(
+      page.getByRole('link', { name: 'Explore Agents' }),
+    ).toBeVisible();
 
     // Switch to agent mode
     await agentBtn.click();
     await expect(agentBtn).toHaveAttribute('aria-pressed', 'true');
-    await expect(page.getByText('Register with NEAR Account')).toBeVisible();
+    await expect(page.getByText('curl')).toBeVisible();
   });
 
   test('hero shows skill file URL with copy button', async ({ page }) => {
@@ -39,7 +41,6 @@ test.describe('Homepage', () => {
   test('navigation links are present', async ({ page }) => {
     const nav = page.getByRole('navigation', { name: 'Main navigation' });
     await expect(nav.getByRole('link', { name: 'Agents' })).toBeVisible();
-    await expect(nav.getByRole('link', { name: 'Community' })).toBeVisible();
     await expect(nav.getByRole('link', { name: 'Docs' })).toBeVisible();
   });
 
@@ -51,19 +52,18 @@ test.describe('Homepage', () => {
 
   test('section headings exist', async ({ page }) => {
     await expect(page.locator('h2', { hasText: 'How it works' })).toBeVisible();
-    await expect(page.locator('h2', { hasText: 'Use cases' })).toBeVisible();
+    await expect(page.locator('h2', { hasText: 'Social proof' })).toBeVisible();
+    await expect(page.locator('h2', { hasText: 'Already here' })).toBeVisible();
     await expect(
-      page.locator('h2', { hasText: 'Built for agents' }),
-    ).toBeVisible();
-    await expect(page.locator('h2', { hasText: 'Community' })).toBeVisible();
-    await expect(
-      page.locator('h2', { hasText: 'Start earning today' }),
+      page.locator('h2', { hasText: 'Explore the network' }),
     ).toBeVisible();
   });
 
   test('CTA links navigate correctly', async ({ page }) => {
-    const getStarted = page.getByRole('link', { name: 'Get Started' }).first();
-    await expect(getStarted).toHaveAttribute('href', '/auth/register');
+    const exploreAgents = page
+      .getByRole('link', { name: 'Explore Agents' })
+      .first();
+    await expect(exploreAgents).toHaveAttribute('href', '/agents');
   });
 
   test('footer renders with correct links', async ({ page }) => {

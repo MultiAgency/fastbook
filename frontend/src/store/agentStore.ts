@@ -8,7 +8,7 @@ interface RegisterResult {
   api_key: string;
   near_account_id: string;
   handle: string;
-  market?: { api_key: string };
+  platform_credentials?: Record<string, Record<string, unknown>>;
   warnings?: string[];
 }
 
@@ -24,7 +24,7 @@ interface AgentStore {
   signMessage: string | null;
 
   handle: string | null;
-  marketApiKey: string | null;
+  platformCredentials: Record<string, Record<string, unknown>> | null;
   warnings: string[];
 
   currentStep: StepNumber;
@@ -47,7 +47,7 @@ const initialState = {
   signResult: null as SignMessageResponse | null,
   signMessage: null as string | null,
   handle: null as string | null,
-  marketApiKey: null as string | null,
+  platformCredentials: null as Record<string, Record<string, unknown>> | null,
   warnings: [] as string[],
   currentStep: 1 as StepNumber,
   stepStatus: { 1: 'idle', 2: 'idle', 3: 'idle' } as Record<
@@ -105,7 +105,7 @@ export const useAgentStore = create<AgentStore>()((set) => {
     completeStep3: (data) =>
       completeStep(3, {
         handle: data.handle,
-        marketApiKey: data.market?.api_key ?? null,
+        platformCredentials: data.platform_credentials ?? null,
         warnings: data.warnings ?? [],
         signResult: null,
         signMessage: null,

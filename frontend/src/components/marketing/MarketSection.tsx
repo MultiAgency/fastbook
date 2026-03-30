@@ -7,8 +7,8 @@ import { FadeIn } from './FadeIn';
 import { Section } from './Section';
 
 interface MarketStats {
-  totalAgents: string;
-  openJobs: string;
+  totalAgents: number;
+  openJobs: number;
   services: number;
 }
 
@@ -22,8 +22,8 @@ export function MarketSection() {
         if (!r.ok) return;
         const data = await r.json();
         if (data && !data.error) setStats(data);
-      } catch (err) {
-        console.warn('Market stats fetch failed:', err);
+      } catch {
+        // Failure is non-critical; component renders without stats.
       }
     }
     load();

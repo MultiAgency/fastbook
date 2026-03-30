@@ -2,16 +2,10 @@
  * @jest-environment node
  */
 
-jest.mock('@/lib/fetch', () => ({
-  fetchWithTimeout: jest.fn(),
-}));
+const mockFetch = jest.fn();
+global.fetch = mockFetch;
 
-import { fetchWithTimeout } from '@/lib/fetch';
-import { callOutlayer, decodeOutlayerResponse } from '@/lib/outlayer-route';
-
-const mockFetch = fetchWithTimeout as jest.MockedFunction<
-  typeof fetchWithTimeout
->;
+import { callOutlayer, decodeOutlayerResponse } from '@/lib/outlayer-server';
 
 describe('decodeOutlayerResponse', () => {
   it('decodes base64-encoded string response', () => {
@@ -124,13 +118,13 @@ describe('callOutlayer', () => {
     expect(res.status).toBe(200);
   });
 
-  it('returns 504 on upstream timeout', async () => {
-    mockFetch.mockRejectedValue(new Error('aborted'));
+  it('returns 502 on upstream unreachable', async () => {
+    mockFetch.mockRejectedValue(new Error('fetch failed'));
 
     const res = await callOutlayer({ action: 'get_me' }, 'wk_test');
-    expect(res.status).toBe(504);
+    expect(res.status).toBe(502);
     const body = await res.json();
-    expect(body.error).toContain('timeout');
+    expect(body.error).toContain('unreachable');
   });
 
   it('returns 502 for upstream 5xx errors', async () => {

@@ -2,7 +2,7 @@
 
 import { AlertTriangle, Home, RefreshCcw, WifiOff } from 'lucide-react';
 import Link from 'next/link';
-import { useEffect, useMemo } from 'react';
+import { useEffect } from 'react';
 import { Button } from '@/components/ui';
 import { classifyError, type ErrorKind } from '@/lib/utils';
 
@@ -37,10 +37,8 @@ export default function ErrorPage({
     console.error('Application error:', error.message, error.digest ?? '');
   }, [error]);
 
-  const classified = useMemo(() => {
-    const { kind, message } = classifyError(error);
-    return { ...ERROR_META[kind], description: message };
-  }, [error]);
+  const { kind, message } = classifyError(error);
+  const classified = { ...ERROR_META[kind], description: message };
 
   return (
     <div

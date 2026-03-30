@@ -235,6 +235,92 @@ fn validate_capabilities_rejects_colons_in_values() {
     assert!(validate_capabilities(&arr).is_err());
 }
 
+// ── validate_cursor ─────────────────────────────────────────────────
+
+#[test]
+fn cursor_accepts_empty() {
+    assert!(validate_cursor("").is_ok());
+}
+
+#[test]
+fn cursor_accepts_valid_handle_format() {
+    assert!(validate_cursor("alice").is_ok());
+    assert!(validate_cursor("agent_007").is_ok());
+    assert!(validate_cursor(&"a".repeat(32)).is_ok());
+}
+
+#[test]
+fn cursor_accepts_valid_numeric() {
+    assert!(validate_cursor("0").is_ok());
+    assert!(validate_cursor("1234567890").is_ok());
+    assert!(validate_cursor(&"9".repeat(20)).is_ok());
+}
+
+#[test]
+fn cursor_rejects_too_long_handle() {
+    assert!(validate_cursor(&"a".repeat(33)).is_err());
+}
+
+#[test]
+fn cursor_rejects_too_long_numeric() {
+    assert!(validate_cursor(&"1".repeat(21)).is_err());
+}
+
+#[test]
+fn cursor_rejects_invalid_chars() {
+    assert!(validate_cursor("Alice").is_err()); // uppercase
+    assert!(validate_cursor("has space").is_err());
+    assert!(validate_cursor("has-dash").is_err());
+    assert!(validate_cursor("abc!def").is_err());
+}
+
+// ── platform unicode ────────────────────────────────────────────────
+
+#[test]
+fn reject_unsafe_unicode_catches_control_chars() {
+    assert!(reject_unsafe_unicode("has\x00null", false).is_err());
+    assert!(reject_unsafe_unicode("has\ttab", false).is_err());
+}
+
+#[test]
+fn reject_unsafe_unicode_catches_zero_width() {
+    assert!(reject_unsafe_unicode("ab\u{200B}cd", false).is_err());
+    assert!(reject_unsafe_unicode("ab\u{FEFF}cd", false).is_err());
+}
+
+#[test]
+fn reject_unsafe_unicode_accepts_clean_string() {
+    assert!(reject_unsafe_unicode("near-protocol", false).is_ok());
+    assert!(reject_unsafe_unicode("agent.ai", false).is_ok());
+}
+
+// ── validate_tag_filter ─────────────────────────────────────────────
+
+#[test]
+fn tag_filter_accepts_valid() {
+    assert!(validate_tag_filter("rust").is_ok());
+    assert!(validate_tag_filter("web-3").is_ok());
+    assert!(validate_tag_filter("ai").is_ok());
+    assert!(validate_tag_filter(&"a".repeat(30)).is_ok());
+}
+
+#[test]
+fn tag_filter_rejects_empty() {
+    assert!(validate_tag_filter("").is_err());
+}
+
+#[test]
+fn tag_filter_rejects_too_long() {
+    assert!(validate_tag_filter(&"a".repeat(31)).is_err());
+}
+
+#[test]
+fn tag_filter_rejects_invalid_chars() {
+    assert!(validate_tag_filter("near:mainnet").is_err()); // colon
+    assert!(validate_tag_filter("has space").is_err()); // space
+    assert!(validate_tag_filter("under_score").is_err()); // underscore
+}
+
 #[test]
 fn avatar_url_rejects_ssrf_vectors() {
     let reject = [

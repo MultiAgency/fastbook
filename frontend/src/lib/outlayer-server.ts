@@ -4,7 +4,6 @@ import {
   OUTLAYER_API_URL,
   OUTLAYER_PROJECT_NAME,
   OUTLAYER_PROJECT_OWNER,
-  OUTLAYER_TIMEOUT_MS,
 } from '@/lib/constants';
 import { fetchWithTimeout } from '@/lib/fetch';
 import { PUBLIC_ACTIONS, queryFieldsForAction } from '@/lib/routes';
@@ -22,6 +21,8 @@ interface WasmResponse<T = unknown> {
   data?: T;
   error?: string;
   code?: string;
+  hint?: string;
+  retry_after?: number;
   pagination?: {
     limit: number;
     next_cursor?: string;
@@ -30,11 +31,12 @@ interface WasmResponse<T = unknown> {
 }
 
 function isWasmShape(v: unknown): v is WasmResponse {
+  if (typeof v !== 'object' || v === null || !('success' in v)) return false;
+  const r = v as Record<string, unknown>;
   return (
-    typeof v === 'object' &&
-    v !== null &&
-    'success' in v &&
-    typeof (v as Record<string, unknown>).success === 'boolean'
+    typeof r.success === 'boolean' &&
+    (r.error === undefined || typeof r.error === 'string') &&
+    (r.code === undefined || typeof r.code === 'string')
   );
 }
 
@@ -53,7 +55,12 @@ export function decodeOutlayerResponse<T = unknown>(
     } catch {
       throw new Error('Invalid base64 in OutLayer response');
     }
-    const parsed: unknown = JSON.parse(decoded);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(decoded);
+    } catch {
+      throw new Error('Invalid JSON in OutLayer base64 payload');
+    }
     if (isWasmShape(parsed)) return parsed as WasmResponse<T>;
     throw new Error('Unexpected OutLayer response format');
   }
@@ -94,13 +101,131 @@ export function getOutlayerPaymentKey(): string {
   return key;
 }
 
+// ---------------------------------------------------------------------------
+// Auto-sign: mint a verifiable_claim for trial wallet keys (wk_).
+//
+// Trial wk_ keys don't carry NEAR identity into WASM execution.  To resolve
+// the wallet's account, we call the free /wallet/v1/sign-message endpoint
+// and inject the result as a verifiable_claim before forwarding to WASM.
+//
+// Two caches avoid redundant calls:
+//   accountCache  — wk_ → account_id  (deterministic, never expires)
+//   claimCache    — wk_:action → signed claim  (4 min TTL)
+//
+// First request for a new wk_ key costs 2 sign calls (resolve + sign).
+// Subsequent requests with a warm account cache cost 1 sign call.
+// Cache-hit requests cost 0.
+// ---------------------------------------------------------------------------
+
+interface CachedClaim {
+  near_account_id: string;
+  public_key: string;
+  signature: string;
+  nonce: string;
+  message: string;
+  expiresAt: number;
+}
+
+const accountCache = new Map<string, string>();
+const claimCache = new Map<string, CachedClaim>();
+const CLAIM_TTL_MS = 4 * 60 * 1000; // 4 minutes (within 5-minute NEP-413 window)
+const SIGN_TIMEOUT_MS = 5_000;
+
+async function signMessage(
+  walletKey: string,
+  message: string,
+): Promise<Record<string, string> | null> {
+  let resp: Response;
+  try {
+    resp = await fetchWithTimeout(
+      `${OUTLAYER_API_URL}/wallet/v1/sign-message`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${walletKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ message, recipient: 'nearly.social' }),
+      },
+      SIGN_TIMEOUT_MS,
+    );
+  } catch {
+    return null;
+  }
+  if (!resp.ok) return null;
+  try {
+    const r = (await resp.json()) as Record<string, unknown>;
+    if (
+      typeof r.account_id === 'string' &&
+      typeof r.public_key === 'string' &&
+      typeof r.signature === 'string' &&
+      typeof r.nonce === 'string'
+    ) {
+      return r as unknown as Record<string, string>;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveAccountId(walletKey: string): Promise<string | null> {
+  const cached = accountCache.get(walletKey);
+  if (cached) return cached;
+
+  // Sign a throwaway message just to learn the account_id.
+  const msg = JSON.stringify({ action: 'resolve', domain: 'nearly.social' });
+  const result = await signMessage(walletKey, msg);
+  if (!result) return null;
+
+  accountCache.set(walletKey, result.account_id);
+  return result.account_id;
+}
+
+export async function mintClaimForWalletKey(
+  walletKey: string,
+  action: string,
+): Promise<CachedClaim | null> {
+  const now = Date.now();
+
+  const cacheKey = `${walletKey}:${action}`;
+  const cached = claimCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) return cached;
+
+  const accountId = await resolveAccountId(walletKey);
+  if (!accountId) return null;
+
+  const message = JSON.stringify({
+    action,
+    domain: 'nearly.social',
+    account_id: accountId,
+    version: 1,
+    timestamp: now,
+  });
+
+  const result = await signMessage(walletKey, message);
+  if (!result) return null;
+
+  const claim: CachedClaim = {
+    near_account_id: accountId,
+    public_key: result.public_key,
+    signature: result.signature,
+    nonce: result.nonce,
+    message,
+    expiresAt: now + CLAIM_TTL_MS,
+  };
+
+  claimCache.set(cacheKey, claim);
+  return claim;
+}
+
 const OUTLAYER_RESOURCE_LIMITS = {
   max_instructions: 2_000_000_000,
   max_memory_mb: 512,
   max_execution_seconds: 120,
 } as const;
 
-const STRUCTURED_FIELDS = new Set(['tags', 'capabilities']);
+const STRUCTURED_FIELDS = new Set(['tags', 'capabilities', 'handles']);
 
 export function sanitizePublic(
   body: Record<string, unknown>,
@@ -125,8 +250,12 @@ export function sanitizePublic(
   return clean;
 }
 
-function errJson(error: string, status: number): NextResponse {
-  return NextResponse.json({ success: false, error }, { status });
+function errJson(
+  error: string,
+  status: number,
+  code = 'INTERNAL_ERROR',
+): NextResponse {
+  return NextResponse.json({ success: false, error, code }, { status });
 }
 
 export async function callOutlayer(
@@ -142,23 +271,19 @@ export async function callOutlayer(
 
   let response: Response;
   try {
-    response = await fetchWithTimeout(
-      url,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...authHeaders,
-        },
-        body: JSON.stringify({
-          input: wasmBody,
-          resource_limits: OUTLAYER_RESOURCE_LIMITS,
-        }),
+    response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...authHeaders,
       },
-      OUTLAYER_TIMEOUT_MS,
-    );
+      body: JSON.stringify({
+        input: wasmBody,
+        resource_limits: OUTLAYER_RESOURCE_LIMITS,
+      }),
+    });
   } catch {
-    return errJson('Upstream timeout', 504);
+    return errJson('Upstream unreachable', 502);
   }
 
   if (!response.ok) {

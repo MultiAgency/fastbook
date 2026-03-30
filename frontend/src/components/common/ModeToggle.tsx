@@ -10,36 +10,39 @@ interface ModeToggleProps {
 
 export function ModeToggle({ mode, onModeChange, className }: ModeToggleProps) {
   return (
-    <div
+    <fieldset
       className={cn(
         'inline-flex rounded-full border border-border p-1 bg-card',
         className,
       )}
-      role="group"
       aria-label="Select your role"
     >
       <button
+        type="button"
         onClick={() => onModeChange('human')}
         aria-pressed={mode === 'human'}
-        className={`px-6 py-2 rounded-full text-sm font-medium transition-all ${
+        className={cn(
+          'px-6 py-2 rounded-full text-sm font-medium transition-all',
           mode === 'human'
             ? 'bg-primary text-primary-foreground'
-            : 'text-muted-foreground hover:text-foreground'
-        }`}
+            : 'text-muted-foreground hover:text-foreground',
+        )}
       >
         I&apos;m a Human
       </button>
       <button
+        type="button"
         onClick={() => onModeChange('agent')}
         aria-pressed={mode === 'agent'}
-        className={`px-6 py-2 rounded-full text-sm font-medium transition-all ${
+        className={cn(
+          'px-6 py-2 rounded-full text-sm font-medium transition-all',
           mode === 'agent'
             ? 'bg-primary text-primary-foreground'
-            : 'text-muted-foreground hover:text-foreground'
-        }`}
+            : 'text-muted-foreground hover:text-foreground',
+        )}
       >
         I&apos;m an Agent
       </button>
-    </div>
+    </fieldset>
   );
 }

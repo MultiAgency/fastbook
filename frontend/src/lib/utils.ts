@@ -23,6 +23,8 @@ export function wasmCodeToStatus(code?: string): number {
     case 'RATE_LIMITED':
       return 429;
     case 'ROLLBACK_PARTIAL':
+    case 'STORAGE_ERROR':
+    case 'INTERNAL_ERROR':
       return 500;
     default:
       return 400;
@@ -50,8 +52,8 @@ function normalizeDate(date: string | Date | number): Date {
   return date;
 }
 
-function formatDate(date: string | Date | number): string {
-  return normalizeDate(date).toLocaleDateString('en-US', {
+function formatDate(d: Date): string {
+  return d.toLocaleDateString('en-US', {
     month: 'short',
     day: 'numeric',
     year: 'numeric',
@@ -65,20 +67,42 @@ export function isValidHandle(handle: string): boolean {
 export function isValidVerifiableClaim(vc: unknown): boolean {
   if (typeof vc !== 'object' || vc === null) return false;
   const v = vc as Record<string, unknown>;
-  return (
-    typeof v.near_account_id === 'string' &&
-    (v.near_account_id as string).length <= LIMITS.MAX_VC_ACCOUNT_ID &&
-    typeof v.public_key === 'string' &&
-    (v.public_key as string).length <= LIMITS.MAX_VC_PUBLIC_KEY &&
-    typeof v.signature === 'string' &&
-    (v.signature as string).length <= LIMITS.MAX_VC_SIGNATURE &&
-    typeof v.nonce === 'string' &&
-    (v.nonce as string).length <= LIMITS.MAX_VC_NONCE &&
-    typeof v.message === 'string' &&
-    (v.message as string).length <= LIMITS.MAX_VC_FIELD
-  );
+  if (
+    typeof v.near_account_id !== 'string' ||
+    typeof v.public_key !== 'string' ||
+    typeof v.signature !== 'string' ||
+    typeof v.nonce !== 'string' ||
+    typeof v.message !== 'string'
+  )
+    return false;
+  const accountId = v.near_account_id;
+  const publicKey = v.public_key;
+  const signature = v.signature;
+  const nonce = v.nonce;
+  const message = v.message;
+  if (
+    accountId.length > LIMITS.MAX_VC_ACCOUNT_ID ||
+    publicKey.length > LIMITS.MAX_VC_PUBLIC_KEY ||
+    signature.length > LIMITS.MAX_VC_SIGNATURE ||
+    nonce.length > LIMITS.MAX_VC_NONCE ||
+    message.length > LIMITS.MAX_VC_FIELD
+  )
+    return false;
+
+  // Reject obviously malformed claims before they consume an OutLayer
+  // API call.  NEP-413 requires ed25519 keys and a JSON message body.
+  if (!publicKey.startsWith('ed25519:')) return false;
+  if (!signature.startsWith('ed25519:')) return false;
+  try {
+    JSON.parse(message);
+  } catch {
+    return false;
+  }
+
+  return true;
 }
 
+/** Shallow shape check — full validation (depth, colons, nesting) is done by WASM. */
 export function isValidCapabilities(
   caps: unknown,
 ): caps is import('@/types').AgentCapabilities {
@@ -126,7 +150,7 @@ export function formatRelativeTime(date: string | Date | number): string {
   if (diffMins < 60) return plural(diffMins, 'minute');
   if (diffHours < 24) return plural(diffHours, 'hour');
   if (diffDays < 30) return plural(diffDays, 'day');
-  return formatDate(date);
+  return formatDate(d);
 }
 
 export function sanitizeHandle(value: string): string {
@@ -148,6 +172,23 @@ export interface ClassifiedError {
 }
 
 const ERROR_PATTERNS: readonly [RegExp, string, ErrorKind][] = [
+  // Specific upstream/status-code patterns before generic network patterns
+  // so "upstream timeout" gets the server-specific message, not the generic one.
+  [
+    /upstream.*timeout|504/i,
+    'The server took too long to respond. Please try again.',
+    'network',
+  ],
+  [
+    /upstream.*unreachable|502/i,
+    'Could not reach the backend. Please try again.',
+    'network',
+  ],
+  [
+    /503|service unavailable|not configured/i,
+    'The service is temporarily unavailable. Please try again later.',
+    'network',
+  ],
   [/\babort|\btimeout/i, 'Request timed out. Please try again.', 'network'],
   [
     /failed to fetch|networkerror|econnrefused|net::err_/i,
@@ -181,6 +222,7 @@ const ERROR_PATTERNS: readonly [RegExp, string, ErrorKind][] = [
     'auth',
   ],
   [/Cannot follow yourself/i, 'You cannot follow yourself.', 'generic'],
+  [/Cannot unfollow yourself/i, 'You cannot unfollow yourself.', 'generic'],
   [
     /Cannot endorse yourself|Cannot unendorse yourself/i,
     'You cannot endorse yourself.',
@@ -213,19 +255,39 @@ const ERROR_PATTERNS: readonly [RegExp, string, ErrorKind][] = [
     'generic',
   ],
   [
-    /upstream.*timeout|504/i,
-    'The server took too long to respond. Please try again.',
-    'network',
-  ],
-  [
     /402|quota|insufficient.*funds?|payment/i,
     'Insufficient credits. Please check your account balance.',
+    'generic',
+  ],
+  [
+    /ROLLBACK_PARTIAL|partial.*rollback/i,
+    'The operation partially failed. Some changes may not have been applied.',
+    'generic',
+  ],
+  [
+    /VALIDATION_ERROR|validation failed/i,
+    'Invalid input. Please check your data and try again.',
+    'generic',
+  ],
+  [
+    /STORAGE_ERROR/i,
+    'A storage error occurred. Please try again shortly.',
+    'generic',
+  ],
+  [
+    /INTERNAL_ERROR/i,
+    'An internal error occurred. Please try again.',
     'generic',
   ],
 ];
 
 export function classifyError(err: unknown): ClassifiedError {
-  const msg = toErrorMessage(err);
+  // Check ApiError.code first — resilient to backend message text changes
+  const code =
+    err != null && typeof err === 'object' && 'code' in err
+      ? (err as { code?: string }).code
+      : undefined;
+  const msg = code ? `${code} ${toErrorMessage(err)}` : toErrorMessage(err);
   for (const [pattern, message, kind] of ERROR_PATTERNS) {
     if (pattern.test(msg)) return { kind, message };
   }

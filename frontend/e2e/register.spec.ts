@@ -8,24 +8,12 @@ test.describe('Registration Flow', () => {
     await page.goto('/demo');
   });
 
-  test('shows human/agent toggle defaulting to human', async ({ page }) => {
-    const humanBtn = page.getByRole('button', { name: "I'm a Human" });
-    const agentBtn = page.getByRole('button', { name: "I'm an Agent" });
-
-    await expect(humanBtn).toHaveAttribute('aria-pressed', 'true');
-    await expect(agentBtn).toHaveAttribute('aria-pressed', 'false');
-  });
-
-  test('human path shows post a job and skill file', async ({ page }) => {
-    await expect(page.locator('h2', { hasText: 'Post a Job' })).toBeVisible();
-    await expect(page.getByText('skill.md').first()).toBeVisible();
-    await expect(page.getByText('send this to your agent')).toBeVisible();
-  });
-
-  test('agent path shows 3-step registration flow', async ({ page }) => {
-    await page.getByRole('button', { name: "I'm an Agent" }).click();
-
+  test('renders heading and badge', async ({ page }) => {
+    await expect(page.getByText('Bring Your Own NEAR Account')).toBeVisible();
     await expect(page.getByText('NEP-413 Verified Identity')).toBeVisible();
+  });
+
+  test('shows 3-step registration flow', async ({ page }) => {
     await expect(
       page.getByText('Create OutLayer Custody Wallet'),
     ).toBeVisible();
@@ -34,13 +22,10 @@ test.describe('Registration Flow', () => {
   });
 
   test('step 2 is disabled until step 1 completes', async ({ page }) => {
-    await page.getByRole('button', { name: "I'm an Agent" }).click();
     await expect(page.getByText('Sign Registration Message')).toBeVisible();
   });
 
   test('step 1 creates wallet (mock fallback)', async ({ page }) => {
-    await page.getByRole('button', { name: "I'm an Agent" }).click();
-
     const createBtn = page.getByRole('button', { name: /Create Wallet/ });
     await createBtn.click();
 
@@ -50,8 +35,6 @@ test.describe('Registration Flow', () => {
   });
 
   test('step 2 signs message after step 1', async ({ page }) => {
-    await page.getByRole('button', { name: "I'm an Agent" }).click();
-
     await page.getByRole('button', { name: /Create Wallet/ }).click();
     await expect(page.getByText('Your NEAR Account')).toBeVisible({
       timeout: STEP_TIMEOUT,
@@ -68,8 +51,6 @@ test.describe('Registration Flow', () => {
   });
 
   test('step 3 registers agent after step 2', async ({ page }) => {
-    await page.getByRole('button', { name: "I'm an Agent" }).click();
-
     await page.getByRole('button', { name: /Create Wallet/ }).click();
     await expect(page.getByText('Your NEAR Account')).toBeVisible({
       timeout: STEP_TIMEOUT,
@@ -88,8 +69,6 @@ test.describe('Registration Flow', () => {
   });
 
   test('handle input validates characters', async ({ page }) => {
-    await page.getByRole('button', { name: "I'm an Agent" }).click();
-
     await page.getByRole('button', { name: /Create Wallet/ }).click();
     await expect(page.getByText('Your NEAR Account')).toBeVisible({
       timeout: STEP_TIMEOUT,
@@ -112,8 +91,6 @@ test.describe('Registration Flow', () => {
   });
 
   test('handle input has aria-describedby for help text', async ({ page }) => {
-    await page.getByRole('button', { name: "I'm an Agent" }).click();
-
     await page.getByRole('button', { name: /Create Wallet/ }).click();
     await expect(page.getByText('Your NEAR Account')).toBeVisible({
       timeout: STEP_TIMEOUT,
@@ -126,13 +103,11 @@ test.describe('Registration Flow', () => {
     const input = page.locator('#handle');
     await expect(input).toHaveAttribute('aria-describedby', 'handle-help');
     await expect(page.locator('#handle-help')).toHaveText(
-      'Lowercase letters, numbers, underscores',
+      'Must start with a letter. Lowercase letters, numbers, underscores.',
     );
   });
 
-  test('completion shows what-next cards', async ({ page }) => {
-    await page.getByRole('button', { name: "I'm an Agent" }).click();
-
+  test('completion shows next steps', async ({ page }) => {
     await page.getByRole('button', { name: /Create Wallet/ }).click();
     await expect(page.getByText('Your NEAR Account')).toBeVisible({
       timeout: STEP_TIMEOUT,
@@ -147,17 +122,15 @@ test.describe('Registration Flow', () => {
       timeout: STEP_TIMEOUT,
     });
 
-    await expect(page.getByText("What's next?")).toBeVisible();
-    // Social links appear in summary card
+    await expect(page.getByText('Next Steps')).toBeVisible();
+    // Links appear in post-registration cards
     await expect(
       page.getByText('View your Nearly Social profile'),
     ).toBeVisible();
-    await expect(page.getByText('Browse the agent directory')).toBeVisible();
+    await expect(page.getByText('Agent Directory')).toBeVisible();
   });
 
   test('start over resets all steps', async ({ page }) => {
-    await page.getByRole('button', { name: "I'm an Agent" }).click();
-
     await page.getByRole('button', { name: /Create Wallet/ }).click();
     await expect(page.getByText('Your NEAR Account')).toBeVisible({
       timeout: STEP_TIMEOUT,
@@ -187,7 +160,6 @@ test.describe('Registration Flow', () => {
 test.describe('Registration Accessibility', () => {
   test('aria-live region exists for step announcements', async ({ page }) => {
     await page.goto('/demo');
-    await page.getByRole('button', { name: "I'm an Agent" }).click();
 
     const liveRegion = page.locator('.sr-only[aria-live="polite"]');
     await expect(liveRegion).toBeAttached();
@@ -195,7 +167,6 @@ test.describe('Registration Accessibility', () => {
 
   test('switch has correct aria-label', async ({ page }) => {
     await page.goto('/demo');
-    await page.getByRole('button', { name: "I'm an Agent" }).click();
 
     await page.getByRole('button', { name: /Create Wallet/ }).click();
     await expect(page.getByText('Your NEAR Account')).toBeVisible({
@@ -215,7 +186,6 @@ test.describe('Registration Accessibility', () => {
 
   test('aria-live region announces step changes', async ({ page }) => {
     await page.goto('/demo');
-    await page.getByRole('button', { name: "I'm an Agent" }).click();
 
     const liveRegion = page.locator('.sr-only[aria-live="polite"]');
     await expect(liveRegion).toBeAttached();

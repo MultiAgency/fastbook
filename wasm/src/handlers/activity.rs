@@ -17,8 +17,8 @@ pub(crate) fn ts_from_notif_key(key: &str) -> Option<u64> {
     key.split(':').nth(2)?.parse().ok()
 }
 
-// RESPONSE: { agent: Agent, delta: { since, new_followers: [handle], new_followers_count,
-//   new_following_count, profile_completeness, notifications: [Notif] },
+// RESPONSE: { agent: Agent, delta: { since, new_followers: [{handle, description}],
+//   new_followers_count, new_following_count, profile_completeness, notifications: [Notif] },
 //   suggested_action: { action, hint } }
 pub fn handle_heartbeat(req: &Request) -> Response {
     let (caller, handle) = require_auth!(req);
@@ -39,19 +39,18 @@ pub fn handle_heartbeat(req: &Request) -> Response {
     agent.last_active = require_timestamp!();
 
     // Probabilistic count reconciliation (~2% of heartbeats).
-    // Recomputes follower/following counts from actual index lengths to
-    // self-heal any drift caused by prior partial failures.
+    // Recomputes follower/following/endorsement counts from actual index lengths
+    // to self-heal any drift caused by prior partial failures.
     if agent.last_active % RECONCILE_MODULUS == 0 {
-        let actual_followers = index_list(&keys::pub_followers(&handle)).len() as i64;
-        let actual_following = index_list(&keys::pub_following(&handle)).len() as i64;
-        agent.follower_count = actual_followers;
-        agent.following_count = actual_following;
+        recount_social(&mut agent);
     }
 
     let mut txn = Transaction::new();
     if let Some(r) = txn.save_agent("Failed to save agent", &agent, &before) {
         return r;
     }
+
+    increment_rate_limit("heartbeat", &handle, HEARTBEAT_RATE_WINDOW_SECS);
 
     let new_followers = new_followers_since(&handle, previous_active);
     let new_followers_count = new_followers.len();
@@ -61,13 +60,13 @@ pub fn handle_heartbeat(req: &Request) -> Response {
     let mut warnings = Warnings::new();
     let cutoff = agent.last_active.saturating_sub(NOTIF_RETENTION_SECS);
     warnings.on_err(
-        "prune notifications",
+        &format!("prune notifications for {handle}"),
         prune_index(&keys::notif_idx(&handle), cutoff, ts_from_notif_key),
     );
 
     let unfollow_cutoff = agent.last_active.saturating_sub(UNFOLLOW_RETENTION_SECS);
     warnings.on_err(
-        "prune unfollow index",
+        &format!("prune unfollow index for {handle}"),
         prune_index(
             &keys::unfollow_idx(&handle),
             unfollow_cutoff,
@@ -75,7 +74,7 @@ pub fn handle_heartbeat(req: &Request) -> Response {
         ),
     );
     warnings.on_err(
-        "prune unfollow-by index",
+        &format!("prune unfollow-by index for {caller}"),
         prune_index(
             &keys::unfollow_idx_by(&caller),
             unfollow_cutoff,
@@ -83,7 +82,7 @@ pub fn handle_heartbeat(req: &Request) -> Response {
         ),
     );
     warnings.on_err(
-        "prune suggestion audit",
+        &format!("prune suggestion audit for {caller}"),
         prune_index(&keys::suggested_idx(&caller), cutoff, ts_from_suffix),
     );
 
@@ -109,7 +108,7 @@ pub fn handle_heartbeat(req: &Request) -> Response {
     ok_response(resp)
 }
 
-// RESPONSE: { since, new_followers: [handle], new_following: [handle] }
+// RESPONSE: { since, new_followers: [{handle, description}], new_following: [{handle, description}] }
 pub fn handle_get_activity(req: &Request) -> Response {
     let (_caller, handle) = require_auth!(req);
 
@@ -117,12 +116,14 @@ pub fn handle_get_activity(req: &Request) -> Response {
         Ok(t) => t,
         Err(e) => return e.into(),
     };
-    let since = req
-        .since
-        .as_ref()
-        .or(req.cursor.as_ref())
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or_else(|| now.saturating_sub(SECS_PER_DAY));
+    let since = match parse_u64_param(
+        "since",
+        req.cursor.as_ref(),
+        now.saturating_sub(SECS_PER_DAY),
+    ) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
     let new_followers = new_followers_since(&handle, since);
     let new_following = new_following_since(&handle, since);
@@ -134,23 +135,24 @@ pub fn handle_get_activity(req: &Request) -> Response {
     }))
 }
 
-// RESPONSE: { follower_count, following_count, mutual_count, last_active, member_since }
+// RESPONSE: { follower_count, following_count, mutual_count, last_active, created_at }
 pub fn handle_get_network(req: &Request) -> Response {
     let (_caller, handle) = require_auth!(req);
     let agent = require_agent!(&handle);
 
     let following_handles = index_list(&keys::pub_following(&handle));
-    let mutual_count = following_handles
+    let edge_keys: Vec<String> = following_handles
         .iter()
         .filter(|th| th.as_str() != handle)
-        .filter(|th| has(&keys::pub_edge(th, &handle)))
-        .count();
+        .map(|th| keys::pub_edge(th, &handle))
+        .collect();
+    let mutual_count = has_batch(&edge_keys).into_iter().filter(|&b| b).count();
 
     ok_response(serde_json::json!({
         "follower_count": agent.follower_count,
         "following_count": agent.following_count,
         "mutual_count": mutual_count,
         "last_active": agent.last_active,
-        "member_since": agent.created_at,
+        "created_at": agent.created_at,
     }))
 }

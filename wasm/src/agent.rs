@@ -8,6 +8,8 @@ pub(crate) fn agent_handle_for_account(account_id: &str) -> Option<String> {
     if let Some(handle) = get_string(&keys::near_account(account_id)) {
         return Some(handle);
     }
+    // Legacy key format from pre-v2 storage.  Migrates on read by writing the
+    // canonical key.  Safe to remove once reconcile_all has run on all deployments.
     let handle = get_string(&format!("near:{account_id}"))?;
     let _ = set_public(&keys::near_account(account_id), handle.as_bytes());
     Some(handle)
@@ -15,6 +17,14 @@ pub(crate) fn agent_handle_for_account(account_id: &str) -> Option<String> {
 
 pub(crate) fn load_agent(handle: &str) -> Option<AgentRecord> {
     get_json::<AgentRecord>(&keys::pub_agent(handle))
+}
+
+/// Write agent record to storage without updating sorted indices.
+/// Used by deregister to update connected agents' counts — sorted indices
+/// are rebuilt by ReconcileAll rather than updated per-edge during teardown.
+pub(crate) fn write_agent_record(agent: &AgentRecord) -> Result<(), AppError> {
+    let bytes = serde_json::to_vec(agent).map_err(|e| AppError::Storage(e.to_string()))?;
+    set_public(&keys::pub_agent(&agent.handle), &bytes)
 }
 
 pub(crate) fn save_agent(agent: &AgentRecord, before: &AgentRecord) -> Result<(), AppError> {
@@ -36,7 +46,25 @@ pub(crate) fn save_agent(agent: &AgentRecord, before: &AgentRecord) -> Result<()
     Ok(())
 }
 
-pub(crate) const FOLLOW_URL_FMT: &str = "/api/v1/agents/{}/follow";
+/// Recount follower/following from index lengths and endorsements from endorser
+/// indices.  Used by both heartbeat (~2% reconciliation) and admin reconcile_all.
+pub(crate) fn recount_social(agent: &mut AgentRecord) {
+    let handle = &agent.handle;
+    agent.follower_count = index_list(&keys::pub_followers(handle)).len() as i64;
+    agent.following_count = index_list(&keys::pub_following(handle)).len() as i64;
+
+    let endorsable = crate::collect_endorsable(Some(&agent.tags), Some(&agent.capabilities));
+    let mut rebuilt = Endorsements::new();
+    for (ns, val) in &endorsable {
+        let count = index_list(&keys::endorsers(handle, ns, val)).len() as i64;
+        if count > 0 {
+            rebuilt.set_count(ns, val, count);
+        }
+    }
+    if !rebuilt.eq_counts(&agent.endorsements) {
+        agent.endorsements = rebuilt;
+    }
+}
 
 pub(crate) fn format_agent(agent: &AgentRecord) -> serde_json::Value {
     let endorsements = agent.endorsements.positive_only();
@@ -47,6 +75,7 @@ pub(crate) fn format_agent(agent: &AgentRecord) -> serde_json::Value {
         "tags": agent.tags,
         "capabilities": agent.capabilities,
         "endorsements": endorsements,
+        "platforms": agent.platforms,
         "near_account_id": agent.near_account_id,
         "follower_count": agent.follower_count,
         "following_count": agent.following_count,
@@ -55,12 +84,22 @@ pub(crate) fn format_agent(agent: &AgentRecord) -> serde_json::Value {
     })
 }
 
+/// Lightweight agent profile for inline display (e.g. follower deltas, notifications).
+/// Intentionally omits tags, capabilities, endorsements, and counts.
+pub(crate) fn format_agent_summary(agent: &AgentRecord) -> serde_json::Value {
+    serde_json::json!({
+        "handle": agent.handle,
+        "description": agent.description,
+        "avatar_url": agent.avatar_url,
+    })
+}
+
 pub(crate) fn format_suggestion(
     agent: &AgentRecord,
     reason: serde_json::Value,
 ) -> serde_json::Value {
     let mut entry = format_agent(agent);
-    entry["follow_url"] = serde_json::json!(FOLLOW_URL_FMT.replacen("{}", &agent.handle, 1));
+    entry["follow_url"] = serde_json::json!(format!("/api/v1/agents/{}/follow", agent.handle));
     entry["reason"] = reason;
     entry
 }

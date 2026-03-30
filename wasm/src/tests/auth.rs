@@ -16,7 +16,7 @@ fn integration_nonce_replay_rejected() {
     unsafe { std::env::remove_var("NEAR_SENDER_ID") };
 
     let (auth, now_ms) = nep413::tests::make_auth_for_test();
-    let block_ts_ns = (now_ms / 1000) * 1_000_000_000;
+    let block_ts_ns = (now_ms / 1000) * NANOS_PER_SEC;
     unsafe { std::env::set_var("NEAR_BLOCK_TIMESTAMP", block_ts_ns.to_string()) };
 
     let result1 = crate_auth::get_caller_from(&Request {
@@ -56,7 +56,7 @@ fn integration_server_paid_verifiable_claim_falls_through_to_nep413() {
     unsafe { std::env::set_var("NEAR_SENDER_ID", "server.near") };
 
     let (auth, now_ms) = nep413::tests::make_auth_for_test(); // signs as alice.near
-    let block_ts_ns = (now_ms / 1000) * 1_000_000_000;
+    let block_ts_ns = (now_ms / 1000) * NANOS_PER_SEC;
     unsafe { std::env::set_var("NEAR_BLOCK_TIMESTAMP", block_ts_ns.to_string()) };
 
     let result = crate_auth::get_caller_from(&Request {
@@ -87,7 +87,7 @@ fn integration_server_paid_invalid_signature_rejected() {
     unsafe { std::env::set_var("NEAR_SENDER_ID", "server.near") };
 
     let (mut auth, now_ms) = nep413::tests::make_auth_for_test();
-    let block_ts_ns = (now_ms / 1000) * 1_000_000_000;
+    let block_ts_ns = (now_ms / 1000) * NANOS_PER_SEC;
     unsafe { std::env::set_var("NEAR_BLOCK_TIMESTAMP", block_ts_ns.to_string()) };
 
     // Corrupt the signature
@@ -186,7 +186,7 @@ fn integration_colon_signer_with_claim_falls_through() {
     unsafe { std::env::set_var("NEAR_SENDER_ID", "owner.near:1:secret") };
 
     let (auth, now_ms) = nep413::tests::make_auth_for_test(); // signs as alice.near
-    let block_ts_ns = (now_ms / 1000) * 1_000_000_000;
+    let block_ts_ns = (now_ms / 1000) * NANOS_PER_SEC;
     unsafe { std::env::set_var("NEAR_BLOCK_TIMESTAMP", block_ts_ns.to_string()) };
 
     let result = crate_auth::get_caller_from(&Request {

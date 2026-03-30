@@ -27,9 +27,10 @@ fn transaction_rollback_partial_when_rollback_write_fails() {
         Some("ROLLBACK_PARTIAL"),
         "should signal ROLLBACK_PARTIAL when rollback write also fails"
     );
-    assert!(
-        resp.error.as_ref().unwrap().contains("rollback failed"),
-        "error message should mention rollback failure"
+    assert_eq!(
+        resp.error.as_deref(),
+        Some("Storage operation failed"),
+        "error message should be generic (details logged to stderr)"
     );
 }
 
@@ -54,10 +55,10 @@ fn transaction_clean_rollback_on_step_failure() {
 
     let resp = result.expect("step 2 should fail");
     assert!(!resp.success);
-    assert!(
-        resp.code.is_none(),
-        "clean rollback should not produce an error code, got: {:?}",
-        resp.code
+    assert_eq!(
+        resp.code.as_deref(),
+        Some("STORAGE_ERROR"),
+        "clean rollback should produce STORAGE_ERROR (not ROLLBACK_PARTIAL)"
     );
 
     assert_eq!(
@@ -85,5 +86,9 @@ fn transaction_rollback_response_partial() {
 
     assert!(!resp.success);
     assert_eq!(resp.code.as_deref(), Some("ROLLBACK_PARTIAL"));
-    assert!(resp.error.as_ref().unwrap().contains("manual abort"));
+    assert_eq!(
+        resp.error.as_deref(),
+        Some("Storage operation failed"),
+        "error message should be generic (details logged to stderr)"
+    );
 }

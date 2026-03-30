@@ -5,6 +5,7 @@ use crate::Nep413Auth;
 use ed25519_dalek::{Signature, VerifyingKey};
 use sha2::{Digest, Sha256};
 
+/// NEP-413 Borsh discriminant tag (2³¹ + 413).
 const NEP413_TAG: u32 = 2_147_484_061;
 const RECIPIENT: &str = "nearly.social";
 pub(crate) const TIMESTAMP_WINDOW_MS: u64 = 5 * 60 * 1000;
@@ -48,7 +49,7 @@ pub fn verify_public_key_ownership(account_id: &str, _public_key: &str) -> Resul
 /// 2. **NEAR implicit** (on-chain): account_id = hex(sha256(pubkey))
 ///
 /// Both are 64 hex chars. If either matches, no on-chain lookup is needed.
-#[allow(dead_code)] // only called from #[cfg(not(test))] verify_public_key_ownership
+#[allow(dead_code)] // Called from #[cfg(not(test))] verify_public_key_ownership + tested directly
 fn is_implicit_owner(account_id: &str, public_key: &str) -> Result<bool, AppError> {
     if account_id.len() != 64 || !account_id.chars().all(|c| c.is_ascii_hexdigit()) {
         return Ok(false);
@@ -197,7 +198,22 @@ pub(crate) mod tests {
         (auth, now_ms)
     }
 
+    /// Build a signed NEP-413 claim for an arbitrary account and action.
+    pub fn make_auth(account_id: &str, action: &str, now_ms: u64) -> Nep413Auth {
+        let (auth, _) = sign_auth_with_action(account_id, "nearly.social", action, now_ms);
+        auth
+    }
+
     fn sign_auth(account_id: &str, domain: &str, now_ms: u64) -> (Nep413Auth, SigningKey) {
+        sign_auth_with_action(account_id, domain, "register", now_ms)
+    }
+
+    fn sign_auth_with_action(
+        account_id: &str,
+        domain: &str,
+        action: &str,
+        now_ms: u64,
+    ) -> (Nep413Auth, SigningKey) {
         let secret_bytes: [u8; 32] = [
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
             25, 26, 27, 28, 29, 30, 31, 32,
@@ -211,7 +227,7 @@ pub(crate) mod tests {
         );
 
         let message = serde_json::json!({
-            "action": "register",
+            "action": action,
             "domain": domain,
             "account_id": account_id,
             "version": 1,
@@ -219,10 +235,14 @@ pub(crate) mod tests {
         })
         .to_string();
 
-        let nonce_bytes: [u8; 32] = [
-            42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63,
-            64, 65, 66, 67, 68, 69, 70, 71, 72, 73,
-        ];
+        // Derive a deterministic but unique nonce from the action + account so
+        // that different calls within the same test don't collide.
+        let mut nonce_bytes = [0u8; 32];
+        for (i, b) in action.bytes().chain(account_id.bytes()).enumerate() {
+            nonce_bytes[i % 32] ^= b;
+        }
+        // Ensure non-zero first byte for GC sampling predictability in tests.
+        nonce_bytes[0] |= 42;
         let nonce_b64 =
             base64::Engine::encode(&base64::engine::general_purpose::STANDARD, nonce_bytes);
 
@@ -356,6 +376,51 @@ pub(crate) mod tests {
         assert!(err.contains("action"), "expected action error, got: {err}");
     }
 
+    #[test]
+    fn nonce_wrong_length_rejected() {
+        let now_ms = 1_700_000_000_000u64;
+        let (mut auth, _) = sign_auth("alice.near", "nearly.social", now_ms);
+        // 31 bytes — valid base64 but wrong length
+        auth.nonce = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [1u8; 31]);
+        let err = verify_auth(&auth, now_ms, "register")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("32 bytes"),
+            "expected nonce length error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn public_key_wrong_length_rejected() {
+        let now_ms = 1_700_000_000_000u64;
+        let (mut auth, _) = sign_auth("alice.near", "nearly.social", now_ms);
+        // 16 bytes — valid base58 but wrong length for ed25519
+        auth.public_key = format!("ed25519:{}", bs58::encode([0u8; 16]).into_string());
+        let err = verify_auth(&auth, now_ms, "register")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("public key length"),
+            "expected public key length error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn signature_wrong_length_rejected() {
+        let now_ms = 1_700_000_000_000u64;
+        let (mut auth, _) = sign_auth("alice.near", "nearly.social", now_ms);
+        // 32 bytes — valid base58 but wrong length for ed25519 signature (needs 64)
+        auth.signature = format!("ed25519:{}", bs58::encode([0u8; 32]).into_string());
+        let err = verify_auth(&auth, now_ms, "register")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("signature length"),
+            "expected signature length error, got: {err}"
+        );
+    }
+
     // H3: validate_near_account_id — extracted from verify_public_key_ownership
     #[test]
     fn account_id_rejects_invalid() {
@@ -376,8 +441,8 @@ pub(crate) mod tests {
 
     fn test_pub_key_str() -> (String, Vec<u8>) {
         let secret_bytes: [u8; 32] = [
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
-            24, 25, 26, 27, 28, 29, 30, 31, 32,
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+            25, 26, 27, 28, 29, 30, 31, 32,
         ];
         let signing_key = SigningKey::from_bytes(&secret_bytes);
         let pk_bytes = signing_key.verifying_key().to_bytes();

@@ -1,4 +1,17 @@
 //! Storage abstraction: key-value wrappers, index operations, and storage key definitions.
+//!
+//! # Concurrency model
+//!
+//! All index operations (`index_append`, `index_remove`, `index_insert_sorted`)
+//! are read-modify-write cycles that are **not** atomic at the storage layer.
+//! Correctness depends on OutLayer serialising WASM executions per project so
+//! that no two handler invocations run concurrently against the same key-value
+//! store. If OutLayer ever changes to allow parallel execution, every RMW index
+//! operation becomes vulnerable to TOCTOU races and must be replaced with
+//! compare-and-swap or host-level atomic list primitives.
+//!
+//! The one exception is [`set_if_absent`], which delegates to the host's atomic
+//! set-if-absent and is safe regardless of the execution model.
 
 #[cfg(not(test))]
 use outlayer::storage as backend;
@@ -7,6 +20,8 @@ use serde::Serialize;
 use test_backend as backend;
 
 use crate::types::AppError;
+
+pub(crate) const NANOS_PER_SEC: u64 = 1_000_000_000;
 
 #[cfg(test)]
 pub(crate) mod test_backend {
@@ -177,9 +192,6 @@ pub mod keys {
     pub fn pub_meta_count() -> &'static str {
         "pub:meta:agent_count"
     }
-    pub fn pub_meta_updated() -> &'static str {
-        "pub:meta:last_updated"
-    }
     pub fn pub_tag_counts() -> &'static str {
         "pub:tag_counts"
     }
@@ -234,6 +246,11 @@ pub mod keys {
     }
     pub fn endorsers(target: &str, ns: &str, value: &str) -> String {
         format!("pub:endorsers:{target}:{ns}:{value}")
+    }
+    /// Index of target handles that `from` has endorsed (any ns:val).
+    /// Avoids full registry scan during deregistration.
+    pub fn endorsed_targets(from: &str) -> String {
+        format!("pub:endorsed_targets:{from}")
     }
 }
 
@@ -307,6 +324,12 @@ pub(crate) fn has(key: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Batch existence check: returns a `Vec<bool>` aligned 1:1 with the input keys.
+/// Sequential today; a future parallel storage backend would make this a single round-trip.
+pub(crate) fn has_batch(keys: &[String]) -> Vec<bool> {
+    keys.iter().map(|k| has(k)).collect()
+}
+
 pub(crate) fn delete(key: &str) -> Result<(), AppError> {
     if key.starts_with("pub:") {
         backend_set_public(key, &[])
@@ -340,6 +363,7 @@ pub(crate) fn index_list(key: &str) -> Vec<String> {
 
 /// Idempotent append: adds `entry` to the end of the index if not already present.
 /// Preserves insertion order (used for followers, following, endorsers, etc.).
+/// Do not mix with `index_insert_sorted` on the same key — they assume different orderings.
 pub(crate) fn index_append(key: &str, entry: &str) -> Result<(), AppError> {
     let mut idx = index_list(key);
     if !idx.iter().any(|e| e == entry) {
@@ -349,18 +373,21 @@ pub(crate) fn index_append(key: &str, entry: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-pub(crate) fn index_remove(key: &str, entry: &str) -> Result<(), AppError> {
+/// Remove `entry` from the index at `key`. Returns the remaining entries
+/// so callers can derive counts without a second read.
+pub(crate) fn index_remove(key: &str, entry: &str) -> Result<Vec<String>, AppError> {
     let mut idx = index_list(key);
     let before = idx.len();
     idx.retain(|e| e != entry);
     if idx.len() != before {
         write_index(key, &idx)?;
     }
-    Ok(())
+    Ok(idx)
 }
 
 /// Idempotent insert: adds `entry` at its sorted position via binary search.
 /// Maintains alphabetical order (used for sorted registry indices).
+/// Do not mix with `index_append` on the same key — they assume different orderings.
 pub(crate) fn index_insert_sorted(key: &str, entry: &str) -> Result<(), AppError> {
     let mut idx = index_list(key);
     let pos = idx
@@ -409,7 +436,7 @@ pub(crate) fn now_secs() -> Result<u64, AppError> {
         .filter(|s| !s.is_empty())
         .and_then(|s| s.parse::<u64>().ok())
     {
-        return Ok(ns / 1_000_000_000);
+        return Ok(ns / NANOS_PER_SEC);
     }
     // HTTPS mode (and tests): use system time.
     // OutLayer runs on wasmtime which provides wasi:clocks/wall-clock to all
@@ -419,7 +446,7 @@ pub(crate) fn now_secs() -> Result<u64, AppError> {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
-        .map_err(|e| AppError::Clock(e.to_string()))
+        .map_err(|_| AppError::Clock)
 }
 
 pub(crate) fn edge_timestamp(val: &str) -> Option<u64> {
@@ -431,7 +458,7 @@ pub(crate) fn edge_timestamp(val: &str) -> Option<u64> {
         .and_then(|v| v.get("ts")?.as_u64())
 }
 
-fn rate_count(action: &str, caller: &str, window_secs: u64) -> Result<(u64, u32), AppError> {
+fn rate_count(action: &str, caller: &str, window_secs: u64) -> Result<(u64, u64, u32), AppError> {
     debug_assert!(window_secs > 0, "rate window must be nonzero");
     let now = now_secs()?;
     let window = now / window_secs;
@@ -446,7 +473,7 @@ fn rate_count(action: &str, caller: &str, window_secs: u64) -> Result<(u64, u32)
             }
         })
         .unwrap_or(0);
-    Ok((window, count))
+    Ok((now, window, count))
 }
 
 pub(crate) fn check_rate_limit(
@@ -455,22 +482,33 @@ pub(crate) fn check_rate_limit(
     limit: u32,
     window_secs: u64,
 ) -> Result<(), AppError> {
-    let (_window, count) = rate_count(action, caller, window_secs)?;
+    let (now, window, count) = rate_count(action, caller, window_secs)?;
     if count >= limit {
-        return Err(AppError::RateLimit(format!(
-            "Rate limit exceeded: {limit} {action} requests per {window_secs}s"
-        )));
+        let retry_after = (window + 1) * window_secs - now;
+        return Err(AppError::RateLimit(
+            format!("Rate limit exceeded: {limit} {action} requests per {window_secs}s"),
+            retry_after,
+        ));
     }
     Ok(())
 }
 
 pub(crate) fn increment_rate_limit(action: &str, caller: &str, window_secs: u64) {
-    if let Ok((window, count)) = rate_count(action, caller, window_secs) {
+    if let Ok((_now, window, count)) = rate_count(action, caller, window_secs) {
         let _ = set_string(
             &keys::rate(action, caller),
-            &format!("{window}:{}", count + 1),
+            &format!("{window}:{}", count.saturating_add(1)),
         );
     }
+}
+
+/// Delete every entry in an index and then delete the index itself.
+/// Best-effort: individual delete failures are silently ignored.
+pub(crate) fn purge_index(index_key: &str) {
+    for key in index_list(index_key) {
+        let _ = delete(&key);
+    }
+    let _ = delete(index_key);
 }
 
 pub(crate) fn prune_index_with(

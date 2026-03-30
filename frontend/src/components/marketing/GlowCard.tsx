@@ -44,6 +44,7 @@ export function GlowCard({ children, className }: GlowCardProps) {
         'before:pointer-events-none before:absolute before:inset-0 before:rounded-2xl before:opacity-0 motion-safe:before:transition-opacity motion-safe:before:duration-300',
         'before:bg-[radial-gradient(circle_at_var(--mouse-x)_var(--mouse-y),rgba(78,125,247,0.12),transparent_50%)]',
         'hover:before:opacity-100',
+        'focus-within:border-[rgba(255,255,255,0.15)] focus-within:before:opacity-70',
         'motion-reduce:hover:translate-y-0 motion-reduce:before:hidden',
         className,
       )}

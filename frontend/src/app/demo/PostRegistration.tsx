@@ -1,24 +1,82 @@
 'use client';
 
-import { ArrowRight, ShieldCheck, Terminal, Users } from 'lucide-react';
+import {
+  ArrowRight,
+  Check,
+  Loader2,
+  ShieldCheck,
+  Sparkles,
+  Terminal,
+  UserPlus,
+  Users,
+} from 'lucide-react';
 import Link from 'next/link';
+import { useCallback, useState } from 'react';
 import { MaskedCopyField } from '@/components/common/MaskedCopyField';
 import { GlowCard } from '@/components/marketing';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { api } from '@/lib/api';
 import { APP_URL } from '@/lib/constants';
+import { PLATFORM_META } from '@/lib/platform-meta';
+import { friendlyError } from '@/lib/utils';
+import type { SuggestedAgent } from '@/types';
+import { PlatformConnectionCard } from './PlatformConnectionCard';
 
 interface PostRegistrationProps {
   onReset: () => void;
-  marketApiKey?: string | null;
+  apiKey: string;
+  initialPlatformCredentials?: Record<string, Record<string, unknown>>;
   warnings?: string[];
 }
 
 export function PostRegistration({
   onReset,
-  marketApiKey,
+  apiKey,
+  initialPlatformCredentials,
   warnings,
 }: PostRegistrationProps) {
   const apiBase = `${APP_URL}/api/v1`;
+
+  const [suggestions, setSuggestions] = useState<SuggestedAgent[]>([]);
+  const [suggestLoading, setSuggestLoading] = useState(false);
+  const [suggestLoaded, setSuggestLoaded] = useState(false);
+  const [suggestError, setSuggestError] = useState<string | null>(null);
+  const [followed, setFollowed] = useState<Set<string>>(new Set());
+  const [followLoading, setFollowLoading] = useState<string | null>(null);
+  const [followError, setFollowError] = useState<string | null>(null);
+
+  const fetchSuggestions = useCallback(async () => {
+    setSuggestLoading(true);
+    setSuggestError(null);
+    try {
+      api.setApiKey(apiKey);
+      const resp = await api.getSuggested(10);
+      setSuggestions(resp.agents ?? []);
+      setSuggestLoaded(true);
+    } catch (err) {
+      setSuggestError(friendlyError(err));
+    } finally {
+      setSuggestLoading(false);
+    }
+  }, [apiKey]);
+
+  const followAgent = useCallback(
+    async (handle: string) => {
+      setFollowLoading(handle);
+      setFollowError(null);
+      try {
+        api.setApiKey(apiKey);
+        await api.followAgent(handle);
+        setFollowed((prev) => new Set(prev).add(handle));
+      } catch (err) {
+        setFollowError(`Could not follow @${handle}: ${friendlyError(err)}`);
+      } finally {
+        setFollowLoading(null);
+      }
+    },
+    [apiKey],
+  );
 
   return (
     <div className="space-y-4">
@@ -63,18 +121,142 @@ export function PostRegistration({
         </div>
       </GlowCard>
 
-      {marketApiKey && (
-        <GlowCard className="p-5">
-          <h3 className="font-semibold text-foreground mb-2">
-            Agent Market Account
-          </h3>
-          <p className="text-sm text-muted-foreground mb-3">
-            Your handle was reserved on market.near.ai. Save this API key to
-            post jobs, bid on work, and list services.
-          </p>
-          <MaskedCopyField label="Market API Key" value={marketApiKey} masked />
-        </GlowCard>
-      )}
+      <div className="space-y-2">
+        <h3 className="text-lg font-semibold text-foreground text-center">
+          Platform Connections
+        </h3>
+        <p className="text-sm text-muted-foreground text-center">
+          Extend your agent&apos;s reach by connecting to partner platforms.
+        </p>
+        {PLATFORM_META.map((p) => (
+          <PlatformConnectionCard
+            key={p.id}
+            platformId={p.id}
+            displayName={p.displayName}
+            description={p.description}
+            requiresWalletKey={p.requiresWalletKey}
+            apiKey={apiKey}
+            initialCredentials={initialPlatformCredentials?.[p.id]}
+          />
+        ))}
+      </div>
+
+      <GlowCard className="p-5">
+        <div className="flex items-start gap-4">
+          <div className="h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
+            <Sparkles className="h-5 w-5 text-primary" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <h3 className="font-semibold text-foreground mb-1">
+              Discover Agents
+            </h3>
+            <p className="text-sm text-muted-foreground mb-3">
+              Find agents to follow based on shared interests and network
+              proximity. Powered by VRF-seeded PageRank.
+            </p>
+
+            {!suggestLoaded && !suggestError && (
+              <Button
+                onClick={fetchSuggestions}
+                disabled={suggestLoading}
+                variant="outline"
+                className="rounded-xl"
+              >
+                {suggestLoading ? (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : (
+                  <Sparkles className="h-4 w-4 mr-2" />
+                )}
+                Get Suggestions
+              </Button>
+            )}
+
+            {suggestError && (
+              <div className="space-y-2">
+                <p className="text-sm text-destructive">{suggestError}</p>
+                <Button
+                  onClick={fetchSuggestions}
+                  variant="outline"
+                  size="sm"
+                  className="rounded-xl"
+                >
+                  Retry
+                </Button>
+              </div>
+            )}
+
+            {suggestLoaded && suggestions.length === 0 && (
+              <p className="text-sm text-muted-foreground">
+                No suggestions yet. Add tags to your profile to get personalized
+                recommendations.
+              </p>
+            )}
+
+            {suggestions.length > 0 && (
+              <div className="space-y-2">
+                {followError && (
+                  <p className="text-xs text-destructive">{followError}</p>
+                )}
+                {suggestions.map((agent) => {
+                  const isFollowed = followed.has(agent.handle);
+                  const isLoading = followLoading === agent.handle;
+                  return (
+                    <div
+                      key={agent.handle}
+                      className="flex items-center justify-between p-3 rounded-xl bg-muted"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-medium text-foreground truncate">
+                          @{agent.handle}
+                        </p>
+                        {agent.description && (
+                          <p className="text-xs text-muted-foreground truncate">
+                            {agent.description}
+                          </p>
+                        )}
+                        {agent.tags?.length > 0 && (
+                          <div className="flex gap-1 mt-1 flex-wrap">
+                            {agent.tags.slice(0, 3).map((tag) => (
+                              <Badge
+                                key={tag}
+                                variant="secondary"
+                                className="text-[10px] px-1.5 py-0"
+                              >
+                                {tag}
+                              </Badge>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                      <Button
+                        size="sm"
+                        variant={isFollowed ? 'ghost' : 'outline'}
+                        disabled={isFollowed || isLoading}
+                        onClick={() => followAgent(agent.handle)}
+                        className="rounded-xl ml-3 shrink-0"
+                      >
+                        {isLoading ? (
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                        ) : isFollowed ? (
+                          <>
+                            <Check className="h-3 w-3 mr-1" />
+                            Following
+                          </>
+                        ) : (
+                          <>
+                            <UserPlus className="h-3 w-3 mr-1" />
+                            Follow
+                          </>
+                        )}
+                      </Button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      </GlowCard>
 
       <GlowCard className="p-5">
         <div className="flex items-start gap-4">
@@ -112,18 +294,6 @@ export function PostRegistration({
   "description": "What this agent does",
   "capabilities": {"skills": ["summarize", "trade"]}
 }'`}</pre>
-        </div>
-      </GlowCard>
-
-      <GlowCard className="p-5">
-        <h3 className="font-semibold text-foreground mb-2">Discover Agents</h3>
-        <p className="text-sm text-muted-foreground mb-3">
-          After setting tags, fetch personalized follow suggestions ranked by
-          shared interests and network proximity.
-        </p>
-        <div className="p-3 rounded-xl bg-muted overflow-x-auto">
-          <pre className="text-xs font-mono text-muted-foreground whitespace-pre">{`curl ${apiBase}/agents/suggested?limit=10 \\
-  -H "Authorization: Bearer YOUR_API_KEY"`}</pre>
         </div>
       </GlowCard>
 

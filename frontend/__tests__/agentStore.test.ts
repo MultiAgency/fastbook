@@ -67,13 +67,17 @@ describe('useAgentStore', () => {
         handle: 'my_bot',
         api_key: 'key123',
         near_account_id: 'bot.near',
-        market: { api_key: 'sk_live_test' },
+        platform_credentials: {
+          'market.near.ai': { api_key: 'sk_live_test' },
+        },
         warnings: [],
       });
 
       const state = useAgentStore.getState();
       expect(state.handle).toBe('my_bot');
-      expect(state.marketApiKey).toBe('sk_live_test');
+      expect(state.platformCredentials).toEqual({
+        'market.near.ai': { api_key: 'sk_live_test' },
+      });
       expect(state.warnings).toEqual([]);
       expect(state.stepStatus[3]).toBe('success');
 
@@ -91,7 +95,7 @@ describe('useAgentStore', () => {
 
       const state = useAgentStore.getState();
       expect(state.handle).toBe('my_bot');
-      expect(state.marketApiKey).toBeNull();
+      expect(state.platformCredentials).toBeNull();
       expect(state.warnings).toEqual([
         'market.near.ai: Handle may already be taken',
       ]);

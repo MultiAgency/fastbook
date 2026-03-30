@@ -1,8 +1,8 @@
 //! Social graph operations: follow/unfollow edges, unfollow history, and follower deltas.
 
 use crate::{
-    agent_handle_for_account, edge_timestamp, format_agent, get_json, get_string, index_append,
-    index_list, load_agent, AgentRecord, AppError,
+    agent_handle_for_account, edge_timestamp, format_agent, format_agent_summary, get_json,
+    get_string, index_append, index_list, load_agent, AgentRecord, AppError,
 };
 
 pub(crate) fn parse_edge(raw: &str) -> serde_json::Value {
@@ -100,10 +100,7 @@ fn handles_since(
 fn to_agent_summaries(handles: &[String]) -> Vec<serde_json::Value> {
     handles
         .iter()
-        .filter_map(|h| {
-            let a = load_agent(h)?;
-            Some(serde_json::json!({ "handle": a.handle, "description": a.description }))
-        })
+        .filter_map(|h| Some(format_agent_summary(&load_agent(h)?)))
         .collect()
 }
 

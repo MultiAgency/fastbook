@@ -24,8 +24,11 @@ export async function httpErrorText(response: Response): Promise<string> {
   try {
     const text = await response.text();
     try {
-      const json = JSON.parse(text) as { error?: string };
-      if (typeof json.error === 'string') return json.error;
+      const json: unknown = JSON.parse(text);
+      if (typeof json === 'object' && json !== null && 'error' in json) {
+        const err = (json as Record<string, unknown>).error;
+        if (typeof err === 'string') return err;
+      }
     } catch {}
     return text;
   } catch {

@@ -14,6 +14,9 @@ use crate::{
     require_target_handle, require_timestamp,
 };
 
+/// Follow vs unfollow selector.  Each method encodes the symmetric difference
+/// between the two operations (edge write vs delete, count +1 vs −1, etc.),
+/// keeping the shared mutation logic in `apply_social_mutation` / `execute_social_op`.
 #[derive(Clone, Copy)]
 enum SocialOp {
     Follow,
@@ -53,10 +56,10 @@ impl SocialOp {
     }
     fn edge_bytes(&self, req: &Request, ts: u64) -> Result<Vec<u8>, String> {
         match self {
-            Self::Follow => serde_json::to_vec(
-                &serde_json::json!({ "ts": ts, "reason": req.reason }),
-            )
-            .map_err(|e| format!("Failed to serialize edge: {e}")),
+            Self::Follow => {
+                serde_json::to_vec(&serde_json::json!({ "ts": ts, "reason": req.reason }))
+                    .map_err(|e| format!("Failed to serialize edge: {e}"))
+            }
             Self::Unfollow => Ok(vec![]),
         }
     }
@@ -75,7 +78,10 @@ fn apply_social_mutation(
 ) -> Option<Response> {
     let edge_bytes = match op.edge_bytes(req, ts) {
         Ok(b) => b,
-        Err(e) => return Some(err_response(&e)),
+        Err(e) => {
+            eprintln!("[storage error] {e}");
+            return Some(err_coded("INTERNAL_ERROR", "Storage operation failed"));
+        }
     };
 
     let mut txn = Transaction::new();
@@ -167,7 +173,10 @@ fn build_social_response(ctx: &SocialResponseCtx<'_>) -> Response {
                         append_unfollow_index_by_account(ctx.caller, &unfollow_key),
                     );
                 }
-                Err(e) => warnings.push(format!("unfollow audit record: {e}")),
+                Err(e) => {
+                    eprintln!("[warning] unfollow audit record: {e}");
+                    warnings.push("unfollow audit record: failed".into());
+                }
             }
             warnings.on_err(
                 "notification",
@@ -220,6 +229,24 @@ fn build_social_response(ctx: &SocialResponseCtx<'_>) -> Response {
     ok_response(resp)
 }
 
+fn idempotent_social_response(
+    action: &str,
+    caller_handle: &str,
+    target: Option<&AgentRecord>,
+) -> Response {
+    let (my_following, my_followers) = load_agent(caller_handle)
+        .map(|a| (a.following_count, a.follower_count))
+        .unwrap_or((0, 0));
+    let mut json = serde_json::json!({
+        "action": action,
+        "your_network": { "following_count": my_following, "follower_count": my_followers },
+    });
+    if let Some(t) = target {
+        json["followed"] = serde_json::json!(format_agent(t));
+    }
+    ok_response(json)
+}
+
 fn execute_social_op(req: &Request, op: SocialOp) -> Response {
     // --- Validate ---
     let (caller, caller_handle) = require_auth!(req);
@@ -245,10 +272,10 @@ fn execute_social_op(req: &Request, op: SocialOp) -> Response {
     let edge_key = keys::pub_edge(&caller_handle, &target_handle);
     match op {
         SocialOp::Follow if has(&edge_key) => {
-            return ok_response(serde_json::json!({ "action": "already_following" }))
+            return idempotent_social_response("already_following", &caller_handle, Some(&target));
         }
         SocialOp::Unfollow if !has(&edge_key) => {
-            return ok_response(serde_json::json!({ "action": "not_following" }))
+            return idempotent_social_response("not_following", &caller_handle, None);
         }
         _ => {}
     }

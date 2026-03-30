@@ -142,6 +142,7 @@ fn format_agent_field_names_match_frontend_contract() {
         "tags",
         "capabilities",
         "endorsements",
+        "platforms",
         "near_account_id",
         "follower_count",
         "following_count",
@@ -248,6 +249,47 @@ fn integration_register_rollback_cleans_registry() {
     );
 }
 
+/// Registration rollback when step 2 (account mapping) fails after step 1 (save_agent) succeeded.
+/// Step 1 performs 5 writes: 1 agent record + 4 sorted index inserts.
+/// fail_after_writes(Some(5), 1) lets those succeed, then fails the account mapping write.
+/// The rollback should cleanly undo the agent record and sorted indices.
+#[test]
+#[serial]
+fn integration_register_rollback_after_agent_saved() {
+    setup_integration("rb2.near");
+
+    // Let step 1 (5 writes) succeed, then fail step 2 (account mapping)
+    store::test_backend::fail_after_writes(Some(5), 1);
+
+    let req = RequestBuilder::new(Action::Register)
+        .handle("rb2_agent")
+        .build();
+    let resp = handle_register(&req);
+
+    assert!(!resp.success, "registration should fail");
+    assert_ne!(
+        resp.code.as_deref(),
+        Some("ROLLBACK_PARTIAL"),
+        "rollback should succeed cleanly (not partial)"
+    );
+
+    store::test_backend::fail_after_writes(None, 0);
+
+    // All step 1 writes should be rolled back
+    assert!(
+        load_agent("rb2_agent").is_none(),
+        "agent record should be cleaned up by rollback"
+    );
+    assert!(
+        agent_handle_for_account("rb2.near").is_none(),
+        "account mapping should not exist"
+    );
+    assert!(
+        !index_list(keys::pub_agents()).contains(&"rb2_agent".to_string()),
+        "registry should not contain the handle"
+    );
+}
+
 /// M4: update_me rejects capabilities containing zero-width characters.
 #[test]
 #[serial]
@@ -273,4 +315,103 @@ fn integration_update_me_rejects_invalid_capabilities() {
         "error should mention disallowed unicode, got: {:?}",
         resp.error
     );
+}
+
+#[test]
+#[serial]
+fn integration_update_me_ignores_platforms() {
+    setup_integration("plat.near");
+    quick_register("plat.near", "plat_agent");
+
+    // update_me with only platforms should fail — platforms is no longer a valid field
+    let req = RequestBuilder::new(Action::UpdateMe)
+        .platforms(vec!["market.near.ai".into()])
+        .build();
+    let resp = handle_update_me(&req);
+    assert!(
+        !resp.success,
+        "update_me should reject platforms-only update"
+    );
+    assert_eq!(resp.code.as_deref(), Some("VALIDATION_ERROR"));
+}
+
+#[test]
+#[serial]
+fn integration_set_platforms_requires_admin() {
+    setup_integration("plat2.near");
+    quick_register("plat2.near", "plat_nonadmin");
+
+    let req = RequestBuilder::new(Action::SetPlatforms)
+        .handle("plat_nonadmin")
+        .platforms(vec!["market.near.ai".into()])
+        .build();
+    let resp = handle_set_platforms(&req);
+    assert!(!resp.success);
+    assert_eq!(resp.code.as_deref(), Some("AUTH_FAILED"));
+}
+
+#[test]
+#[serial]
+fn integration_set_platforms_admin_succeeds() {
+    setup_integration("plat3.near");
+    quick_register("plat3.near", "plat_admin");
+    unsafe { std::env::set_var("OUTLAYER_ADMIN_ACCOUNT", "plat3.near") };
+
+    let req = RequestBuilder::new(Action::SetPlatforms)
+        .handle("plat_admin")
+        .platforms(vec!["market.near.ai".into(), "near.fm".into()])
+        .build();
+    let resp = handle_set_platforms(&req);
+    assert!(
+        resp.success,
+        "set_platforms should succeed: {:?}",
+        resp.error
+    );
+
+    let data = parse_response(&resp);
+    let platforms = data["agent"]["platforms"]
+        .as_array()
+        .expect("platforms should be array");
+    assert_eq!(platforms.len(), 2);
+    assert_eq!(platforms[0], "market.near.ai");
+    assert_eq!(platforms[1], "near.fm");
+
+    unsafe { std::env::remove_var("OUTLAYER_ADMIN_ACCOUNT") };
+}
+
+#[test]
+#[serial]
+fn integration_set_platforms_rejects_empty_id() {
+    setup_integration("plat4.near");
+    quick_register("plat4.near", "plat_empty");
+    unsafe { std::env::set_var("OUTLAYER_ADMIN_ACCOUNT", "plat4.near") };
+
+    let req = RequestBuilder::new(Action::SetPlatforms)
+        .handle("plat_empty")
+        .platforms(vec!["".into()])
+        .build();
+    let resp = handle_set_platforms(&req);
+    assert!(!resp.success);
+    assert_eq!(resp.code.as_deref(), Some("VALIDATION_ERROR"));
+
+    unsafe { std::env::remove_var("OUTLAYER_ADMIN_ACCOUNT") };
+}
+
+#[test]
+#[serial]
+fn integration_set_platforms_rejects_too_many() {
+    setup_integration("plat5.near");
+    quick_register("plat5.near", "plat_many");
+    unsafe { std::env::set_var("OUTLAYER_ADMIN_ACCOUNT", "plat5.near") };
+
+    let many: Vec<String> = (0..11).map(|i| format!("platform{i}.near")).collect();
+    let req = RequestBuilder::new(Action::SetPlatforms)
+        .handle("plat_many")
+        .platforms(many)
+        .build();
+    let resp = handle_set_platforms(&req);
+    assert!(!resp.success);
+    assert_eq!(resp.code.as_deref(), Some("VALIDATION_ERROR"));
+
+    unsafe { std::env::remove_var("OUTLAYER_ADMIN_ACCOUNT") };
 }

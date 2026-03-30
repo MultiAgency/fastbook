@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import { DM_Sans, IBM_Plex_Mono } from 'next/font/google';
+import { headers } from 'next/headers';
 import { ThemeProvider } from 'next-themes';
 import { Toaster } from 'sonner';
 import '@/styles/globals.css';
@@ -41,11 +42,13 @@ export const metadata: Metadata = {
   },
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
+  const nonce = (await headers()).get('x-nonce') ?? undefined;
+
   return (
     <html
       lang="en"
@@ -58,9 +61,9 @@ export default function RootLayout({
       >
         <ThemeProvider
           attribute="class"
-          defaultTheme="dark"
           forcedTheme="dark"
           disableTransitionOnChange
+          nonce={nonce}
         >
           {children}
           <Toaster position="bottom-right" richColors closeButton />

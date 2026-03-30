@@ -11,10 +11,9 @@ fn storage_scope_pub_keys_are_public_private_keys_are_private() {
     store::test_backend::assert_scope(keys::pub_agents(), true);
     store::test_backend::assert_scope(&keys::near_account("scope.near"), true);
     store::test_backend::assert_scope(keys::pub_meta_count(), true);
-    store::test_backend::assert_scope(keys::pub_meta_updated(), true);
     store::test_backend::assert_scope(&keys::pub_sorted("followers"), true);
     store::test_backend::assert_scope(&keys::pub_sorted("endorsements"), true);
-    store::test_backend::assert_scope(&keys::pub_sorted("created"), true);
+    store::test_backend::assert_scope(&keys::pub_sorted("newest"), true);
     store::test_backend::assert_scope(&keys::pub_sorted("active"), true);
 
     // Follow to generate private keys.
@@ -130,4 +129,42 @@ fn prune_index_noop_when_nothing_expired() {
 
     let remaining: Vec<String> = get_json(index_key).unwrap_or_default();
     assert_eq!(remaining.len(), 2);
+}
+
+/// Storage errors must never leak backend details to clients.
+/// The internal message should be logged (eprintln) but the response
+/// must contain only the generic "Storage operation failed" text.
+#[test]
+#[serial]
+fn storage_errors_never_leak_internal_details() {
+    setup_integration("leak.near");
+    quick_register("leak.near", "leaktest");
+
+    // Register a second agent to follow.
+    quick_register("target.near", "leaktarget");
+
+    // Now break storage and attempt follow.
+    set_signer("leak.near");
+    store::test_backend::fail_next_writes(100);
+    let resp = handle_follow(
+        &RequestBuilder::new(Action::Follow)
+            .handle("leaktarget")
+            .build(),
+    );
+    store::test_backend::fail_next_writes(0);
+
+    assert!(!resp.success, "follow should fail under storage failure");
+    let err_msg = resp.error.as_deref().unwrap_or("");
+    assert_eq!(
+        err_msg, "Storage operation failed",
+        "error must be generic, got: {err_msg}"
+    );
+    assert!(
+        !err_msg.contains("set_worker"),
+        "must not leak backend function names"
+    );
+    assert!(
+        !err_msg.contains("simulated"),
+        "must not leak test backend details"
+    );
 }

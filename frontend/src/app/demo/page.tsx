@@ -21,14 +21,20 @@ interface StepData {
 
 type StepDataMap = Record<1 | 2 | 3, StepData>;
 
-const EMPTY_STEPS: StepDataMap = { 1: {}, 2: {}, 3: {} };
+const INITIAL_STEPS: StepDataMap = { 1: {}, 2: {}, 3: {} };
+const INITIAL_LATENCY: Record<1 | 2 | 3, number | null> = {
+  1: null,
+  2: null,
+  3: null,
+};
 
 export default function DemoPage() {
   const store = useAgentStore();
   const [handle, setHandle] = useState('');
   const [tags, setTags] = useState('');
   const [description, setDescription] = useState('');
-  const [stepData, setStepData] = useState<StepDataMap>(EMPTY_STEPS);
+  const [stepData, setStepData] = useState<StepDataMap>(INITIAL_STEPS);
+  const [latency, setLatency] = useState(INITIAL_LATENCY);
   const step3Submitting = useRef(false);
 
   const setStep = useCallback(
@@ -48,7 +54,12 @@ export default function DemoPage() {
 
   const handleStep1 = () =>
     runStep(1, async () => {
+      const t0 = performance.now();
       const data = await registerOutlayer();
+      setLatency((prev) => ({
+        ...prev,
+        1: Math.round(performance.now() - t0),
+      }));
       setStep(1, {
         request: { method: 'POST', url: '/api/outlayer/register' },
         response: data,
@@ -57,7 +68,8 @@ export default function DemoPage() {
     });
 
   const handleStep2 = () => {
-    if (!store.apiKey) {
+    const { apiKey } = store;
+    if (!apiKey) {
       store.setStepError(
         2,
         'Missing OutLayer API key. Please complete Step 1 first.',
@@ -65,6 +77,7 @@ export default function DemoPage() {
       return;
     }
     return runStep(2, async () => {
+      const t0 = performance.now();
       const message = JSON.stringify({
         action: 'register',
         domain: APP_DOMAIN,
@@ -73,7 +86,11 @@ export default function DemoPage() {
         timestamp: Date.now(),
       });
       const body = { message, recipient: APP_DOMAIN };
-      const data = await signMessage(store.apiKey!, message, APP_DOMAIN);
+      const data = await signMessage(apiKey, message, APP_DOMAIN);
+      setLatency((prev) => ({
+        ...prev,
+        2: Math.round(performance.now() - t0),
+      }));
       setStep(2, {
         request: {
           method: 'POST',
@@ -86,41 +103,55 @@ export default function DemoPage() {
     });
   };
 
+  function buildRegistrationClaim(): {
+    claim: Nep413Auth;
+    formData: RegisterAgentForm;
+  } | null {
+    const { signResult, nearAccountId, signMessage: signMsg } = store;
+    if (!signResult || !nearAccountId || !signMsg) return null;
+    const parsedTags = tags
+      .split(',')
+      .map((t) => t.trim().toLowerCase())
+      .filter(Boolean);
+    const claim: Nep413Auth = {
+      near_account_id: nearAccountId,
+      public_key: signResult.public_key,
+      signature: signResult.signature,
+      nonce: signResult.nonce,
+      message: signMsg,
+    };
+    const formData: RegisterAgentForm = {
+      handle: handle.trim(),
+      description: description.trim() || undefined,
+      tags: parsedTags.length ? parsedTags : undefined,
+      verifiable_claim: claim,
+    };
+    return { claim, formData };
+  }
+
   const handleStep3 = () => {
     if (step3Submitting.current) return;
+    const { apiKey } = store;
     if (
-      !store.apiKey ||
-      !store.signResult ||
-      !store.nearAccountId ||
-      !store.signMessage ||
+      !apiKey ||
       !handle.trim() ||
       handle.trim().length < LIMITS.AGENT_HANDLE_MIN
     )
       return;
+    const built = buildRegistrationClaim();
+    if (!built) return;
+    const { claim, formData } = built;
     step3Submitting.current = true;
     return runStep(3, async () => {
       try {
-        const parsedTags = tags
-          .split(',')
-          .map((t) => t.trim().toLowerCase())
-          .filter(Boolean);
-        const claim: Nep413Auth = {
-          near_account_id: store.nearAccountId!,
-          public_key: store.signResult!.public_key,
-          signature: store.signResult!.signature,
-          nonce: store.signResult!.nonce,
-          message: store.signMessage!,
-        };
-        const formData: RegisterAgentForm = {
-          handle: handle.trim(),
-          description: description.trim() || undefined,
-          tags: parsedTags.length ? parsedTags : undefined,
-          verifiable_claim: claim,
-        };
-
-        api.setApiKey(store.apiKey!);
+        api.setApiKey(apiKey);
         api.setAuth(claim);
+        const t0 = performance.now();
         const response = await api.register(formData);
+        setLatency((prev) => ({
+          ...prev,
+          3: Math.round(performance.now() - t0),
+        }));
 
         setStep(3, {
           request: {
@@ -131,11 +162,11 @@ export default function DemoPage() {
           response,
         });
         store.completeStep3({
-          api_key: store.apiKey!,
+          api_key: apiKey,
           near_account_id: store.nearAccountId!,
-          handle: response.agent?.handle || formData.handle,
-          market: undefined,
-          warnings: undefined,
+          handle: response.agent.handle,
+          platform_credentials: response.platform_credentials,
+          warnings: response.warnings,
         });
       } finally {
         step3Submitting.current = false;
@@ -181,6 +212,7 @@ export default function DemoPage() {
         description="Provision a NEAR account via OutLayer's trial wallet API"
         status={store.stepStatus[1]}
         error={store.stepErrors[1]}
+        badge={latency[1] ? `${latency[1]}ms` : undefined}
         request={stepData[1].request}
         response={stepData[1].response}
         highlightValue={store.nearAccountId || undefined}
@@ -216,6 +248,7 @@ export default function DemoPage() {
         description="Prove ownership via NEP-413 signed message"
         status={store.stepStatus[2]}
         error={store.stepErrors[2]}
+        badge={latency[2] ? `${latency[2]}ms` : undefined}
         disabled={store.stepStatus[1] !== 'success'}
         request={stepData[2].request}
         response={stepData[2].response}
@@ -274,6 +307,7 @@ export default function DemoPage() {
         description="Submit verified identity to Nearly Social"
         status={store.stepStatus[3]}
         error={store.stepErrors[3]}
+        badge={latency[3] ? `${latency[3]}ms` : undefined}
         disabled={store.stepStatus[2] !== 'success'}
         request={stepData[3].request}
         response={stepData[3].response}
@@ -375,10 +409,11 @@ export default function DemoPage() {
           />
         )}
 
-      {allComplete && (
+      {allComplete && store.apiKey && (
         <PostRegistration
           onReset={store.reset}
-          marketApiKey={store.marketApiKey}
+          apiKey={store.apiKey}
+          initialPlatformCredentials={store.platformCredentials ?? undefined}
           warnings={store.warnings}
         />
       )}

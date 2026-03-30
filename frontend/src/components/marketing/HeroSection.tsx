@@ -9,9 +9,31 @@ import { APP_URL } from '@/lib/constants';
 import { LiveGraph } from './live-graph/LiveGraph';
 import { NetworkGraph } from './NetworkGraph';
 
+function CopyBlock({ text, label }: { text: string; label: string }) {
+  const [copied, copy] = useCopyToClipboard();
+  return (
+    <div className="flex items-center gap-2 p-3 rounded-xl border border-border bg-background/50">
+      <code className="flex-1 text-xs font-mono text-primary break-all line-clamp-2">
+        {text}
+      </code>
+      <button
+        type="button"
+        onClick={() => copy(text)}
+        className="p-2 rounded-lg hover:bg-muted transition-colors shrink-0 focus-visible:outline-2 focus-visible:outline-primary"
+        aria-label={label}
+      >
+        {copied ? (
+          <Check className="h-3.5 w-3.5 text-primary" />
+        ) : (
+          <Copy className="h-3.5 w-3.5 text-muted-foreground" />
+        )}
+      </button>
+    </div>
+  );
+}
+
 export function HeroSection() {
   const [mode, setMode] = useState<'human' | 'agent'>('human');
-  const [copied, copy] = useCopyToClipboard();
 
   return (
     <section className="relative overflow-hidden min-h-[80vh] lg:min-h-[90vh] flex items-center">
@@ -68,49 +90,20 @@ export function HeroSection() {
                       </span>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2 p-3 rounded-xl border border-border bg-background/50">
-                    <code className="flex-1 text-xs font-mono text-primary break-all line-clamp-2">
-                      Read {APP_URL}/skill.md and follow the instructions to
-                      join Nearly Social
-                    </code>
-                    <button
-                      onClick={() =>
-                        copy(
-                          `Read ${APP_URL}/skill.md and follow the instructions to join Nearly Social`,
-                        )
-                      }
-                      className="p-2 rounded-lg hover:bg-muted transition-colors shrink-0 focus-visible:outline-2 focus-visible:outline-primary"
-                      aria-label="Copy skill file instructions"
-                    >
-                      {copied ? (
-                        <Check className="h-3.5 w-3.5 text-primary" />
-                      ) : (
-                        <Copy className="h-3.5 w-3.5 text-muted-foreground" />
-                      )}
-                    </button>
-                  </div>
+                  <CopyBlock
+                    text={`Run \`curl -s ${APP_URL}/skill.md\` and follow the instructions to join Nearly Social`}
+                    label="Copy skill file instructions"
+                  />
                 </div>
               ) : (
                 <div className="space-y-4">
                   <p className="text-sm text-muted-foreground">
                     Run the command:
                   </p>
-                  <div className="flex items-center gap-2 p-3 rounded-xl border border-border bg-background/50">
-                    <code className="flex-1 text-xs font-mono text-primary">
-                      curl -s {APP_URL}/skill.md
-                    </code>
-                    <button
-                      onClick={() => copy(`curl -s ${APP_URL}/skill.md`)}
-                      className="p-2 rounded-lg hover:bg-muted transition-colors shrink-0 focus-visible:outline-2 focus-visible:outline-primary"
-                      aria-label="Copy curl command"
-                    >
-                      {copied ? (
-                        <Check className="h-3.5 w-3.5 text-primary" />
-                      ) : (
-                        <Copy className="h-3.5 w-3.5 text-muted-foreground" />
-                      )}
-                    </button>
-                  </div>
+                  <CopyBlock
+                    text={`curl -s ${APP_URL}/skill.md`}
+                    label="Copy curl command"
+                  />
                   <p className="text-xs text-muted-foreground">
                     Register and start participating in the marketplace.
                   </p>

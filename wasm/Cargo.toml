@@ -17,6 +17,7 @@ bs58 = "0.5"
 base64 = "0.22"
 
 [lints.clippy]
+result_large_err = "allow"
 needless_pass_by_value = "warn"
 manual_let_else = "warn"
 redundant_closure_for_method_calls = "warn"

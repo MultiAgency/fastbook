@@ -1,4 +1,11 @@
-import { clearCache, getCached, makeCacheKey, setCache } from '@/lib/cache';
+import {
+  clearByAction,
+  clearCache,
+  currentGeneration,
+  getCached,
+  makeCacheKey,
+  setCache,
+} from '@/lib/cache';
 
 beforeEach(() => {
   clearCache();
@@ -21,6 +28,7 @@ describe('getCached', () => {
 
   it('returns undefined and evicts expired entries', () => {
     setCache('list_agents', 'key2', { agents: [] });
+    // DEFAULT_TTL (30_000) + 1_000 to ensure expiry
     jest.advanceTimersByTime(31_000);
     expect(getCached('key2')).toBeUndefined();
   });
@@ -52,6 +60,7 @@ describe('setCache', () => {
   });
 
   it('evicts oldest entry when exceeding 500 entries', () => {
+    // MAX_CACHE_ENTRIES (500) + 1 to trigger eviction
     for (let i = 0; i < 501; i++) {
       setCache('list_agents', `evict_${i}`, { index: i });
     }
@@ -70,6 +79,58 @@ describe('compaction removes expired entries on access', () => {
 
     expect(getCached('comp_1')).toBeUndefined();
     expect(getCached('comp_2')).toEqual({ a: 2 });
+  });
+});
+
+describe('generation counter', () => {
+  it('increments on clearCache', () => {
+    const g0 = currentGeneration();
+    clearCache();
+    expect(currentGeneration()).toBe(g0 + 1);
+    clearCache();
+    expect(currentGeneration()).toBe(g0 + 2);
+  });
+
+  it('setCache skips write when generation is stale', () => {
+    const gen = currentGeneration();
+    clearCache(); // advances generation
+    setCache('list_agents', 'stale_key', { agents: [] }, gen);
+    expect(getCached('stale_key')).toBeUndefined();
+  });
+
+  it('setCache writes when generation matches', () => {
+    const gen = currentGeneration();
+    setCache('list_agents', 'fresh_key', { agents: [] }, gen);
+    expect(getCached('fresh_key')).toEqual({ agents: [] });
+  });
+
+  it('setCache writes when generation is omitted', () => {
+    setCache('list_agents', 'no_gen', { agents: [] });
+    expect(getCached('no_gen')).toEqual({ agents: [] });
+  });
+});
+
+describe('clearByAction', () => {
+  it('removes only entries for the given action', () => {
+    setCache('list_agents', 'agents_1', { a: 1 });
+    setCache('get_profile', 'profile_1', { p: 1 });
+    setCache('list_agents', 'agents_2', { a: 2 });
+
+    clearByAction('list_agents');
+
+    expect(getCached('agents_1')).toBeUndefined();
+    expect(getCached('agents_2')).toBeUndefined();
+    expect(getCached('profile_1')).toEqual({ p: 1 });
+  });
+
+  it('bumps generation so in-flight reads cannot re-cache', () => {
+    const gen = currentGeneration();
+    setCache('list_agents', 'x', { a: 1 });
+    clearByAction('list_agents');
+    expect(currentGeneration()).toBe(gen + 1);
+    // A stale in-flight write with the old generation is rejected
+    setCache('list_agents', 'y', { a: 2 }, gen);
+    expect(getCached('y')).toBeUndefined();
   });
 });
 

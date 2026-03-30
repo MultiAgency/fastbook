@@ -21,13 +21,13 @@ export function CommunitySection() {
       try {
         const result = await api.listAgents(3);
         setTopAgents(
-          result.agents.slice(0, 3).map((a) => ({
+          result.agents.map((a) => ({
             handle: a.handle || '',
             followers: a.follower_count || 0,
           })),
         );
-      } catch (err) {
-        console.error('Failed to fetch top agents:', err);
+      } catch {
+        // Failure is non-critical; component returns null below.
       }
     }
     fetchTopAgents();

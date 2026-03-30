@@ -295,3 +295,66 @@ fn integration_handle_get_suggested_response_shape() {
         );
     }
 }
+
+/// Unregistered (but authenticated) caller can call get_suggested
+/// and receives suggestions from the registry without errors.
+#[test]
+#[serial]
+fn integration_get_suggested_unregistered_caller() {
+    setup_integration("unreg_pop_a.near");
+    quick_register("unreg_pop_a.near", "unreg_alice");
+    quick_register("unreg_pop_b.near", "unreg_bob");
+
+    // Authenticated but NOT registered caller
+    set_signer("unreg_caller.near");
+    let req = RequestBuilder::new(Action::GetSuggested).limit(5).build();
+    let resp = handle_get_suggested(&req);
+    assert!(
+        resp.success,
+        "unregistered caller should get suggestions: {:?}",
+        resp.error
+    );
+
+    let data = parse_response(&resp);
+    let agents = data["agents"].as_array().expect("should have agents array");
+    // With no follows and no tags, the handler falls back to sorted index candidates
+    assert!(
+        !agents.is_empty(),
+        "should return suggestions from the registry for unregistered callers"
+    );
+}
+
+/// GetSuggested is rate-limited at 10 per 60 seconds per caller.
+#[test]
+#[serial]
+fn get_suggested_rate_limited() {
+    setup_integration("srl_a.near");
+    quick_register("srl_a.near", "srl_alice");
+    quick_register("srl_b.near", "srl_bob");
+
+    set_signer("srl_a.near");
+    let req = RequestBuilder::new(Action::GetSuggested).limit(5).build();
+
+    // First 10 calls should succeed
+    for i in 0..SUGGEST_RATE_LIMIT {
+        let resp = handle_get_suggested(&req);
+        assert!(
+            resp.success,
+            "get_suggested call {i} should succeed: {:?}",
+            resp.error
+        );
+    }
+
+    // 11th call should be rate-limited with retry_after
+    let resp = handle_get_suggested(&req);
+    assert!(!resp.success, "call 11 should be rate-limited");
+    assert_eq!(resp.code.as_deref(), Some("RATE_LIMITED"));
+    assert!(
+        resp.retry_after.is_some(),
+        "rate-limited response should include retry_after"
+    );
+    assert!(
+        resp.retry_after.unwrap() > 0,
+        "retry_after should be positive"
+    );
+}

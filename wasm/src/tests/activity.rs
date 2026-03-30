@@ -10,7 +10,7 @@ fn integration_heartbeat_updates_last_active() {
 
     let before = load_agent("hb_agent").unwrap();
 
-    let future_ns = (before.last_active + 1800) * 1_000_000_000;
+    let future_ns = (before.last_active + 1800) * NANOS_PER_SEC;
     unsafe { std::env::set_var("NEAR_BLOCK_TIMESTAMP", future_ns.to_string()) };
 
     let req = test_request(Action::Heartbeat);
@@ -41,7 +41,7 @@ fn integration_heartbeat_delta_contains_new_followers() {
 
     let alice_before = load_agent("hbd_alice").unwrap();
 
-    let follow_ts_ns = (alice_before.last_active + 600) * 1_000_000_000;
+    let follow_ts_ns = (alice_before.last_active + 600) * NANOS_PER_SEC;
     unsafe { std::env::set_var("NEAR_BLOCK_TIMESTAMP", follow_ts_ns.to_string()) };
 
     set_signer("hbd_b.near");
@@ -50,7 +50,7 @@ fn integration_heartbeat_delta_contains_new_followers() {
         .build();
     handle_follow(&freq);
 
-    let heartbeat_ts_ns = (alice_before.last_active + 1800) * 1_000_000_000;
+    let heartbeat_ts_ns = (alice_before.last_active + 1800) * NANOS_PER_SEC;
     unsafe { std::env::set_var("NEAR_BLOCK_TIMESTAMP", heartbeat_ts_ns.to_string()) };
     set_signer("hbd_a.near");
     let req = test_request(Action::Heartbeat);
@@ -99,7 +99,7 @@ fn integration_get_activity_returns_delta() {
     );
 
     let mut req = test_request(Action::GetActivity);
-    req.since = Some("0".into());
+    req.cursor = Some("0".into());
     let resp = handle_get_activity(&req);
     assert!(
         resp.success,
@@ -129,7 +129,7 @@ fn integration_get_activity_returns_follower_handles() {
 
     set_signer("gav_a.near");
     let mut req = test_request(Action::GetActivity);
-    req.since = Some("0".into());
+    req.cursor = Some("0".into());
     let resp = handle_get_activity(&req);
     assert!(
         resp.success,
@@ -177,4 +177,73 @@ fn integration_get_network_returns_counts() {
     let resp2 = handle_get_network(&test_request(Action::GetNetwork));
     let data2 = parse_response(&resp2);
     assert_eq!(data2["mutual_count"], 1);
+}
+
+/// Heartbeat probabilistic reconciliation corrects corrupted counts.
+/// When `last_active % RECONCILE_MODULUS == 0`, the handler recomputes
+/// follower/following counts from actual index lengths.
+#[test]
+#[serial]
+fn integration_heartbeat_reconciles_corrupted_counts() {
+    setup_integration("hbr.near");
+
+    // Register at a known timestamp so we can control the heartbeat timestamp
+    let reg_ts_ns = 1_700_000_000u64 * NANOS_PER_SEC;
+    unsafe { std::env::set_var("NEAR_BLOCK_TIMESTAMP", reg_ts_ns.to_string()) };
+
+    quick_register("hbr.near", "hbr_agent");
+    quick_register("hbr_f.near", "hbr_follower");
+
+    // Create a real follow so the follower index has 1 entry
+    set_signer("hbr_f.near");
+    handle_follow(
+        &RequestBuilder::new(Action::Follow)
+            .handle("hbr_agent")
+            .build(),
+    );
+
+    let agent = load_agent("hbr_agent").unwrap();
+    assert_eq!(agent.follower_count, 1, "should have 1 real follower");
+
+    // Corrupt the stored follower_count to 99
+    let mut corrupted = agent;
+    corrupted.follower_count = 99;
+    let bytes = serde_json::to_vec(&corrupted).unwrap();
+    set_public(&keys::pub_agent("hbr_agent"), &bytes).unwrap();
+    assert_eq!(load_agent("hbr_agent").unwrap().follower_count, 99);
+
+    // Set heartbeat timestamp so last_active % 50 == 0 (triggers reconciliation)
+    // 1_700_000_050 % 50 == 0
+    let hb_ts_ns = 1_700_000_050u64 * NANOS_PER_SEC;
+    unsafe { std::env::set_var("NEAR_BLOCK_TIMESTAMP", hb_ts_ns.to_string()) };
+
+    set_signer("hbr.near");
+    let resp = handle_heartbeat(&test_request(Action::Heartbeat));
+    assert!(resp.success, "heartbeat should succeed: {:?}", resp.error);
+
+    // Verify counts were corrected from actual index lengths
+    let fixed = load_agent("hbr_agent").unwrap();
+    assert_eq!(
+        fixed.follower_count, 1,
+        "reconciliation should correct follower_count from 99 to 1"
+    );
+    assert_eq!(
+        fixed.following_count, 0,
+        "following_count should also be reconciled"
+    );
+
+    unsafe { std::env::remove_var("NEAR_BLOCK_TIMESTAMP") };
+}
+
+#[test]
+#[serial]
+fn get_activity_rejects_non_numeric_since() {
+    setup_integration("sinv.near");
+    quick_register("sinv.near", "sinv_agent");
+
+    let mut req = test_request(Action::GetActivity);
+    req.cursor = Some("not-a-number".into());
+    let resp = handle_get_activity(&req);
+    assert!(!resp.success, "should reject non-numeric since");
+    assert_eq!(resp.code.as_deref(), Some("VALIDATION_ERROR"));
 }
