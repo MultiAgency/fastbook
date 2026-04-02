@@ -2,75 +2,6 @@ use super::*;
 
 #[test]
 #[serial]
-fn integration_list_agents_returns_registered() {
-    setup_integration("agent_a.near");
-    quick_register("agent_a.near", "agent_a");
-    quick_register("agent_b.near", "agent_b");
-
-    let req = RequestBuilder::new(Action::ListAgents).build();
-    let resp = handle_list_agents(
-        &req,
-        |_| true,
-        crate::registry::SortKey::Followers,
-        DEFAULT_LIMIT,
-    );
-    assert!(resp.success);
-
-    let data = parse_response(&resp);
-    let agents = data.as_array().expect("data should be array");
-    assert_eq!(agents.len(), 2);
-}
-
-#[test]
-#[serial]
-fn integration_list_agents_pagination() {
-    setup_integration("pg_a.near");
-    quick_register("pg_a.near", "pg_alice");
-    quick_register("pg_b.near", "pg_bob");
-    quick_register("pg_c.near", "pg_carol");
-
-    let mut req = RequestBuilder::new(Action::ListAgents).limit(2).build();
-    let resp = handle_list_agents(
-        &req,
-        |_| true,
-        crate::registry::SortKey::Followers,
-        DEFAULT_LIMIT,
-    );
-    assert!(resp.success);
-
-    let data = parse_response(&resp);
-    let agents = data.as_array().expect("data should be array");
-    assert_eq!(agents.len(), 2, "first page should have 2 agents");
-
-    let pagination = resp.pagination.as_ref().expect("should have pagination");
-    let next_cursor = pagination
-        .next_cursor
-        .as_ref()
-        .expect("should have next_cursor");
-
-    req.cursor = Some(next_cursor.clone());
-    let resp2 = handle_list_agents(
-        &req,
-        |_| true,
-        crate::registry::SortKey::Followers,
-        DEFAULT_LIMIT,
-    );
-    assert!(resp2.success);
-
-    let data2 = parse_response(&resp2);
-    let agents2 = data2.as_array().expect("data should be array");
-    assert_eq!(
-        agents2.len(),
-        1,
-        "second page should have remaining 1 agent"
-    );
-
-    let pagination2 = resp2.pagination.as_ref().expect("should have pagination");
-    assert!(pagination2.next_cursor.is_none(), "should be no more pages");
-}
-
-#[test]
-#[serial]
 fn integration_tag_counts_track_registrations_and_updates() {
     setup_integration("tag_a.near");
     let mut reg = test_request(Action::Register);
@@ -83,7 +14,10 @@ fn integration_tag_counts_track_registrations_and_updates() {
     reg.tags = Some(vec!["ai".into(), "defi".into()]);
     handle_register(&reg);
 
-    let tags = registry::list_tags();
+    let tags = get_json::<std::collections::HashMap<String, u32>>(keys::pub_tag_counts())
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<Vec<_>>();
     let ai_count = tags.iter().find(|(t, _)| t == "ai").map(|(_, c)| *c);
     let rust_count = tags.iter().find(|(t, _)| t == "rust").map(|(_, c)| *c);
     let defi_count = tags.iter().find(|(t, _)| t == "defi").map(|(_, c)| *c);
@@ -97,7 +31,10 @@ fn integration_tag_counts_track_registrations_and_updates() {
     let resp = handle_update_me(&update);
     assert!(resp.success);
 
-    let tags = registry::list_tags();
+    let tags = get_json::<std::collections::HashMap<String, u32>>(keys::pub_tag_counts())
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<Vec<_>>();
     let rust_after = tags.iter().find(|(t, _)| t == "rust").map(|(_, c)| *c);
     let defi_after = tags.iter().find(|(t, _)| t == "defi").map(|(_, c)| *c);
     assert_eq!(rust_after, None, "rust tag should be removed (count 0)");
@@ -113,49 +50,42 @@ fn integration_tag_counts_handle_removal_to_empty() {
     reg.tags = Some(vec!["ai".into()]);
     handle_register(&reg);
 
-    assert_eq!(registry::list_tags().len(), 1);
+    assert_eq!(
+        get_json::<std::collections::HashMap<String, u32>>(keys::pub_tag_counts())
+            .unwrap_or_default()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .len(),
+        1
+    );
 
     let mut update = test_request(Action::UpdateMe);
     update.tags = Some(vec![]);
     let resp = handle_update_me(&update);
     assert!(resp.success);
 
-    assert!(registry::list_tags().is_empty(), "all tags removed");
+    assert!(
+        get_json::<std::collections::HashMap<String, u32>>(keys::pub_tag_counts())
+            .unwrap_or_default()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .is_empty(),
+        "all tags removed"
+    );
 }
 
 #[test]
 #[serial]
-fn integration_list_tags_migration_fallback() {
-    setup_integration("mig_a.near");
-    let mut reg = test_request(Action::Register);
-    reg.handle = Some("mig_a".into());
-    reg.tags = Some(vec!["rust".into()]);
-    handle_register(&reg);
-
-    let _ = delete(keys::pub_tag_counts());
-
-    let tags = registry::list_tags();
-    assert_eq!(tags.len(), 1);
-    assert_eq!(tags[0], ("rust".to_string(), 1));
-
-    let tags2 = registry::list_tags();
-    assert_eq!(tags2, tags);
-}
-
-#[test]
-#[serial]
-fn integration_health_returns_agent_count() {
+fn integration_health_agent_count_via_registry() {
     setup_integration("health_a.near");
     quick_register("health_a.near", "health_alice");
     quick_register("health_b.near", "health_bob");
 
-    let req = test_request(Action::Health);
-    let resp = handle_health(&req);
-    assert!(resp.success, "health should succeed: {:?}", resp.error);
-
-    let data = parse_response(&resp);
-    assert_eq!(data["status"], "ok");
-    assert_eq!(data["agent_count"], 2);
+    assert_eq!(
+        registry::registry_count(),
+        2,
+        "registry should have 2 agents"
+    );
 }
 
 #[test]
@@ -195,7 +125,6 @@ fn integration_reconcile_all_corrects_counts() {
 
     let data = parse_response(&resp);
     assert_eq!(data["agents_checked"], 2);
-    assert_eq!(data["sorted_rebuilt"], true);
     assert_eq!(data["near_mappings_rebuilt"], 2);
 
     // Verify agent counts are correct after reconciliation
@@ -263,53 +192,6 @@ fn integration_reconcile_all_corrects_miscount() {
     unsafe { std::env::remove_var("OUTLAYER_ADMIN_ACCOUNT") };
 }
 
-/// When the sorted index is empty, list_agents falls back to loading all
-/// agents from the registry and sorting in memory.
-#[test]
-#[serial]
-fn integration_list_agents_fallback_when_sorted_index_empty() {
-    setup_integration("fb_a.near");
-    quick_register("fb_a.near", "fb_alice");
-    quick_register("fb_b.near", "fb_bob");
-
-    // Verify sorted index was populated during registration
-    let sorted = index_list(&keys::pub_sorted("followers"));
-    assert!(
-        !sorted.is_empty(),
-        "sorted index should exist after registration"
-    );
-
-    // Delete the sorted index to trigger fallback path
-    let _ = delete(&keys::pub_sorted("followers"));
-    let sorted_after = index_list(&keys::pub_sorted("followers"));
-    assert!(
-        sorted_after.is_empty(),
-        "sorted index should be empty after delete"
-    );
-
-    // list_agents should still work via load_all_agents fallback
-    let req = RequestBuilder::new(Action::ListAgents).build();
-    let resp = handle_list_agents(
-        &req,
-        |_| true,
-        crate::registry::SortKey::Followers,
-        DEFAULT_LIMIT,
-    );
-    assert!(
-        resp.success,
-        "list_agents should succeed via fallback: {:?}",
-        resp.error
-    );
-
-    let data = parse_response(&resp);
-    let agents = data.as_array().expect("data should be array");
-    assert_eq!(
-        agents.len(),
-        2,
-        "fallback should return all registered agents"
-    );
-}
-
 /// ReconcileAll Phase 1b: orphaned endorser index entries are pruned and
 /// endorsement counts are corrected when the endorsement record is missing.
 #[test]
@@ -341,7 +223,7 @@ fn integration_reconcile_all_corrects_endorsement_orphans() {
     assert!(!has(&keys::endorsement(
         "eo_alice", "tags", "security", "eo_bob"
     )));
-    let endorsers = index_list(&keys::endorsers("eo_alice", "tags", "security"));
+    let endorsers = handles_from_prefix(&keys::pub_endorser_prefix("eo_alice", "tags", "security"));
     assert!(
         endorsers.contains(&"eo_bob".to_string()),
         "endorser index should still have eo_bob"
@@ -363,7 +245,8 @@ fn integration_reconcile_all_corrects_endorsement_orphans() {
     );
 
     // Verify correction: endorser index pruned and count zeroed
-    let endorsers_after = index_list(&keys::endorsers("eo_alice", "tags", "security"));
+    let endorsers_after =
+        handles_from_prefix(&keys::pub_endorser_prefix("eo_alice", "tags", "security"));
     assert!(
         !endorsers_after.contains(&"eo_bob".to_string()),
         "orphaned endorser should be removed from index"
@@ -377,29 +260,12 @@ fn integration_reconcile_all_corrects_endorsement_orphans() {
     );
 
     // Also verify the reverse index was cleaned
-    let by_idx = index_list(&keys::endorsement_by("eo_bob", "eo_alice"));
     assert!(
-        !by_idx.contains(&"tags:security".to_string()),
-        "endorsement_by reverse index should be cleaned"
+        !user_has(&keys::pub_endorsement_by(
+            "eo_bob", "eo_alice", "tags", "security"
+        )),
+        "endorsement_by reverse index key should be cleaned"
     );
 
     unsafe { std::env::remove_var("OUTLAYER_ADMIN_ACCOUNT") };
-}
-
-#[test]
-#[serial]
-fn list_agents_rejects_invalid_cursor() {
-    setup_integration("lcur.near");
-    quick_register("lcur.near", "lcur_agent");
-
-    let mut req = RequestBuilder::new(Action::ListAgents).build();
-    req.cursor = Some("UPPER_CASE".into());
-    let resp = handle_list_agents(
-        &req,
-        |_| true,
-        crate::registry::SortKey::Followers,
-        DEFAULT_LIMIT,
-    );
-    assert!(!resp.success, "should reject uppercase cursor");
-    assert_eq!(resp.code.as_deref(), Some("VALIDATION_ERROR"));
 }

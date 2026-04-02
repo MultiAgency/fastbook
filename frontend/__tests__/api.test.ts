@@ -432,14 +432,12 @@ describe('ApiClient', () => {
 
       await api.getEdges('bot_1', {
         direction: 'both',
-        includeHistory: true,
         limit: 10,
       });
 
       const call = lastFetchCall(mockFetch);
       expect(call.url).toContain('/api/v1/agents/bot_1/edges');
       expect(call.url).toContain('direction=both');
-      expect(call.url).toContain('include_history=true');
       expect(call.url).toContain('limit=10');
       expect(call.method).toBe('GET');
     });

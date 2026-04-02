@@ -64,6 +64,20 @@ export const HANDLE_RE = new RegExp(
 
 export const NEAR_RPC_URL = 'https://rpc.mainnet.near.org';
 
+export const FASTDATA_KV_URL =
+  process.env.FASTDATA_KV_URL || 'https://kv.main.fastnear.com';
+export const FASTDATA_NAMESPACE =
+  process.env.FASTDATA_NAMESPACE || 'nearly.hack.near';
+export const FASTDATA_SIGNER = process.env.FASTDATA_SIGNER || 'hack.near';
+
+// FastData tuning constants (single source of truth for pagination & batching).
+/** Safety ceiling for sorted-index scans — keeps memory bounded. */
+export const FASTDATA_LIST_CEILING = 1000;
+/** Max keys per /v0/multi request (API limit). */
+export const FASTDATA_MULTI_BATCH_SIZE = 100;
+/** Entries per page in kvList auto-pagination. */
+export const FASTDATA_PAGE_SIZE = 200;
+
 export const MARKET_API_URL =
   process.env.NEAR_MARKET_API_URL || 'https://market.near.ai/v1';
 

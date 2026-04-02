@@ -211,10 +211,10 @@ fn integration_register_rollback_cleans_registry() {
     setup_integration("regrb_a.near");
     quick_register("regrb_a.near", "regrb_a");
 
-    let registry_before = index_list(keys::pub_agents());
+    let registry_before = handles_from_prefix(keys::pub_agent_reg_prefix());
     let count_before = registry_before.len();
 
-    // Fail all writes for second registration — save_agent is the first txn step,
+    // Fail all writes for second registration — save_agent is the first write,
     // so the entire registration will fail before modifying any state
     set_signer("regrb_b.near");
     store::test_backend::fail_next_writes(10);
@@ -225,7 +225,7 @@ fn integration_register_rollback_cleans_registry() {
     store::test_backend::fail_next_writes(0);
 
     // Registry should be unchanged
-    let registry_after = index_list(keys::pub_agents());
+    let registry_after = handles_from_prefix(keys::pub_agent_reg_prefix());
     assert_eq!(
         registry_after.len(),
         count_before,
@@ -249,17 +249,16 @@ fn integration_register_rollback_cleans_registry() {
     );
 }
 
-/// Registration rollback when step 2 (account mapping) fails after step 1 (save_agent) succeeded.
-/// Step 1 performs 5 writes: 1 agent record + 4 sorted index inserts.
-/// fail_after_writes(Some(5), 1) lets those succeed, then fails the account mapping write.
-/// The rollback should cleanly undo the agent record and sorted indices.
+/// Registration failure when agent record write fails after account mapping succeeded.
+/// The raw mapping persists in storage, but agent_handle_for_account() verifies the
+/// agent record and returns None — so the stale mapping is invisible to callers.
 #[test]
 #[serial]
-fn integration_register_rollback_after_agent_saved() {
+fn integration_register_partial_failure_after_mapping_saved() {
     setup_integration("rb2.near");
 
-    // Let step 1 (5 writes) succeed, then fail step 2 (account mapping)
-    store::test_backend::fail_after_writes(Some(5), 1);
+    // Let account mapping (1 write) succeed, then fail the agent record write
+    store::test_backend::fail_after_writes(Some(1), 1);
 
     let req = RequestBuilder::new(Action::Register)
         .handle("rb2_agent")
@@ -267,26 +266,67 @@ fn integration_register_rollback_after_agent_saved() {
     let resp = handle_register(&req);
 
     assert!(!resp.success, "registration should fail");
-    assert_ne!(
-        resp.code.as_deref(),
-        Some("ROLLBACK_PARTIAL"),
-        "rollback should succeed cleanly (not partial)"
-    );
 
     store::test_backend::fail_after_writes(None, 0);
 
-    // All step 1 writes should be rolled back
+    // Stale mapping exists in raw storage, but agent_handle_for_account filters it
     assert!(
         load_agent("rb2_agent").is_none(),
-        "agent record should be cleaned up by rollback"
+        "agent record should not exist"
     );
     assert!(
         agent_handle_for_account("rb2.near").is_none(),
-        "account mapping should not exist"
+        "stale mapping should be invisible via agent_handle_for_account"
     );
     assert!(
-        !index_list(keys::pub_agents()).contains(&"rb2_agent".to_string()),
+        !handles_from_prefix(keys::pub_agent_reg_prefix()).contains(&"rb2_agent".to_string()),
         "registry should not contain the handle"
+    );
+}
+
+/// After a partial failure leaves a stale account mapping, re-registering with the
+/// same account succeeds because agent_handle_for_account returns None for stale
+/// mappings (no agent record behind the mapping).
+#[test]
+#[serial]
+fn integration_register_recovers_from_stale_mapping() {
+    setup_integration("stale.near");
+
+    // Partial failure: account mapping succeeds, agent record fails
+    store::test_backend::fail_after_writes(Some(1), 1);
+    let req = RequestBuilder::new(Action::Register)
+        .handle("stale_agent")
+        .build();
+    let resp = handle_register(&req);
+    assert!(!resp.success, "first registration should fail");
+    store::test_backend::fail_after_writes(None, 0);
+
+    // Stale mapping is invisible
+    assert!(agent_handle_for_account("stale.near").is_none());
+    assert!(load_agent("stale_agent").is_none());
+
+    // Retry — should succeed
+    let req2 = RequestBuilder::new(Action::Register)
+        .handle("stale_agent")
+        .build();
+    let resp2 = handle_register(&req2);
+    assert!(
+        resp2.success,
+        "retry after stale mapping should succeed: {:?}",
+        resp2.error
+    );
+
+    let agent = load_agent("stale_agent").expect("agent should exist after retry");
+    assert_eq!(agent.near_account_id, "stale.near");
+    assert_eq!(
+        agent_handle_for_account("stale.near")
+            .map(|(h, _)| h)
+            .as_deref(),
+        Some("stale_agent")
+    );
+    assert!(
+        handles_from_prefix(keys::pub_agent_reg_prefix()).contains(&"stale_agent".to_string()),
+        "registry should contain the handle after successful retry"
     );
 }
 

@@ -1,5 +1,5 @@
 [workspace]
-members = ["wasm", "vendor/outlayer"]
+members = ["wasm", "vendor/outlayer", "smoke-test"]
 resolver = "2"
 
 [profile.release]

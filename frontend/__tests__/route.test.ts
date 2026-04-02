@@ -13,12 +13,16 @@ jest.mock('@/lib/outlayer-server', () => ({
   mintClaimForWalletKey: jest.fn().mockResolvedValue(null),
 }));
 
+const mockDispatchFastData = jest.fn();
+jest.mock('@/lib/fastdata-dispatch', () => ({
+  dispatchFastData: (...args: unknown[]) => mockDispatchFastData(...args),
+}));
+
 jest.mock('@/lib/cache', () => ({
   getCached: jest.fn().mockReturnValue(undefined),
   setCache: jest.fn(),
-  clearCache: jest.fn(),
   clearByAction: jest.fn(),
-  currentGeneration: jest.fn().mockReturnValue(0),
+  invalidateForMutation: jest.fn(),
   makeCacheKey: jest.fn((body: Record<string, unknown>) =>
     JSON.stringify(body),
   ),
@@ -31,8 +35,6 @@ import {
   OPTIONS,
   PATCH,
   POST,
-  RATE_LIMIT_PER_IP,
-  resetRateLimiter,
 } from '../src/app/api/v1/[...path]/route';
 
 function makeRequest(
@@ -59,11 +61,11 @@ async function json(res: NextResponse) {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  resetRateLimiter();
   jest.spyOn(console, 'warn');
   mockCallOutlayer.mockResolvedValue(
     NextResponse.json({ success: true, data: {} }),
   );
+  mockDispatchFastData.mockResolvedValue({ data: {} });
 });
 
 afterEach(() => {
@@ -174,16 +176,22 @@ describe('route resolution', () => {
     const { PUBLIC_ACTIONS } = jest.requireActual('@/lib/routes') as {
       PUBLIC_ACTIONS: Set<string>;
     };
-    if (!PUBLIC_ACTIONS.has(expectedAction)) {
+    const isPublic = PUBLIC_ACTIONS.has(expectedAction);
+    if (!isPublic) {
       headers['x-payment-key'] = 'pk_user';
     }
 
     const [req, params] = makeRequest(method, path, undefined, headers);
     await handler(req, params);
 
-    expect(mockCallOutlayer).toHaveBeenCalledTimes(1);
-    const wasmBody = mockCallOutlayer.mock.calls[0][0];
-    expect(wasmBody.action).toBe(expectedAction);
+    if (isPublic) {
+      expect(mockDispatchFastData).toHaveBeenCalledTimes(1);
+      expect(mockDispatchFastData.mock.calls[0][0]).toBe(expectedAction);
+    } else {
+      expect(mockCallOutlayer).toHaveBeenCalledTimes(1);
+      const wasmBody = mockCallOutlayer.mock.calls[0][0];
+      expect(wasmBody.action).toBe(expectedAction);
+    }
   });
 
   it('returns 404 for unknown routes', async () => {
@@ -198,8 +206,8 @@ describe('query params', () => {
     const [req, params] = makeRequest('GET', 'agents?limit=25');
     await GET(req, params);
 
-    const wasmBody = mockCallOutlayer.mock.calls[0][0];
-    expect(wasmBody.limit).toBe(25);
+    const body = mockDispatchFastData.mock.calls[0][1];
+    expect(body.limit).toBe(25);
   });
 
   it('passes since as validated string for authenticated actions', async () => {
@@ -217,17 +225,6 @@ describe('query params', () => {
     expect(wasmBody.since).toBe('1700000000');
   });
 
-  it('parses include_history as boolean', async () => {
-    const [req, params] = makeRequest(
-      'GET',
-      'agents/alice/edges?include_history=true',
-    );
-    await GET(req, params);
-
-    const wasmBody = mockCallOutlayer.mock.calls[0][0];
-    expect(wasmBody.include_history).toBe(true);
-  });
-
   it('passes string params through', async () => {
     const [req, params] = makeRequest(
       'GET',
@@ -235,36 +232,25 @@ describe('query params', () => {
     );
     await GET(req, params);
 
-    const wasmBody = mockCallOutlayer.mock.calls[0][0];
-    expect(wasmBody.sort).toBe('newest');
-    expect(wasmBody.cursor).toBe('agent_42');
+    const body = mockDispatchFastData.mock.calls[0][1];
+    expect(body.sort).toBe('newest');
+    expect(body.cursor).toBe('agent_42');
   });
 
   it('passes tag as string to WASM', async () => {
     const [req, params] = makeRequest('GET', 'agents?tag=ai');
     await GET(req, params);
 
-    const wasmBody = mockCallOutlayer.mock.calls[0][0];
-    expect(wasmBody.tag).toBe('ai');
+    const body = mockDispatchFastData.mock.calls[0][1];
+    expect(body.tag).toBe('ai');
   });
 
   it('drops non-parseable integer params', async () => {
     const [req, params] = makeRequest('GET', 'agents?limit=abc');
     await GET(req, params);
 
-    const wasmBody = mockCallOutlayer.mock.calls[0][0];
-    expect(wasmBody.limit).toBeUndefined();
-  });
-
-  it('parses include_history=false as false', async () => {
-    const [req, params] = makeRequest(
-      'GET',
-      'agents/alice/edges?include_history=false',
-    );
-    await GET(req, params);
-
-    const wasmBody = mockCallOutlayer.mock.calls[0][0];
-    expect(wasmBody.include_history).toBe(false);
+    const body = mockDispatchFastData.mock.calls[0][1];
+    expect(body.limit).toBeUndefined();
   });
 });
 
@@ -302,10 +288,10 @@ describe('injection prevention', () => {
     );
     await GET(req, params);
 
-    const wasmBody = mockCallOutlayer.mock.calls[0][0];
-    expect(wasmBody.verifiable_claim).toBeUndefined();
-    expect(wasmBody.password).toBeUndefined();
-    expect(wasmBody.limit).toBe(10);
+    const sanitized = mockDispatchFastData.mock.calls[0][1];
+    expect(sanitized.verifiable_claim).toBeUndefined();
+    expect(sanitized.password).toBeUndefined();
+    expect(sanitized.limit).toBe(10);
   });
 });
 
@@ -323,12 +309,15 @@ describe('auth dispatch', () => {
     expect(mockCallOutlayer).not.toHaveBeenCalled();
   });
 
-  it('public actions use payment key from env', async () => {
+  it('public actions dispatch via FastData', async () => {
     const [req, params] = makeRequest('GET', 'agents');
     await GET(req, params);
 
-    const paymentKey = mockCallOutlayer.mock.calls[0][1];
-    expect(paymentKey).toBe('pk_test');
+    expect(mockDispatchFastData).toHaveBeenCalledWith(
+      'list_agents',
+      expect.any(Object),
+    );
+    expect(mockCallOutlayer).not.toHaveBeenCalled();
   });
 
   it('x-payment-key header forwards for authenticated actions', async () => {
@@ -564,9 +553,8 @@ describe('platform auto-registration on register (background)', () => {
 });
 
 describe('cache invalidation', () => {
-  it('passes generation to setCache on public reads', async () => {
-    const { currentGeneration, setCache } = jest.requireMock('@/lib/cache');
-    (currentGeneration as jest.Mock).mockReturnValue(42);
+  it('caches public read responses', async () => {
+    const { setCache } = jest.requireMock('@/lib/cache');
 
     const [req, params] = makeRequest('GET', 'agents');
     await GET(req, params);
@@ -575,12 +563,11 @@ describe('cache invalidation', () => {
       'list_agents',
       expect.any(String),
       expect.anything(),
-      42,
     );
   });
 
-  it('clears only list_agents on heartbeat', async () => {
-    const { clearCache, clearByAction } = jest.requireMock('@/lib/cache');
+  it('invalidates via INVALIDATION_MAP on heartbeat', async () => {
+    const { invalidateForMutation } = jest.requireMock('@/lib/cache');
 
     const [req, params] = makeRequest(
       'POST',
@@ -590,12 +577,12 @@ describe('cache invalidation', () => {
     );
     await POST(req, params);
 
-    expect(clearCache).not.toHaveBeenCalled();
-    expect(clearByAction).toHaveBeenCalledWith('list_agents');
+    expect(invalidateForMutation).toHaveBeenCalledWith('heartbeat');
   });
 
-  it('clears entire cache on follow', async () => {
-    const { clearCache, clearByAction } = jest.requireMock('@/lib/cache');
+  it('invalidates affected cache entries on follow', async () => {
+    const { invalidateForMutation, clearByAction } =
+      jest.requireMock('@/lib/cache');
 
     const [req, params] = makeRequest(
       'POST',
@@ -605,41 +592,7 @@ describe('cache invalidation', () => {
     );
     await POST(req, params);
 
-    expect(clearCache).toHaveBeenCalled();
+    expect(invalidateForMutation).toHaveBeenCalledWith('follow');
     expect(clearByAction).not.toHaveBeenCalled();
-  });
-});
-
-describe('rate limiting', () => {
-  it('rate-limits unauthenticated requests to auth-required endpoints', async () => {
-    // Exhaust the global rate limit with unauthenticated requests
-    for (let i = 0; i < RATE_LIMIT_PER_IP; i++) {
-      const [req, params] = makeRequest('POST', 'agents/me/heartbeat');
-      await POST(req, params);
-    }
-    // The next request should be rate-limited, not just 401
-    const [req, params] = makeRequest('POST', 'agents/me/heartbeat');
-    const res = await POST(req, params);
-    expect(res.status).toBe(429);
-  });
-
-  it('rate-limits authenticated requests after global limit', async () => {
-    for (let i = 0; i < RATE_LIMIT_PER_IP; i++) {
-      const [req, params] = makeRequest(
-        'POST',
-        'agents/me/heartbeat',
-        {},
-        { authorization: 'Bearer wk_test' },
-      );
-      await POST(req, params);
-    }
-    const [req, params] = makeRequest(
-      'POST',
-      'agents/me/heartbeat',
-      {},
-      { authorization: 'Bearer wk_test' },
-    );
-    const res = await POST(req, params);
-    expect(res.status).toBe(429);
   });
 });

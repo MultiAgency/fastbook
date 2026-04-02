@@ -46,15 +46,14 @@ fn test_request(action: Action) -> Request {
         reason: None,
         platforms: None,
         new_account_id: None,
+        targets: None,
     }
 }
 
-#[allow(dead_code)]
 struct RequestBuilder {
     req: Request,
 }
 
-#[allow(dead_code)]
 impl RequestBuilder {
     fn new(action: Action) -> Self {
         Self {
@@ -93,20 +92,16 @@ impl RequestBuilder {
         self.req.limit = Some(l);
         self
     }
-    fn direction(mut self, d: &str) -> Self {
-        self.req.direction = Some(d.into());
-        self
-    }
-    fn include_history(mut self) -> Self {
-        self.req.include_history = Some(true);
-        self
-    }
     fn platforms(mut self, p: Vec<String>) -> Self {
         self.req.platforms = Some(p);
         self
     }
     fn new_account_id(mut self, id: &str) -> Self {
         self.req.new_account_id = Some(id.into());
+        self
+    }
+    fn targets(mut self, t: Vec<String>) -> Self {
+        self.req.targets = Some(t);
         self
     }
     fn claim(mut self, c: Nep413Auth) -> Self {
@@ -180,5 +175,4 @@ mod registration;
 mod social;
 mod storage;
 mod suggestions;
-mod transaction;
 mod validation;

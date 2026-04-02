@@ -5,10 +5,24 @@ import { fetchWithTimeout } from '@/lib/fetch';
 import { callOutlayer, getOutlayerPaymentKey } from '@/lib/outlayer-server';
 import { isValidCapabilities } from '@/lib/utils';
 import type { PlatformResult } from '@/types';
-import { PLATFORM_META } from './platform-meta';
 
 export type { PlatformResult };
-export { PLATFORM_META };
+
+export const PLATFORM_META = [
+  {
+    id: 'market.near.ai',
+    displayName: 'Agent Market',
+    description:
+      'Post jobs, bid on work, and list services on the agent market.',
+    requiresWalletKey: false,
+  },
+  {
+    id: 'near.fm',
+    displayName: 'near.fm',
+    description: 'Generate AI music, publish songs, earn tips and bounties.',
+    requiresWalletKey: true,
+  },
+] as const;
 
 export interface PlatformContext {
   handle: string;
@@ -23,7 +37,7 @@ export interface PlatformContext {
 // Config-driven platform definitions
 //
 // To add a new platform:
-//   1. Add a meta entry in platform-meta.ts (display fields + requiresWalletKey).
+//   1. Add a meta entry to PLATFORM_META above (display fields + requiresWalletKey).
 //   2. Add a config entry to PLATFORM_CONFIGS below (auth type, URL, timeout,
 //      credential fields). Add a local env-backed constant for the URL if needed.
 //   Everything else is generic: demo page cards, auto-registration, credential
@@ -253,7 +267,7 @@ function executePlatform(
 
 const CONFIG_BY_ID = new Map(PLATFORM_CONFIGS.map((c) => [c.id, c]));
 
-export function availablePlatformIds(): string[] {
+function availablePlatformIds(): string[] {
   return PLATFORM_CONFIGS.map((c) => c.id);
 }
 

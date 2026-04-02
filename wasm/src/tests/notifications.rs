@@ -40,7 +40,7 @@ fn integration_notifications_created_on_follow() {
 #[test]
 #[serial]
 fn notification_dedup_within_window() {
-    // Dedup is implemented in notifications::store_notification_with_detail (lines 70-89):
+    // Dedup is implemented in store::store_notification:
     // same type + same from + within DEDUP_WINDOW_SECS (3600s) → suppressed.
     setup_integration("dedup_a.near");
     quick_register("dedup_a.near", "dedup_alice");

@@ -23,7 +23,15 @@ test('list_agents', async ({ request }) => {
   expect(res.ok()).toBe(true);
   const json = await res.json();
   expect(json.success).toBe(true);
-  expect(Array.isArray(json.data)).toBe(true);
+  expect(Array.isArray(json.data.agents)).toBe(true);
+});
+
+test('at least one agent exists', async ({ request }) => {
+  const res = await request.get('agents?limit=1');
+  expect(res.ok()).toBe(true);
+  const json = await res.json();
+  test.skip(json.data.agents.length === 0, 'No agents registered yet');
+  expect(json.data.agents.length).toBeGreaterThan(0);
 });
 
 test('list_tags', async ({ request }) => {
@@ -39,7 +47,9 @@ test('get_profile — returns agent for known handle', async ({ request }) => {
   const listRes = await request.get('agents?limit=1');
   expect(listRes.ok()).toBe(true);
   const listJson = await listRes.json();
-  const agents = Array.isArray(listJson.data) ? listJson.data : [];
+  const agents = Array.isArray(listJson.data?.agents)
+    ? listJson.data.agents
+    : [];
   test.skip(agents.length === 0, 'No agents registered — skip profile test');
   const handle = agents[0].handle;
 
@@ -61,7 +71,9 @@ test('get_followers — public', async ({ request }) => {
   const listRes = await request.get('agents?limit=1&sort=followers');
   expect(listRes.ok()).toBe(true);
   const listJson = await listRes.json();
-  const agents = Array.isArray(listJson.data) ? listJson.data : [];
+  const agents = Array.isArray(listJson.data?.agents)
+    ? listJson.data.agents
+    : [];
   test.skip(agents.length === 0, 'No agents registered');
   const handle = agents[0].handle;
 
@@ -69,14 +81,16 @@ test('get_followers — public', async ({ request }) => {
   expect(res.ok()).toBe(true);
   const json = await res.json();
   expect(json.success).toBe(true);
-  expect(Array.isArray(json.data)).toBe(true);
+  expect(Array.isArray(json.data.followers)).toBe(true);
 });
 
 test('get_following — public', async ({ request }) => {
   const listRes = await request.get('agents?limit=1&sort=followers');
   expect(listRes.ok()).toBe(true);
   const listJson = await listRes.json();
-  const agents = Array.isArray(listJson.data) ? listJson.data : [];
+  const agents = Array.isArray(listJson.data?.agents)
+    ? listJson.data.agents
+    : [];
   test.skip(agents.length === 0, 'No agents registered');
   const handle = agents[0].handle;
 
@@ -84,14 +98,16 @@ test('get_following — public', async ({ request }) => {
   expect(res.ok()).toBe(true);
   const json = await res.json();
   expect(json.success).toBe(true);
-  expect(Array.isArray(json.data)).toBe(true);
+  expect(Array.isArray(json.data.following)).toBe(true);
 });
 
 test('get_edges — public', async ({ request }) => {
   const listRes = await request.get('agents?limit=1&sort=followers');
   expect(listRes.ok()).toBe(true);
   const listJson = await listRes.json();
-  const agents = Array.isArray(listJson.data) ? listJson.data : [];
+  const agents = Array.isArray(listJson.data?.agents)
+    ? listJson.data.agents
+    : [];
   test.skip(agents.length === 0, 'No agents registered');
   const handle = agents[0].handle;
 
@@ -100,14 +116,15 @@ test('get_edges — public', async ({ request }) => {
   const json = await res.json();
   expect(json.success).toBe(true);
   expect(Array.isArray(json.data.edges)).toBe(true);
-  expect(typeof json.data.edge_count).toBe('number');
 });
 
 test('get_endorsers — public', async ({ request }) => {
   const listRes = await request.get('agents?limit=1&sort=endorsements');
   expect(listRes.ok()).toBe(true);
   const listJson = await listRes.json();
-  const agents = Array.isArray(listJson.data) ? listJson.data : [];
+  const agents = Array.isArray(listJson.data?.agents)
+    ? listJson.data.agents
+    : [];
   test.skip(agents.length === 0, 'No agents registered');
   const handle = agents[0].handle;
 

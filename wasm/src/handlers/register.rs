@@ -1,13 +1,10 @@
 //! Handler for agent registration with NEP-413 verification and market.near.ai reservation.
 
 use crate::agent::*;
-use crate::registry::{add_to_registry, load_agents_sorted, SortKey};
-use crate::response::*;
+use crate::registry::load_agents_by_followers;
 use crate::store::*;
-use crate::transaction::Transaction;
 use crate::types::*;
 use crate::validation::*;
-use crate::{require_caller, require_field, require_timestamp};
 
 // RESPONSE: { agent: Agent, near_account_id, onboarding: { welcome, profile_completeness,
 //   steps: [{ action, hint }], suggested: [Suggestion] } }
@@ -58,45 +55,46 @@ pub fn handle_register(req: &Request) -> Response {
         last_active: ts,
     };
 
-    let mut txn = Transaction::new();
+    let (agent_val, agent_bytes) = match agent_to_value_and_bytes(&agent) {
+        Ok(pair) => pair,
+        Err(e) => return e.into(),
+    };
 
-    let rollback_agent = agent.clone();
-    if let Some(r) = txn.step(
-        "Failed to save agent",
-        || save_agent(&agent, &agent),
-        move || {
-            crate::registry::remove_sorted_indices(&rollback_agent);
-            set_public(&keys::pub_agent(&rollback_agent.handle), &[])
-        },
-    ) {
-        return r;
+    // Write order: account mapping → agent record → registry marker.
+    // Account mapping is cheapest to orphan: if the agent record write fails,
+    // the stale mapping is harmless (load_agent returns None) and will be
+    // overwritten on the next registration attempt by the same account.
+    if let Err(e) = user_set(&keys::near_account(&caller), handle.as_bytes()) {
+        return err_coded(
+            "STORAGE_ERROR",
+            &format!("Failed to save account mapping: {e}"),
+        );
     }
 
-    let c = caller.clone();
-    if let Some(r) = txn.step(
-        "Failed to save account mapping",
-        || set_public(&keys::near_account(&caller), handle.as_bytes()),
-        move || set_public(&keys::near_account(&c), &[]),
-    ) {
-        return r;
+    if let Err(e) = save_agent_preserialized(&agent_bytes, &agent) {
+        return err_coded("STORAGE_ERROR", &format!("Failed to save agent: {e}"));
     }
 
-    let rb_handle = handle.clone();
-    if let Some(r) = txn.step(
-        "Failed to update registry",
-        || add_to_registry(&handle),
-        move || {
-            let remaining = index_remove(keys::pub_agents(), &rb_handle)?;
-            set_public(
-                keys::pub_meta_count(),
-                remaining.len().to_string().as_bytes(),
-            )
-        },
-    ) {
-        return r;
+    // Registry marker last — least critical; reconcile_all can rebuild.
+    if let Err(e) = user_set(&keys::pub_agent_reg(&handle), b"1") {
+        return err_coded("STORAGE_ERROR", &format!("Failed to update registry: {e}"));
     }
+
+    // Update agent count from registry prefix scan.
+    let count = handles_from_prefix(keys::pub_agent_reg_prefix()).len() as u64;
+    let _ = user_set(keys::pub_meta_count(), count.to_string().as_bytes());
 
     crate::registry::update_tag_counts(&[], &agent.tags);
+
+    // Sync to FastData KV: agent record, count, tag counts, sorted entries.
+    {
+        let tag_counts: std::collections::HashMap<String, u32> =
+            get_json(keys::pub_tag_counts()).unwrap_or_default();
+        let mut sync = crate::fastdata::SyncBatch::new();
+        sync.agent_with_val(&agent, agent_val);
+        sync.global_counts(count, &tag_counts);
+        sync.flush();
+    }
 
     // Nonce pruning is handled probabilistically in auth.rs (~2% of calls).
     // Removed the unconditional prune here to reduce storage I/O during
@@ -139,8 +137,7 @@ fn generate_onboarding_suggestions(agent_tags: &[String], handle: &str) -> Vec<s
     // Load only 5 candidates (not 20) to reduce storage reads during registration.
     // Each agent record is a separate storage read; keeping this small keeps
     // registration under the proxy timeout.
-    let Ok((preview, _)) = load_agents_sorted(SortKey::Followers, 5, &None, |a| a.handle != handle)
-    else {
+    let Ok((preview, _)) = load_agents_by_followers(5, &None, |a| a.handle != handle) else {
         return Vec::new();
     };
 

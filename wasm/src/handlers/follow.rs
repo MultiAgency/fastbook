@@ -2,21 +2,11 @@
 
 use crate::agent::*;
 use crate::keys;
-use crate::notifications::{store_notification, NOTIF_FOLLOW, NOTIF_UNFOLLOW};
-use crate::response::*;
-use crate::social_graph::{append_unfollow_index, append_unfollow_index_by_account};
 use crate::store::*;
-use crate::transaction::Transaction;
 use crate::types::*;
 use crate::validation::*;
-use crate::{
-    require_agent, require_auth, require_caller, require_field, require_handle,
-    require_target_handle, require_timestamp,
-};
 
-/// Follow vs unfollow selector.  Each method encodes the symmetric difference
-/// between the two operations (edge write vs delete, count +1 vs −1, etc.),
-/// keeping the shared mutation logic in `apply_social_mutation` / `execute_social_op`.
+/// Follow vs unfollow selector.
 #[derive(Clone, Copy)]
 enum SocialOp {
     Follow,
@@ -36,37 +26,10 @@ impl SocialOp {
             Self::Unfollow => ("SELF_UNFOLLOW", "Cannot unfollow yourself"),
         }
     }
-    fn apply_index(
-        &self,
-        txn: &mut Transaction,
-        msg: &str,
-        key: &str,
-        val: &str,
-    ) -> Option<Response> {
-        match self {
-            Self::Follow => txn.index_append(msg, key, val),
-            Self::Unfollow => txn.index_remove(msg, key, val),
-        }
-    }
-    fn adjust(&self, count: i64) -> i64 {
-        match self {
-            Self::Follow => count.saturating_add(1),
-            Self::Unfollow => count.saturating_sub(1),
-        }
-    }
-    fn edge_bytes(&self, req: &Request, ts: u64) -> Result<Vec<u8>, String> {
-        match self {
-            Self::Follow => {
-                serde_json::to_vec(&serde_json::json!({ "ts": ts, "reason": req.reason }))
-                    .map_err(|e| format!("Failed to serialize edge: {e}"))
-            }
-            Self::Unfollow => Ok(vec![]),
-        }
-    }
 }
 
-/// Applies the follow/unfollow mutation within a transaction.
-/// Returns `Some(Response)` on error (matching the Transaction pattern), `None` on success.
+/// Applies the follow/unfollow mutation using individual keys + atomic counters.
+/// Returns the post-mutation caller agent on success, or a Response on error.
 fn apply_social_mutation(
     req: &Request,
     op: SocialOp,
@@ -75,66 +38,87 @@ fn apply_social_mutation(
     target: &mut AgentRecord,
     edge_key: &str,
     ts: u64,
-) -> Option<Response> {
-    let edge_bytes = match op.edge_bytes(req, ts) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("[storage error] {e}");
-            return Some(err_coded("INTERNAL_ERROR", "Storage operation failed"));
+) -> Result<AgentRecord, Response> {
+    let to_resp = Response::from;
+
+    // Check reverse edge BEFORE any mutations — needed for mutual counter accuracy.
+    let reverse_edge_exists = user_has(&keys::pub_edge(target_handle, caller_handle));
+
+    match op {
+        SocialOp::Follow => {
+            // Write edge metadata
+            let edge_bytes =
+                serde_json::to_vec(&serde_json::json!({ "ts": ts, "reason": req.reason }))
+                    .map_err(|e| {
+                        eprintln!("[storage error] Failed to serialize edge: {e}");
+                        err_coded("INTERNAL_ERROR", "Storage operation failed")
+                    })?;
+            user_set(edge_key, &edge_bytes).map_err(to_resp)?;
+
+            // Individual relationship keys
+            user_set(&keys::pub_follower(target_handle, caller_handle), b"1").map_err(to_resp)?;
+            user_set(&keys::pub_following_key(caller_handle, target_handle), b"1")
+                .map_err(to_resp)?;
+
+            // Atomic counters
+            target.follower_count =
+                user_increment(&keys::follower_count(target_handle), 1).map_err(to_resp)?;
+
+            // Mutual counter: if target already follows caller, this creates a mutual pair.
+            if reverse_edge_exists {
+                let _ = user_increment(&keys::mutual_count(caller_handle), 1);
+                let _ = user_increment(&keys::mutual_count(target_handle), 1);
+            }
         }
+        SocialOp::Unfollow => {
+            // Mutual counter: if the reverse edge exists, this breaks a mutual pair.
+            // Must be checked before edge deletion (already done above).
+            if reverse_edge_exists {
+                let _ = user_increment(&keys::mutual_count(caller_handle), -1);
+                let _ = user_increment(&keys::mutual_count(target_handle), -1);
+            }
+
+            // Clear edge
+            user_set(edge_key, &[]).map_err(to_resp)?;
+
+            // Remove individual relationship keys
+            user_delete_key(&keys::pub_follower(target_handle, caller_handle));
+            user_delete_key(&keys::pub_following_key(caller_handle, target_handle));
+
+            // Atomic counters
+            target.follower_count =
+                user_increment(&keys::follower_count(target_handle), -1).map_err(to_resp)?;
+        }
+    }
+
+    save_agent(target).map_err(to_resp)?;
+
+    let Some(mut caller_agent) = load_agent(caller_handle) else {
+        return Err(err_coded("STORAGE_ERROR", "Failed to load caller agent"));
     };
-
-    let mut txn = Transaction::new();
-    if let Some(r) = txn.set_public("Failed to write edge", edge_key, &edge_bytes) {
-        return Some(r);
-    }
-
-    let before = target.clone();
-    if let Some(r) = op.apply_index(
-        &mut txn,
-        "Failed to update follower index",
-        &keys::pub_followers(target_handle),
-        caller_handle,
-    ) {
-        return Some(r);
-    }
-    if let Some(r) = op.apply_index(
-        &mut txn,
-        "Failed to update following index",
-        &keys::pub_following(caller_handle),
-        target_handle,
-    ) {
-        return Some(r);
-    }
-    target.follower_count = op.adjust(target.follower_count);
-
-    if let Some(r) = txn.save_agent("Failed to update target agent", target, &before) {
-        return Some(r);
-    }
-
-    let Some(caller_before) = load_agent(caller_handle) else {
-        return Some(txn.rollback_response("Failed to load caller agent"));
-    };
-    let mut caller_agent = caller_before.clone();
-    caller_agent.following_count = op.adjust(caller_agent.following_count);
     caller_agent.last_active = ts;
-    if let Some(r) = txn.save_agent(
-        "Failed to update caller agent",
-        &caller_agent,
-        &caller_before,
-    ) {
-        return Some(r);
+
+    match op {
+        SocialOp::Follow => {
+            caller_agent.following_count =
+                user_increment(&keys::following_count(caller_handle), 1).map_err(to_resp)?;
+        }
+        SocialOp::Unfollow => {
+            caller_agent.following_count =
+                user_increment(&keys::following_count(caller_handle), -1).map_err(to_resp)?;
+        }
     }
+
+    save_agent(&caller_agent).map_err(to_resp)?;
 
     increment_rate_limit(op.rate_key(), caller_handle, FOLLOW_RATE_WINDOW_SECS);
-    None
+    Ok(caller_agent)
 }
 
 struct SocialResponseCtx<'a> {
-    req: &'a Request,
     op: SocialOp,
-    caller: &'a str,
     caller_handle: &'a str,
+    caller_agent: &'a AgentRecord,
     target_handle: &'a str,
     target: &'a AgentRecord,
     was_mutual: Option<bool>,
@@ -146,7 +130,7 @@ fn build_social_response(ctx: &SocialResponseCtx<'_>) -> Response {
 
     match ctx.op {
         SocialOp::Follow => {
-            let is_mutual = has(&keys::pub_edge(ctx.target_handle, ctx.caller_handle));
+            let is_mutual = user_has(&keys::pub_edge(ctx.target_handle, ctx.caller_handle));
             warnings.on_err(
                 "notification",
                 store_notification(
@@ -155,29 +139,11 @@ fn build_social_response(ctx: &SocialResponseCtx<'_>) -> Response {
                     ctx.caller_handle,
                     is_mutual,
                     ctx.ts,
+                    None,
                 ),
             );
         }
         SocialOp::Unfollow => {
-            let unfollow_val =
-                serde_json::json!({ "ts": ctx.ts, "reason": ctx.req.reason }).to_string();
-            let unfollow_key = keys::unfollowed(ctx.caller, ctx.target_handle, ctx.ts);
-            match set_string(&unfollow_key, &unfollow_val) {
-                Ok(()) => {
-                    warnings.on_err(
-                        "unfollow index",
-                        append_unfollow_index(ctx.target_handle, &unfollow_key),
-                    );
-                    warnings.on_err(
-                        "unfollow index by account",
-                        append_unfollow_index_by_account(ctx.caller, &unfollow_key),
-                    );
-                }
-                Err(e) => {
-                    eprintln!("[warning] unfollow audit record: {e}");
-                    warnings.push("unfollow audit record: failed".into());
-                }
-            }
             warnings.on_err(
                 "notification",
                 store_notification(
@@ -186,14 +152,16 @@ fn build_social_response(ctx: &SocialResponseCtx<'_>) -> Response {
                     ctx.caller_handle,
                     ctx.was_mutual.unwrap_or(false),
                     ctx.ts,
+                    None,
                 ),
             );
         }
     }
 
-    let (my_following, my_followers) = load_agent(ctx.caller_handle)
-        .map(|a| (a.following_count, a.follower_count))
-        .unwrap_or((0, 0));
+    let (my_following, my_followers) = (
+        ctx.caller_agent.following_count,
+        ctx.caller_agent.follower_count,
+    );
 
     let mut resp = match ctx.op {
         SocialOp::Follow => {
@@ -202,11 +170,12 @@ fn build_social_response(ctx: &SocialResponseCtx<'_>) -> Response {
                 "followed": format_agent(ctx.target),
                 "your_network": { "following_count": my_following, "follower_count": my_followers },
             });
-            let target_following = index_list(&keys::pub_following(ctx.target_handle));
+            let target_following =
+                handles_from_prefix(&keys::pub_following_prefix(ctx.target_handle));
             let next = target_following
                 .iter()
-                .filter(|h| *h != ctx.target_handle && h.as_str() != ctx.caller_handle)
-                .filter(|h| !has(&keys::pub_edge(ctx.caller_handle, h)))
+                .filter(|h| h.as_str() != ctx.target_handle && h.as_str() != ctx.caller_handle)
+                .filter(|h| !user_has(&keys::pub_edge(ctx.caller_handle, h)))
                 .take(FOLLOW_SUGGESTION_SAMPLE)
                 .filter_map(|h| load_agent(h))
                 .max_by_key(|a| a.follower_count);
@@ -249,7 +218,7 @@ fn idempotent_social_response(
 
 fn execute_social_op(req: &Request, op: SocialOp) -> Response {
     // --- Validate ---
-    let (caller, caller_handle) = require_auth!(req);
+    let (_caller, caller_handle) = require_auth!(req);
     if let Err(e) = check_rate_limit(
         op.rate_key(),
         &caller_handle,
@@ -271,20 +240,20 @@ fn execute_social_op(req: &Request, op: SocialOp) -> Response {
     }
     let edge_key = keys::pub_edge(&caller_handle, &target_handle);
     match op {
-        SocialOp::Follow if has(&edge_key) => {
+        SocialOp::Follow if user_has(&edge_key) => {
             return idempotent_social_response("already_following", &caller_handle, Some(&target));
         }
-        SocialOp::Unfollow if !has(&edge_key) => {
+        SocialOp::Unfollow if !user_has(&edge_key) => {
             return idempotent_social_response("not_following", &caller_handle, None);
         }
         _ => {}
     }
     let ts = require_timestamp!();
     let was_mutual = matches!(op, SocialOp::Unfollow)
-        .then(|| has(&keys::pub_edge(&target_handle, &caller_handle)));
+        .then(|| user_has(&keys::pub_edge(&target_handle, &caller_handle)));
 
     // --- Mutate ---
-    if let Some(err) = apply_social_mutation(
+    let caller_agent = match apply_social_mutation(
         req,
         op,
         &caller_handle,
@@ -293,15 +262,29 @@ fn execute_social_op(req: &Request, op: SocialOp) -> Response {
         &edge_key,
         ts,
     ) {
-        return err;
+        Ok(agent) => agent,
+        Err(resp) => return resp,
+    };
+
+    // --- Sync to FastData KV ---
+    {
+        let mut sync = crate::fastdata::SyncBatch::new();
+        match op {
+            SocialOp::Follow => {
+                sync.edge_follow(&caller_handle, &target_handle, ts, req.reason.as_deref())
+            }
+            SocialOp::Unfollow => sync.edge_unfollow(&caller_handle, &target_handle),
+        }
+        sync.agent(&caller_agent);
+        sync.agent(&target);
+        sync.flush();
     }
 
     // --- Notify + respond ---
     build_social_response(&SocialResponseCtx {
-        req,
         op,
-        caller: &caller,
         caller_handle: &caller_handle,
+        caller_agent: &caller_agent,
         target_handle: &target_handle,
         target: &target,
         was_mutual,

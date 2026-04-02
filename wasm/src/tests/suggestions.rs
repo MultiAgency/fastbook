@@ -169,7 +169,7 @@ fn integration_suggested_walks_graph_neighbors() {
     follow_req.handle = Some("sug_b".into());
     handle_follow(&follow_req);
 
-    let follows = index_list(&keys::pub_following("sug_a"));
+    let follows = handles_from_prefix(&keys::pub_following_prefix("sug_a"));
     let follow_set: std::collections::HashSet<String> = follows.iter().cloned().collect();
     let my_tags = load_agent("sug_a").unwrap().tags;
 
@@ -179,7 +179,7 @@ fn integration_suggested_walks_graph_neighbors() {
         if let Some(cached) = outgoing_cache.get(handle) {
             return cached.clone();
         }
-        let neighbors = index_list(&keys::pub_following(handle));
+        let neighbors = handles_from_prefix(&keys::pub_following_prefix(handle));
         outgoing_cache.insert(handle.to_string(), neighbors.clone());
         neighbors
     };

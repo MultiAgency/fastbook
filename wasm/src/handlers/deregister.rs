@@ -1,50 +1,61 @@
 //! Handlers for agent deregistration and account migration.
 //!
-//! Deregistration proceeds in multiple non-transactional phases (delete record,
-//! sever edges, remove endorsements, cleanup aux data).  A crash between phases
-//! may leave orphaned data.  This is safe because `reconcile_all` (admin action)
-//! detects and repairs all such orphans: it prunes dead handles from follower/
-//! following indices, rebuilds endorsement counts, and reconstructs sorted indices.
+//! Deregistration proceeds in non-transactional phases (delete record, sever
+//! edges, remove endorsements, cleanup aux data).  A crash between phases may
+//! leave orphaned data; `reconcile_all` (admin action) repairs any drift.
 
 use crate::agent::*;
 use crate::nep413;
-use crate::registry::{remove_sorted_indices, update_tag_counts};
-use crate::response::*;
+use crate::registry::update_tag_counts;
 use crate::store::*;
-use crate::transaction::Transaction;
 use crate::types::*;
-use crate::{require_agent, require_auth, require_caller, require_field, require_handle};
 use outlayer::env;
+use std::collections::HashSet;
 
-/// Sever follow edges in one direction and recount connected agents.
-/// `list_key_fn` returns the index to iterate (e.g. followers of handle),
-/// `edge_key_fn` returns the edge key for deletion,
-/// `peer_index_fn` returns the peer's reverse index to update,
-/// `count_field_fn` returns the recount key for the peer's reverse index.
-fn sever_edges(
-    handle: &str,
-    list_key: &str,
-    edge_key_fn: impl Fn(&str) -> String,
-    peer_index_fn: impl Fn(&str) -> String,
-    count_fn: impl Fn(&[String]) -> i64,
-    set_count: impl Fn(&mut AgentRecord, i64),
-    warnings: &mut Warnings,
-) {
-    let peers = index_list(list_key);
-    for peer in &peers {
-        let _ = delete(&edge_key_fn(peer));
+/// Remove all follow edges for a deregistering agent.
+///
+/// Collects followers and following upfront, then processes each direction
+/// with simple decrements (matching the pattern in follow.rs).  Mutual
+/// relationships are detected via a HashSet built from the followers list,
+/// so mutual_count is decremented exactly once per mutual peer regardless
+/// of processing order.
+fn remove_follow_edges(handle: &str, warnings: &mut Warnings) {
+    let followers = handles_from_prefix(&keys::pub_follower_prefix(handle));
+    let following = handles_from_prefix(&keys::pub_following_prefix(handle));
+    let following_set: HashSet<&str> = following.iter().map(String::as_str).collect();
+
+    // Peers who follow this agent: decrement their following_count.
+    for peer in &followers {
+        let _ = delete(&keys::pub_edge(peer, handle));
+        user_delete_key(&keys::pub_following_key(peer, handle));
+
         if let Some(mut peer_agent) = load_agent(peer) {
-            let peer_idx = peer_index_fn(peer);
-            // index_remove returns the remaining entries, avoiding a second read.
-            let Ok(remaining) = index_remove(&peer_idx, handle) else {
-                warnings.push(format!("failed to update index for {peer}"));
-                continue;
-            };
-            set_count(&mut peer_agent, count_fn(&remaining));
+            peer_agent.following_count = peer_agent.following_count.saturating_sub(1);
             if write_agent_record(&peer_agent).is_err() {
-                warnings.push(format!("failed to update connected agent {peer}"));
+                warnings.push(format!("failed to update follower {peer}"));
             }
         }
+        let _ = user_increment(&keys::following_count(peer), -1);
+
+        // Mutual: this peer follows handle AND handle follows this peer.
+        // Decremented here only — the following loop skips mutual peers.
+        if following_set.contains(peer.as_str()) {
+            let _ = user_increment(&keys::mutual_count(peer), -1);
+        }
+    }
+
+    // Peers this agent follows: decrement their follower_count.
+    for peer in &following {
+        let _ = delete(&keys::pub_edge(handle, peer));
+        user_delete_key(&keys::pub_follower(peer, handle));
+
+        if let Some(mut peer_agent) = load_agent(peer) {
+            peer_agent.follower_count = peer_agent.follower_count.saturating_sub(1);
+            if write_agent_record(&peer_agent).is_err() {
+                warnings.push(format!("failed to update followed {peer}"));
+            }
+        }
+        let _ = user_increment(&keys::follower_count(peer), -1);
     }
 }
 
@@ -54,44 +65,47 @@ fn remove_endorsements(handle: &str, agent: &AgentRecord, warnings: &mut Warning
     let endorsable =
         super::endorse::collect_endorsable(Some(&agent.tags), Some(&agent.capabilities));
     for (ns, val) in &endorsable {
-        let endorser_idx_key = keys::endorsers(handle, ns, val);
-        let endorsers = index_list(&endorser_idx_key);
+        let endorsers = handles_from_prefix(&keys::pub_endorser_prefix(handle, ns, val));
         for endorser_handle in &endorsers {
             let _ = delete(&keys::endorsement(handle, ns, val, endorser_handle));
-            let _ = index_remove(
-                &keys::endorsement_by(endorser_handle, handle),
-                &format!("{ns}:{val}"),
-            );
+            user_delete_key(&keys::pub_endorser(handle, ns, val, endorser_handle));
+            user_delete_key(&keys::pub_endorsement_by(endorser_handle, handle, ns, val));
             // If no endorsements remain from this endorser to the deregistering agent,
-            // remove the target from their endorsed_targets index.
-            if index_list(&keys::endorsement_by(endorser_handle, handle)).is_empty() {
-                let _ = index_remove(&keys::endorsed_targets(endorser_handle), handle);
+            // remove the endorsed_target marker.
+            if handles_from_prefix(&keys::pub_endorsement_by_prefix(endorser_handle, handle))
+                .is_empty()
+            {
+                user_delete_key(&keys::pub_endorsed_target(endorser_handle, handle));
             }
         }
-        let _ = delete(&endorser_idx_key);
     }
 
-    // Endorsements given: iterate the endorsed_targets index instead of the full registry.
-    let targets = index_list(&keys::endorsed_targets(handle));
+    // Endorsements given: iterate endorsed_target markers instead of the full registry.
+    let targets = handles_from_prefix(&keys::pub_endorsed_target_prefix(handle));
     for target in &targets {
-        let by_key = keys::endorsement_by(handle, target);
-        let endorsed_pairs = index_list(&by_key);
-        if endorsed_pairs.is_empty() {
+        let prefix = keys::pub_endorsement_by_prefix(handle, target);
+        let by_keys = user_list(&prefix);
+        if by_keys.is_empty() {
+            // Clean up the target marker even if no pairs remain.
+            user_delete_key(&keys::pub_endorsed_target(handle, target));
             continue;
         }
         if let Some(mut target_agent) = load_agent(target) {
             let mut changed = false;
-            for pair in &endorsed_pairs {
+            for by_key in &by_keys {
+                // Extract ns:val from the full key by stripping the prefix.
+                let pair = by_key.strip_prefix(&prefix).unwrap_or(by_key);
                 if let Some((ns, val)) = pair.split_once(':') {
                     let ekey = keys::endorsement(target, ns, val, handle);
                     // Guard: only decrement if the record still exists, so that
-                    // orphaned index entries don't cause spurious decrements.
+                    // orphaned keys don't cause spurious decrements.
                     if has(&ekey) {
                         target_agent.endorsements.decrement(ns, val);
                         let _ = delete(&ekey);
                         changed = true;
                     }
-                    let _ = index_remove(&keys::endorsers(target, ns, val), handle);
+                    user_delete_key(&keys::pub_endorser(target, ns, val, handle));
+                    user_delete_key(&keys::pub_endorsement_by(handle, target, ns, val));
                 }
             }
             if changed {
@@ -101,21 +115,33 @@ fn remove_endorsements(handle: &str, agent: &AgentRecord, warnings: &mut Warning
                 }
             }
         }
-        let _ = delete(&by_key);
+        user_delete_key(&keys::pub_endorsed_target(handle, target));
     }
 }
 
-/// Delete notifications, unfollow history, suggestions, and rate limit keys.
+/// Delete notifications, rate limit keys, follower/following keys, and counters.
 fn delete_aux_data(handle: &str, caller: &str) {
     purge_index(&keys::notif_idx(handle));
     let _ = delete(&keys::notif_read(handle));
-    purge_index(&keys::unfollow_idx(handle));
-    purge_index(&keys::unfollow_idx_by(caller));
-    purge_index(&keys::suggested_idx(caller));
-    let _ = delete(&keys::endorsed_targets(handle));
-
-    let _ = delete(&keys::pub_followers(handle));
-    let _ = delete(&keys::pub_following(handle));
+    // Clean up remaining individual follower/following keys for this handle.
+    for k in user_list(&keys::pub_follower_prefix(handle)) {
+        user_delete_key(&k);
+    }
+    for k in user_list(&keys::pub_following_prefix(handle)) {
+        user_delete_key(&k);
+    }
+    // Reset atomic counters.
+    for counter_fn in [
+        keys::follower_count,
+        keys::following_count,
+        keys::mutual_count,
+    ] {
+        let ck = counter_fn(handle);
+        let cur = user_counter(&ck);
+        if cur != 0 {
+            let _ = user_increment(&ck, -cur);
+        }
+    }
 
     for action in RATE_LIMITED_ACTIONS {
         let _ = delete(&keys::rate(action, handle));
@@ -145,6 +171,90 @@ fn parse_signer_account() -> Result<String, Response> {
         .ok_or_else(|| err_coded("AUTH_FAILED", "Invalid signer account ID"))
 }
 
+/// Core deregistration logic shared by both user and admin deregister handlers.
+///
+/// Each phase continues on partial failure (recording warnings) so that later
+/// phases still execute.  Any counter drift from a mid-crash is repaired by
+/// heartbeat reconciliation or admin reconcile_all.
+fn do_deregister(handle: &str, agent: &AgentRecord, account_for_aux: &str) -> Warnings {
+    let mut warnings = Warnings::new();
+
+    // Phase 1: Delete agent record and remove from registry.
+    // Done first so the agent is invisible even if later cleanup fails.
+    let _ = delete(&keys::pub_agent(handle));
+
+    user_delete_key(&keys::pub_agent_reg(handle));
+    let count = handles_from_prefix(keys::pub_agent_reg_prefix()).len();
+    let _ = set_public(keys::pub_meta_count(), count.to_string().as_bytes());
+    update_tag_counts(&agent.tags, &[]);
+    let _ = delete(&keys::near_account(&agent.near_account_id));
+
+    // Phase 2: Sever follow edges with simple decrements.
+    // Matches the pattern used by follow.rs for unfollow.  Any counter drift
+    // from a partial failure is repaired by reconcile_all.
+    remove_follow_edges(handle, &mut warnings);
+
+    // Phase 3: Remove endorsements given by and received by this agent.
+    remove_endorsements(handle, agent, &mut warnings);
+
+    // Sync to FastData KV BEFORE Phase 4 — delete_aux_data deletes the
+    // follower/following keys we need to read here.
+    {
+        let count = handles_from_prefix(keys::pub_agent_reg_prefix()).len() as u64;
+        let tag_counts: std::collections::HashMap<String, u32> =
+            get_json(keys::pub_tag_counts()).unwrap_or_default();
+        let mut sync = crate::fastdata::SyncBatch::new();
+        sync.null_agent(handle);
+        sync.tag_removals(&agent.tags, &[], handle);
+        sync.global_counts(count, &tag_counts);
+        for f in &handles_from_prefix(&keys::pub_follower_prefix(handle)) {
+            sync.push(
+                crate::fastdata::follower_key(handle, f),
+                serde_json::Value::Null,
+            );
+            sync.push(
+                crate::fastdata::edge_key(f, handle),
+                serde_json::Value::Null,
+            );
+            // Null the peer-side key so get_following for f doesn't include the dead handle.
+            sync.push(
+                crate::fastdata::following_key(f, handle),
+                serde_json::Value::Null,
+            );
+        }
+        for f in &handles_from_prefix(&keys::pub_following_prefix(handle)) {
+            sync.push(
+                crate::fastdata::following_key(handle, f),
+                serde_json::Value::Null,
+            );
+            sync.push(
+                crate::fastdata::edge_key(handle, f),
+                serde_json::Value::Null,
+            );
+            // Null the peer-side key so get_followers for f doesn't include the dead handle.
+            sync.push(
+                crate::fastdata::follower_key(f, handle),
+                serde_json::Value::Null,
+            );
+        }
+        let endorsable =
+            super::endorse::collect_endorsable(Some(&agent.tags), Some(&agent.capabilities));
+        let pairs: Vec<(&str, &str)> = endorsable
+            .iter()
+            .map(|(ns, val)| (ns.as_str(), val.as_str()))
+            .collect();
+        sync.null_endorsers(handle, &pairs);
+        if let Some(w) = sync.flush() {
+            warnings.push(w);
+        }
+    }
+
+    // Phase 4: Delete auxiliary data and rate limit keys.
+    delete_aux_data(handle, account_for_aux);
+
+    warnings
+}
+
 // RESPONSE: { action: "deregistered", handle }
 pub fn handle_deregister(req: &Request) -> Response {
     let (caller, handle) = require_auth!(req);
@@ -160,50 +270,7 @@ pub fn handle_deregister(req: &Request) -> Response {
     }
     let agent = require_agent!(&handle);
 
-    let mut warnings = Warnings::new();
-
-    // Deregistration runs 4 non-transactional phases. Each phase continues on
-    // partial failure (recording warnings) so that later phases still execute.
-    // If a crash interrupts mid-deregister, peers may have stale counts until
-    // the next heartbeat reconciliation or admin reconcile_all.
-
-    // Phase 1: Delete agent record and remove from registry.
-    // Done first so the agent is invisible even if later cleanup fails.
-    let _ = delete(&keys::pub_agent(&handle));
-    remove_sorted_indices(&agent);
-    let _ = index_remove(keys::pub_agents(), &handle);
-    let count = index_list(keys::pub_agents()).len();
-    let _ = set_public(keys::pub_meta_count(), count.to_string().as_bytes());
-    update_tag_counts(&agent.tags, &[]);
-    let _ = delete(&keys::near_account(&agent.near_account_id));
-
-    // Phase 2: Sever follow edges and recount connected agents.
-    // Counts are derived from the index *after* removal rather than decremented,
-    // keeping count and index in agreement even if the count had drifted.
-    sever_edges(
-        &handle,
-        &keys::pub_followers(&handle),
-        |peer| keys::pub_edge(peer, &handle),
-        keys::pub_following,
-        |remaining| remaining.len() as i64,
-        |a, c| a.following_count = c,
-        &mut warnings,
-    );
-    sever_edges(
-        &handle,
-        &keys::pub_following(&handle),
-        |peer| keys::pub_edge(&handle, peer),
-        keys::pub_followers,
-        |remaining| remaining.len() as i64,
-        |a, c| a.follower_count = c,
-        &mut warnings,
-    );
-
-    // Phase 3: Remove endorsements given by and received by this agent.
-    remove_endorsements(&handle, &agent, &mut warnings);
-
-    // Phase 4: Delete auxiliary data and rate limit keys.
-    delete_aux_data(&handle, &caller);
+    let warnings = do_deregister(&handle, &agent, &caller);
 
     increment_rate_limit("deregister", &caller, DEREGISTER_RATE_WINDOW_SECS);
 
@@ -224,38 +291,7 @@ pub fn handle_admin_deregister(req: &Request) -> Response {
     let handle = require_field!(req.handle.as_deref(), "Handle is required").to_lowercase();
     let agent = require_agent!(&handle);
 
-    let mut warnings = Warnings::new();
-
-    // Reuse the same 4-phase deregistration as handle_deregister.
-    let _ = delete(&keys::pub_agent(&handle));
-    remove_sorted_indices(&agent);
-    let _ = index_remove(keys::pub_agents(), &handle);
-    let count = index_list(keys::pub_agents()).len();
-    let _ = set_public(keys::pub_meta_count(), count.to_string().as_bytes());
-    update_tag_counts(&agent.tags, &[]);
-    let _ = delete(&keys::near_account(&agent.near_account_id));
-
-    sever_edges(
-        &handle,
-        &keys::pub_followers(&handle),
-        |peer| keys::pub_edge(peer, &handle),
-        keys::pub_following,
-        |remaining| remaining.len() as i64,
-        |a, c| a.following_count = c,
-        &mut warnings,
-    );
-    sever_edges(
-        &handle,
-        &keys::pub_following(&handle),
-        |peer| keys::pub_edge(&handle, peer),
-        keys::pub_followers,
-        |remaining| remaining.len() as i64,
-        |a, c| a.follower_count = c,
-        &mut warnings,
-    );
-
-    remove_endorsements(&handle, &agent, &mut warnings);
-    delete_aux_data(&handle, &agent.near_account_id);
+    let warnings = do_deregister(&handle, &agent, &agent.near_account_id);
 
     let mut resp = serde_json::json!({
         "action": "admin_deregistered",
@@ -358,45 +394,40 @@ pub fn handle_migrate_account(req: &Request) -> Response {
         Err(_) => return err_coded("INTERNAL_ERROR", "Nonce verification failed — please retry"),
     }
 
-    let mut txn = Transaction::new();
-
-    if let Some(r) = txn.set_public(
-        "Failed to write new account mapping",
-        &keys::near_account(new_account),
-        handle.as_bytes(),
-    ) {
-        return r;
-    }
-
-    // Write empty bytes rather than delete: Transaction only supports
-    // set_public, and an empty value makes agent_handle_for_account()
-    // return None (empty string won't match any handle).
-    if let Some(r) = txn.set_public(
-        "Failed to clear old account mapping",
-        &keys::near_account(&old_account),
-        &[],
-    ) {
-        return r;
+    // Write order: new mapping → agent record → delete old mapping.
+    //
+    // New mapping first: if the agent record write fails, the stale new
+    // mapping is harmless (points to handle whose agent still says old
+    // account) and the old account can retry because before.near_account_id
+    // still equals old_account, so the "same account" guard won't fire.
+    //
+    // Agent record second: once both mapping and record are written, the
+    // migration is logically complete even if deleting the old mapping fails
+    // (the old mapping becomes a stale pointer that will be overwritten or
+    // cleaned up by reconcile_all).
+    if let Err(e) = set_public(&keys::near_account(new_account), handle.as_bytes()) {
+        return err_coded(
+            "INTERNAL_ERROR",
+            &format!("Failed to write new account mapping: {e}"),
+        );
     }
 
     let mut agent = before.clone();
     agent.near_account_id = new_account.to_string();
-    if let Some(r) = txn.save_agent("Failed to save agent", &agent, &before) {
-        return r;
+    if save_agent(&agent).is_err() {
+        return err_coded("INTERNAL_ERROR", "Failed to save agent");
     }
+
+    // Clear old account mapping so agent_handle_for_account() returns None.
+    let _ = delete(&keys::near_account(&old_account));
 
     increment_rate_limit("migrate_account", &handle, MIGRATE_RATE_WINDOW_SECS);
 
-    // Migrate account-keyed storage (best-effort — these expire naturally if missed)
-    let uf_by = index_list(&keys::unfollow_idx_by(&old_account));
-    if !uf_by.is_empty() {
-        let _ = set_json(&keys::unfollow_idx_by(new_account), &uf_by);
-        let _ = delete(&keys::unfollow_idx_by(&old_account));
-    }
-    let sug = index_list(&keys::suggested_idx(&old_account));
-    if !sug.is_empty() {
-        let _ = set_json(&keys::suggested_idx(new_account), &sug);
-        let _ = delete(&keys::suggested_idx(&old_account));
+    // Sync to FastData KV: update agent record.
+    {
+        let mut sync = crate::fastdata::SyncBatch::new();
+        sync.agent(&agent);
+        sync.flush();
     }
 
     ok_response(serde_json::json!({

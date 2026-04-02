@@ -1,4 +1,10 @@
 // ---------------------------------------------------------------------------
+// Shared UI types
+// ---------------------------------------------------------------------------
+
+export type StepStatus = 'idle' | 'loading' | 'success' | 'error';
+
+// ---------------------------------------------------------------------------
 // Authentication
 // ---------------------------------------------------------------------------
 
@@ -166,20 +172,12 @@ export interface UnfollowResponse {
   warnings?: string[];
 }
 
-export interface UnfollowRecord {
-  handle: string;
-  direction: 'was_unfollowed_by' | 'unfollowed';
-  ts?: number | null;
-  reason?: string | null;
-}
-
 export interface EdgesResponse {
   handle: string;
   edges: Edge[];
-  edge_count: number;
-  truncated: boolean;
-  history: UnfollowRecord[] | null;
-  pagination: { limit: number; next_cursor?: string; cursor_reset?: boolean };
+  edge_count?: number;
+  truncated?: boolean;
+  pagination?: { limit: number; next_cursor?: string; cursor_reset?: boolean };
 }
 
 export interface ActivityResponse {

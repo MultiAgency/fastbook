@@ -2,16 +2,18 @@
 //!
 //! # Concurrency model
 //!
-//! All index operations (`index_append`, `index_remove`, `index_insert_sorted`)
-//! are read-modify-write cycles that are **not** atomic at the storage layer.
-//! Correctness depends on OutLayer serialising WASM executions per project so
-//! that no two handler invocations run concurrently against the same key-value
-//! store. If OutLayer ever changes to allow parallel execution, every RMW index
-//! operation becomes vulnerable to TOCTOU races and must be replaced with
+//! All **public** data (`pub:` keys) uses individual atomic key-value writes
+//! and is TOCTOU-safe regardless of execution model.
+//!
+//! Auxiliary index operations (`index_append`, `prune_index`) on non-pub keys
+//! (nonce_idx, notif_idx) are read-modify-write
+//! cycles that are **not** atomic at the storage layer.  Correctness depends on
+//! OutLayer serialising WASM executions per project.  If OutLayer ever allows
+//! parallel execution, these auxiliary RMW operations must be replaced with
 //! compare-and-swap or host-level atomic list primitives.
 //!
-//! The one exception is [`set_if_absent`], which delegates to the host's atomic
-//! set-if-absent and is safe regardless of the execution model.
+//! [`set_if_absent`] delegates to the host's atomic set-if-absent and is safe
+//! regardless of the execution model.
 
 #[cfg(not(test))]
 use outlayer::storage as backend;
@@ -26,14 +28,13 @@ pub(crate) const NANOS_PER_SEC: u64 = 1_000_000_000;
 #[cfg(test)]
 pub(crate) mod test_backend {
     use std::cell::RefCell;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
 
     thread_local! {
+        /// Worker-scoped storage (auxiliary indices: notifications, rate limits, etc.).
         static STORE: RefCell<HashMap<String, Vec<u8>>> = RefCell::new(HashMap::new());
-        /// User-scoped storage (for atomic set_if_absent — nonce replay protection).
+        /// User-scoped storage (all pub: keys, atomic counters, nonces).
         static USER_STORE: RefCell<HashMap<String, Vec<u8>>> = RefCell::new(HashMap::new());
-        /// Keys written via `set_worker_with_options(_, _, Some(false))` (public scope).
-        static PUBLIC_KEYS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
         static FAIL_NEXT: RefCell<u32> = const { RefCell::new(0) };
         static SUCCEED_THEN_FAIL: RefCell<Option<(u32, u32)>> = const { RefCell::new(None) };
     }
@@ -41,7 +42,6 @@ pub(crate) mod test_backend {
     pub fn clear() {
         STORE.with(|s| s.borrow_mut().clear());
         USER_STORE.with(|s| s.borrow_mut().clear());
-        PUBLIC_KEYS.with(|s| s.borrow_mut().clear());
         FAIL_NEXT.with(|f| *f.borrow_mut() = 0);
         SUCCEED_THEN_FAIL.with(|s| *s.borrow_mut() = None);
     }
@@ -94,37 +94,19 @@ pub(crate) mod test_backend {
         Ok(())
     }
 
-    pub fn set_worker_with_options(
-        key: &str,
-        value: &[u8],
-        is_encrypted: Option<bool>,
-    ) -> Result<(), outlayer::storage::StorageError> {
-        let result = set_worker(key, value);
-        if result.is_ok() && is_encrypted == Some(false) {
-            PUBLIC_KEYS.with(|s| s.borrow_mut().insert(key.to_string()));
-        }
-        result
-    }
-
     pub fn get_worker(key: &str) -> Result<Option<Vec<u8>>, outlayer::storage::StorageError> {
         Ok(STORE.with(|s| s.borrow().get(key).cloned()))
     }
 
-    /// Returns true if the key was written via `set_worker_with_options(_, _, Some(false))`.
-    pub fn is_public(key: &str) -> bool {
-        PUBLIC_KEYS.with(|s| s.borrow().contains(key))
-    }
-
-    /// Panics if `key` was not written with the expected scope.
-    /// `expect_public = true` means the key must have been written as public.
-    pub fn assert_scope(key: &str, expect_public: bool) {
-        let actual_public = is_public(key);
+    /// Assert that a pub: key exists (or doesn't) in user-scoped storage.
+    pub fn assert_scope(key: &str, expect_present: bool) {
+        let found = user_has(key);
         assert_eq!(
-            actual_public,
-            expect_public,
-            "Scope mismatch for key {key:?}: expected {}, got {}",
-            if expect_public { "public" } else { "private" },
-            if actual_public { "public" } else { "private" },
+            found,
+            expect_present,
+            "Scope check for key {key:?}: expected {}, found {}",
+            if expect_present { "present" } else { "absent" },
+            if found { "present" } else { "absent" },
         );
     }
 
@@ -158,9 +140,61 @@ pub(crate) mod test_backend {
         USER_STORE.with(|s| s.borrow_mut().remove(key).is_some())
     }
 
+    pub fn user_set(key: &str, value: &[u8]) -> Result<(), outlayer::storage::StorageError> {
+        if check_fail_injection() {
+            return Err(outlayer::storage::StorageError(
+                "injected test failure".into(),
+            ));
+        }
+        USER_STORE.with(|s| s.borrow_mut().insert(key.to_string(), value.to_vec()));
+        Ok(())
+    }
+
+    pub fn user_has(key: &str) -> bool {
+        USER_STORE.with(|s| s.borrow().get(key).map(|v| !v.is_empty()).unwrap_or(false))
+    }
+
+    pub fn user_list_keys(prefix: &str) -> Result<Vec<String>, outlayer::storage::StorageError> {
+        Ok(USER_STORE.with(|s| {
+            let store = s.borrow();
+            let mut keys: Vec<String> = store
+                .keys()
+                .filter(|k| k.starts_with(prefix))
+                .cloned()
+                .collect();
+            keys.sort();
+            keys
+        }))
+    }
+
+    pub fn user_increment(key: &str, delta: i64) -> Result<i64, outlayer::storage::StorageError> {
+        if check_fail_injection() {
+            return Err(outlayer::storage::StorageError(
+                "injected test failure".into(),
+            ));
+        }
+        USER_STORE.with(|s| {
+            let mut store = s.borrow_mut();
+            let current = store
+                .get(key)
+                .and_then(|v| String::from_utf8(v.clone()).ok())
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(0);
+            let new_val = current + delta;
+            store.insert(key.to_string(), new_val.to_string().into_bytes());
+            Ok(new_val)
+        })
+    }
+
     // Wrappers matching outlayer::storage names so cfg-aliased `backend` works.
+    pub fn set(key: &str, value: &[u8]) -> Result<(), outlayer::storage::StorageError> {
+        user_set(key, value)
+    }
     pub fn get(key: &str) -> Result<Option<Vec<u8>>, outlayer::storage::StorageError> {
         user_get(key)
+    }
+    pub fn has(key: &str) -> bool {
+        user_has(key)
     }
     pub fn delete(key: &str) -> bool {
         user_delete(key)
@@ -168,46 +202,110 @@ pub(crate) mod test_backend {
     pub fn set_if_absent(key: &str, value: &[u8]) -> Result<bool, outlayer::storage::StorageError> {
         user_set_if_absent(key, value)
     }
+    pub fn list_keys(prefix: &str) -> Result<Vec<String>, outlayer::storage::StorageError> {
+        user_list_keys(prefix)
+    }
+    pub fn increment(key: &str, delta: i64) -> Result<i64, outlayer::storage::StorageError> {
+        user_increment(key, delta)
+    }
 }
 
+/// Storage key schema (all colon-delimited):
+///
+/// User-scoped (pub: prefix — atomic, TOCTOU-safe):
+///   pub:agent:{handle}                            — full AgentRecord JSON
+///   pub:agent_reg:{handle}                        — registry marker (value = "1")
+///   pub:follower:{target}:{follower}              — follower edge marker
+///   pub:following:{caller}:{target}               — following edge marker
+///   pub:edge:{from}:follows:{to}                  — edge with timestamp
+///   pub:cnt:followers:{handle}                    — atomic follower counter
+///   pub:cnt:following:{handle}                    — atomic following counter
+///   pub:meta:agent_count                          — total registered agents
+///   pub:tag_counts                                — HashMap<tag, count> JSON
+///   pub:near:{account_id}                         — account → handle mapping
+///       Can become stale after partial failures; `agent_handle_for_account()`
+///       verifies the agent record before returning, so stale mappings are
+///       invisible to callers.
+///   pub:endorsement:{target}:{ns}:{value}:{from}  — endorsement record
+///   pub:endorser:{target}:{ns}:{value}:{from}     — endorser marker
+///   pub:endorsement_by:{from}:{target}:{ns}:{val} — reverse lookup
+///   pub:endorsed_target:{from}:{target}            — "from endorsed target" flag
+///   pub:notif_dedup:{target}:{type}:{from}        — notification dedup marker (timestamp)
+///
+/// Worker-scoped (auxiliary, RMW — requires serialised execution):
+///   nonce:{nonce_val}          — replay-protection marker (user-scoped atomic)
+///   nonce_idx                  — JSON array of active nonce keys
+///   notif:{handle}:{ts}:{type}:{from} — notification record
+///   notif_idx:{handle}         — JSON array of notification keys
+///   notif_read:{handle}        — last-read timestamp
+///   rate:{action}:{caller}     — rate-limit window:count
 pub mod keys {
-    pub fn pub_agents() -> &'static str {
-        "pub:agents"
-    }
     pub fn pub_agent(handle: &str) -> String {
         format!("pub:agent:{handle}")
     }
-    pub fn pub_followers(handle: &str) -> String {
-        format!("pub:followers:{handle}")
+    pub fn pub_agent_reg(handle: &str) -> String {
+        format!("pub:agent_reg:{handle}")
     }
-    pub fn pub_following(handle: &str) -> String {
-        format!("pub:following:{handle}")
+    pub fn pub_agent_reg_prefix() -> &'static str {
+        "pub:agent_reg:"
+    }
+
+    pub fn pub_follower(target: &str, follower: &str) -> String {
+        format!("pub:follower:{target}:{follower}")
+    }
+    pub fn pub_follower_prefix(handle: &str) -> String {
+        format!("pub:follower:{handle}:")
+    }
+    pub fn pub_following_key(caller: &str, target: &str) -> String {
+        format!("pub:following:{caller}:{target}")
+    }
+    pub fn pub_following_prefix(handle: &str) -> String {
+        format!("pub:following:{handle}:")
     }
     pub fn pub_edge(from: &str, to: &str) -> String {
         format!("pub:edge:{from}:follows:{to}")
     }
-    pub fn pub_sorted(sort: &str) -> String {
-        format!("pub:sorted:{sort}")
+
+    pub fn follower_count(handle: &str) -> String {
+        format!("pub:cnt:followers:{handle}")
     }
+    pub fn following_count(handle: &str) -> String {
+        format!("pub:cnt:following:{handle}")
+    }
+    pub fn mutual_count(handle: &str) -> String {
+        format!("pub:cnt:mutual:{handle}")
+    }
+
     pub fn pub_meta_count() -> &'static str {
         "pub:meta:agent_count"
     }
     pub fn pub_tag_counts() -> &'static str {
         "pub:tag_counts"
     }
-
     pub fn near_account(account_id: &str) -> String {
         format!("pub:near:{account_id}")
     }
 
-    pub fn unfollowed(caller: &str, handle: &str, ts: u64) -> String {
-        format!("unfollowed:{caller}:{handle}:{ts}")
+    pub fn endorsement(target: &str, ns: &str, value: &str, from: &str) -> String {
+        format!("pub:endorsement:{target}:{ns}:{value}:{from}")
     }
-    pub fn unfollow_idx(handle: &str) -> String {
-        format!("unfollow_idx:{handle}")
+    pub fn pub_endorser(target: &str, ns: &str, value: &str, from: &str) -> String {
+        format!("pub:endorser:{target}:{ns}:{value}:{from}")
     }
-    pub fn unfollow_idx_by(account: &str) -> String {
-        format!("unfollow_idx_by:{account}")
+    pub fn pub_endorser_prefix(target: &str, ns: &str, value: &str) -> String {
+        format!("pub:endorser:{target}:{ns}:{value}:")
+    }
+    pub fn pub_endorsement_by(from: &str, target: &str, ns: &str, value: &str) -> String {
+        format!("pub:endorsement_by:{from}:{target}:{ns}:{value}")
+    }
+    pub fn pub_endorsement_by_prefix(from: &str, target: &str) -> String {
+        format!("pub:endorsement_by:{from}:{target}:")
+    }
+    pub fn pub_endorsed_target(from: &str, target: &str) -> String {
+        format!("pub:endorsed_target:{from}:{target}")
+    }
+    pub fn pub_endorsed_target_prefix(from: &str) -> String {
+        format!("pub:endorsed_target:{from}:")
     }
 
     pub fn nonce(nonce_val: &str) -> String {
@@ -216,14 +314,6 @@ pub mod keys {
     pub fn nonce_idx() -> &'static str {
         "nonce_idx"
     }
-
-    pub fn suggested(caller: &str, handle: &str, ts: u64) -> String {
-        format!("suggested:{caller}:{handle}:{ts}")
-    }
-    pub fn suggested_idx(caller: &str) -> String {
-        format!("suggested_idx:{caller}")
-    }
-
     pub fn notif(handle: &str, ts: u64, notif_type: &str, from: &str) -> String {
         format!("notif:{handle}:{ts}:{notif_type}:{from}")
     }
@@ -233,24 +323,11 @@ pub mod keys {
     pub fn notif_read(handle: &str) -> String {
         format!("notif_read:{handle}")
     }
-
     pub fn rate(action: &str, caller: &str) -> String {
         format!("rate:{action}:{caller}")
     }
-
-    pub fn endorsement(target: &str, ns: &str, value: &str, from: &str) -> String {
-        format!("pub:endorsement:{target}:{ns}:{value}:{from}")
-    }
-    pub fn endorsement_by(from: &str, target: &str) -> String {
-        format!("pub:endorsement_by:{from}:{target}")
-    }
-    pub fn endorsers(target: &str, ns: &str, value: &str) -> String {
-        format!("pub:endorsers:{target}:{ns}:{value}")
-    }
-    /// Index of target handles that `from` has endorsed (any ns:val).
-    /// Avoids full registry scan during deregistration.
-    pub fn endorsed_targets(from: &str) -> String {
-        format!("pub:endorsed_targets:{from}")
+    pub fn notif_dedup(target: &str, notif_type: &str, from: &str) -> String {
+        format!("pub:notif_dedup:{target}:{notif_type}:{from}")
     }
 }
 
@@ -262,23 +339,27 @@ fn backend_get(key: &str) -> Result<Option<Vec<u8>>, AppError> {
     backend::get_worker(key).map_err(|e| AppError::Storage(e.to_string()))
 }
 
-fn backend_set_public(key: &str, val: &[u8]) -> Result<(), AppError> {
-    backend::set_worker_with_options(key, val, Some(false))
-        .map_err(|e| AppError::Storage(e.to_string()))
-}
-
 pub(crate) fn set_string(key: &str, val: &str) -> Result<(), AppError> {
     backend_set(key, val.as_bytes())
 }
 
-pub(crate) fn get_string(key: &str) -> Option<String> {
-    backend_get(key).ok().flatten().and_then(|b| {
+/// Scope-routed read: `pub:` keys read from user scope, others from worker scope.
+/// Returns `None` for missing keys or empty values.
+fn read_scoped(key: &str) -> Option<Vec<u8>> {
+    if key.starts_with("pub:") {
+        let b = user_get_bytes(key);
         if b.is_empty() {
             None
         } else {
-            String::from_utf8(b).ok()
+            Some(b)
         }
-    })
+    } else {
+        backend_get(key).ok().flatten().filter(|b| !b.is_empty())
+    }
+}
+
+pub(crate) fn get_string(key: &str) -> Option<String> {
+    read_scoped(key).and_then(|b| String::from_utf8(b).ok())
 }
 
 /// Read from user-scoped storage (used for nonce replay markers).
@@ -301,22 +382,25 @@ pub(crate) fn set_json<T: Serialize>(key: &str, val: &T) -> Result<(), AppError>
 }
 
 pub(crate) fn get_json<T: serde::de::DeserializeOwned>(key: &str) -> Option<T> {
-    backend_get(key)
-        .ok()
-        .flatten()
-        .filter(|b| !b.is_empty())
-        .and_then(|b| serde_json::from_slice(&b).ok())
+    read_scoped(key).and_then(|b| serde_json::from_slice(&b).ok())
 }
 
+/// Write to public storage. Now routes to user scope for all pub: keys.
 pub(crate) fn set_public(key: &str, val: &[u8]) -> Result<(), AppError> {
-    backend_set_public(key, val)
+    user_set(key, val)
 }
 
+#[cfg(test)]
 pub(crate) fn get_bytes(key: &str) -> Vec<u8> {
-    backend_get(key).ok().flatten().unwrap_or_default()
+    read_scoped(key).unwrap_or_default()
 }
 
+/// Check key existence. For `pub:` keys, checks user scope (where new data lives).
+/// Falls back to worker scope for non-pub keys (rate limits, notifications, etc.).
 pub(crate) fn has(key: &str) -> bool {
+    if key.starts_with("pub:") {
+        return user_has(key);
+    }
     backend_get(key)
         .ok()
         .flatten()
@@ -324,18 +408,13 @@ pub(crate) fn has(key: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Batch existence check: returns a `Vec<bool>` aligned 1:1 with the input keys.
-/// Sequential today; a future parallel storage backend would make this a single round-trip.
-pub(crate) fn has_batch(keys: &[String]) -> Vec<bool> {
-    keys.iter().map(|k| has(k)).collect()
-}
-
+/// Delete a key. For `pub:` keys, deletes from user scope.
 pub(crate) fn delete(key: &str) -> Result<(), AppError> {
     if key.starts_with("pub:") {
-        backend_set_public(key, &[])
-    } else {
-        backend_set(key, &[])
+        user_delete_key(key);
+        return Ok(());
     }
+    backend_set(key, &[])
 }
 
 /// Atomic set-if-absent using user-scoped storage.
@@ -348,13 +427,76 @@ pub(crate) fn set_if_absent(key: &str, val: &str) -> Result<bool, AppError> {
     backend::set_if_absent(key, val.as_bytes()).map_err(|e| AppError::Storage(e.to_string()))
 }
 
+// ---------------------------------------------------------------------------
+// User-scoped storage primitives (individual keys, atomic counters)
+// ---------------------------------------------------------------------------
+
+pub(crate) fn user_set(key: &str, val: &[u8]) -> Result<(), AppError> {
+    backend::set(key, val).map_err(|e| AppError::Storage(e.to_string()))
+}
+
+pub(crate) fn user_get_bytes(key: &str) -> Vec<u8> {
+    backend::get(key).ok().flatten().unwrap_or_default()
+}
+
+pub(crate) fn user_get_json<T: serde::de::DeserializeOwned>(key: &str) -> Option<T> {
+    backend::get(key)
+        .ok()
+        .flatten()
+        .filter(|b| !b.is_empty())
+        .and_then(|b| serde_json::from_slice(&b).ok())
+}
+
+pub(crate) fn user_has(key: &str) -> bool {
+    backend::has(key)
+}
+
+pub(crate) fn user_delete_key(key: &str) -> bool {
+    backend::delete(key)
+}
+
+/// List all user-scope keys matching a prefix (sorted).
+pub(crate) fn user_list(prefix: &str) -> Vec<String> {
+    backend::list_keys(prefix).unwrap_or_default()
+}
+
+/// Extract the last `:` segment from a key (the handle/id stored as suffix).
+pub(crate) fn key_suffix(key: &str) -> &str {
+    key.rsplit(':').next().unwrap_or(key)
+}
+
+/// List user-scope keys by prefix and extract the suffix of each as a handle.
+pub(crate) fn handles_from_prefix(prefix: &str) -> Vec<String> {
+    user_list(prefix)
+        .iter()
+        .map(|k| key_suffix(k).to_string())
+        .collect()
+}
+
+/// Atomic counter increment. Returns the new value.
+pub(crate) fn user_increment(key: &str, delta: i64) -> Result<i64, AppError> {
+    backend::increment(key, delta).map_err(|e| AppError::Storage(e.to_string()))
+}
+
+/// Read atomic counter value without modifying it.
+pub(crate) fn user_counter(key: &str) -> i64 {
+    backend::get(key)
+        .ok()
+        .flatten()
+        .and_then(|b| String::from_utf8(b).ok())
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(0)
+}
+
+/// Write a JSON index to worker-scope storage.
+/// Only used for auxiliary (non-pub) indices: nonce_idx, notif_idx.
 fn write_index<T: Serialize>(key: &str, val: &T) -> Result<(), AppError> {
+    debug_assert!(
+        !key.starts_with("pub:"),
+        "write_index called on pub: key — use user_set instead"
+    );
     let bytes = serde_json::to_vec(val).map_err(|e| AppError::Storage(e.to_string()))?;
-    if key.starts_with("pub:") {
-        backend_set_public(key, &bytes)
-    } else {
-        backend_set(key, &bytes)
-    }
+    backend_set(key, &bytes)
 }
 
 pub(crate) fn index_list(key: &str) -> Vec<String> {
@@ -371,62 +513,6 @@ pub(crate) fn index_append(key: &str, entry: &str) -> Result<(), AppError> {
         write_index(key, &idx)?;
     }
     Ok(())
-}
-
-/// Remove `entry` from the index at `key`. Returns the remaining entries
-/// so callers can derive counts without a second read.
-pub(crate) fn index_remove(key: &str, entry: &str) -> Result<Vec<String>, AppError> {
-    let mut idx = index_list(key);
-    let before = idx.len();
-    idx.retain(|e| e != entry);
-    if idx.len() != before {
-        write_index(key, &idx)?;
-    }
-    Ok(idx)
-}
-
-/// Idempotent insert: adds `entry` at its sorted position via binary search.
-/// Maintains alphabetical order (used for sorted registry indices).
-/// Do not mix with `index_append` on the same key — they assume different orderings.
-pub(crate) fn index_insert_sorted(key: &str, entry: &str) -> Result<(), AppError> {
-    let mut idx = index_list(key);
-    let pos = idx
-        .binary_search_by(|e| e.as_str().cmp(entry))
-        .unwrap_or_else(|p| p);
-    if idx.get(pos).map(std::string::String::as_str) != Some(entry) {
-        idx.insert(pos, entry.to_string());
-        write_index(key, &idx)?;
-    }
-    Ok(())
-}
-
-pub(crate) fn index_remove_sorted(key: &str, entry: &str) -> Result<(), AppError> {
-    let mut idx = index_list(key);
-    if let Ok(pos) = idx.binary_search_by(|e| e.as_str().cmp(entry)) {
-        idx.remove(pos);
-        write_index(key, &idx)?;
-    }
-    Ok(())
-}
-
-/// Remove old_entry and insert new_entry in a single read-write cycle.
-/// Avoids the window where neither entry is present.
-pub(crate) fn index_replace_sorted(
-    key: &str,
-    old_entry: &str,
-    new_entry: &str,
-) -> Result<(), AppError> {
-    let mut idx = index_list(key);
-    if let Ok(pos) = idx.binary_search_by(|e| e.as_str().cmp(old_entry)) {
-        idx.remove(pos);
-    }
-    let new_pos = idx
-        .binary_search_by(|e| e.as_str().cmp(new_entry))
-        .unwrap_or_else(|p| p);
-    if idx.get(new_pos).map(std::string::String::as_str) != Some(new_entry) {
-        idx.insert(new_pos, new_entry.to_string());
-    }
-    write_index(key, &idx)
 }
 
 pub(crate) fn now_secs() -> Result<u64, AppError> {
@@ -493,6 +579,26 @@ pub(crate) fn check_rate_limit(
     Ok(())
 }
 
+/// Like `check_rate_limit`, but on success returns the remaining budget
+/// (`limit - current_count`).  Used by batch handlers to cap the number
+/// of sub-operations to the actual remaining allowance.
+pub(crate) fn check_rate_limit_budget(
+    action: &str,
+    caller: &str,
+    limit: u32,
+    window_secs: u64,
+) -> Result<u32, AppError> {
+    let (now, window, count) = rate_count(action, caller, window_secs)?;
+    if count >= limit {
+        let retry_after = (window + 1) * window_secs - now;
+        return Err(AppError::RateLimit(
+            format!("Rate limit exceeded: {limit} {action} requests per {window_secs}s"),
+            retry_after,
+        ));
+    }
+    Ok(limit - count)
+}
+
 pub(crate) fn increment_rate_limit(action: &str, caller: &str, window_secs: u64) {
     if let Ok((_now, window, count)) = rate_count(action, caller, window_secs) {
         let _ = set_string(
@@ -523,11 +629,11 @@ pub(crate) fn prune_index_with(
     }
     let mut retained = Vec::new();
     let mut expired = Vec::new();
-    for key in &keys {
-        if extract_ts(key).map(|ts| ts < cutoff).unwrap_or(false) {
-            expired.push(key.clone());
+    for key in keys {
+        if extract_ts(&key).map(|ts| ts < cutoff).unwrap_or(false) {
+            expired.push(key);
         } else {
-            retained.push(key.clone());
+            retained.push(key);
         }
     }
     if !expired.is_empty() {
@@ -560,4 +666,96 @@ pub(crate) fn prune_nonce_index(index_key: &str, cutoff: u64) -> Result<(), AppE
         |key| get_user_string(key).and_then(|v| v.parse::<u64>().ok()),
         delete_user,
     )
+}
+
+// ---------------------------------------------------------------------------
+// Notification storage: create, deduplicate, prune, and query.
+// ---------------------------------------------------------------------------
+
+fn load_notif_index(handle: &str) -> Vec<String> {
+    get_json::<Vec<String>>(&keys::notif_idx(handle)).unwrap_or_default()
+}
+
+fn append_notif(mut idx: Vec<String>, handle: &str, key: &str) -> Result<(), AppError> {
+    idx.push(key.to_string());
+    let pruned: Vec<String> = if idx.len() > crate::types::MAX_NOTIF_INDEX {
+        let excess = idx.len() - crate::types::MAX_NOTIF_INDEX;
+        let old_keys = idx[..excess].to_vec();
+        idx = idx[excess..].to_vec();
+        old_keys
+    } else {
+        Vec::new()
+    };
+    set_json(&keys::notif_idx(handle), &idx)?;
+    for old_key in &pruned {
+        let _ = delete(old_key);
+    }
+    Ok(())
+}
+
+pub(crate) const NOTIF_FOLLOW: &str = "follow";
+pub(crate) const NOTIF_UNFOLLOW: &str = "unfollow";
+pub(crate) const NOTIF_ENDORSE: &str = "endorse";
+pub(crate) const NOTIF_UNENDORSE: &str = "unendorse";
+pub(crate) fn store_notification(
+    target_handle: &str,
+    notif_type: &str,
+    from: &str,
+    is_mutual: bool,
+    ts: u64,
+    detail: Option<serde_json::Value>,
+) -> Result<(), AppError> {
+    if target_handle.is_empty() || from.is_empty() {
+        return Err(AppError::Validation(
+            "notification skipped — empty target or sender".into(),
+        ));
+    }
+
+    // O(1) dedup: check a per-(target, type, from) key whose value is the
+    // timestamp of the last notification.  Suppresses duplicates within
+    // DEDUP_WINDOW_SECS without scanning the notification index.
+    let dedup_key = keys::notif_dedup(target_handle, notif_type, from);
+    if let Some(prev_ts_str) = get_string(&dedup_key) {
+        if let Ok(prev_ts) = prev_ts_str.parse::<u64>() {
+            if ts >= prev_ts && ts - prev_ts < crate::types::DEDUP_WINDOW_SECS {
+                return Ok(());
+            }
+        }
+    }
+
+    let idx = load_notif_index(target_handle);
+    let key = keys::notif(target_handle, ts, notif_type, from);
+    let mut val = serde_json::json!({
+        "type": notif_type,
+        "from": from,
+        "is_mutual": is_mutual,
+        "at": ts,
+    });
+    if let Some(d) = detail {
+        val["detail"] = d;
+    }
+    set_string(&key, &val.to_string())?;
+    if let Err(e) = append_notif(idx, target_handle, &key) {
+        let _ = delete(&key);
+        return Err(e);
+    }
+    // Update dedup marker after successful write.
+    let _ = set_public(&dedup_key, ts.to_string().as_bytes());
+    Ok(())
+}
+
+pub(crate) fn load_notifications_since(handle: &str, since: u64) -> Vec<serde_json::Value> {
+    load_notif_index(handle)
+        .iter()
+        .filter_map(|key| {
+            let val = get_string(key)?;
+            let parsed: serde_json::Value = serde_json::from_str(&val).ok()?;
+            let at = parsed.get("at")?.as_u64()?;
+            if at > since {
+                Some(parsed)
+            } else {
+                None
+            }
+        })
+        .collect()
 }

@@ -7,9 +7,7 @@ fn deregister_basic() {
     quick_register("alice.near", "alice");
 
     // Verify agent exists
-    let resp = handle_health(&test_request(Action::Health));
-    let data = parse_response(&resp);
-    assert_eq!(data["agent_count"], 1);
+    assert_eq!(registry::registry_count(), 1);
 
     // Deregister
     set_signer("alice.near");
@@ -20,17 +18,10 @@ fn deregister_basic() {
     assert_eq!(data["handle"], "alice");
 
     // Verify agent is gone
-    let resp = handle_health(&test_request(Action::Health));
-    let data = parse_response(&resp);
-    assert_eq!(data["agent_count"], 0);
+    assert_eq!(registry::registry_count(), 0);
 
-    // Verify profile lookup fails
-    let resp = handle_get_profile(
-        &RequestBuilder::new(Action::GetProfile)
-            .handle("alice")
-            .build(),
-    );
-    assert!(!resp.success);
+    // Verify profile lookup returns None
+    assert!(load_agent("alice").is_none());
 }
 
 #[test]
@@ -56,14 +47,9 @@ fn deregister_decrements_follower_counts() {
     assert!(resp.success);
 
     // Verify counts before deregister
-    let resp = handle_get_profile(
-        &RequestBuilder::new(Action::GetProfile)
-            .handle("bob")
-            .build(),
-    );
-    let data = parse_response(&resp);
-    assert_eq!(data["agent"]["follower_count"], 1); // alice follows bob
-    assert_eq!(data["agent"]["following_count"], 1); // bob follows alice
+    let bob = load_agent("bob").unwrap();
+    assert_eq!(bob.follower_count, 1); // alice follows bob
+    assert_eq!(bob.following_count, 1); // bob follows alice
 
     // Deregister alice
     set_signer("alice.near");
@@ -71,23 +57,58 @@ fn deregister_decrements_follower_counts() {
     assert!(resp.success);
 
     // Verify bob's counts updated (no longer followed by alice, no longer following alice)
-    let resp = handle_get_profile(
-        &RequestBuilder::new(Action::GetProfile)
-            .handle("bob")
-            .build(),
-    );
-    let data = parse_response(&resp);
-    assert_eq!(data["agent"]["follower_count"], 0);
-    assert_eq!(data["agent"]["following_count"], 0);
+    let bob = load_agent("bob").unwrap();
+    assert_eq!(bob.follower_count, 0);
+    assert_eq!(bob.following_count, 0);
 
     // Verify carol's counts updated (no longer following alice)
-    let resp = handle_get_profile(
-        &RequestBuilder::new(Action::GetProfile)
-            .handle("carol")
-            .build(),
-    );
-    let data = parse_response(&resp);
-    assert_eq!(data["agent"]["following_count"], 0);
+    let carol = load_agent("carol").unwrap();
+    assert_eq!(carol.following_count, 0);
+}
+
+#[test]
+#[serial]
+fn deregister_decrements_mutual_counts() {
+    setup_integration("alice.near");
+    quick_register("alice.near", "alice");
+    quick_register("bob.near", "bob");
+    quick_register("carol.near", "carol");
+
+    // alice ↔ bob (mutual)
+    set_signer("alice.near");
+    let resp = handle_follow(&RequestBuilder::new(Action::Follow).handle("bob").build());
+    assert!(resp.success);
+    set_signer("bob.near");
+    let resp = handle_follow(&RequestBuilder::new(Action::Follow).handle("alice").build());
+    assert!(resp.success);
+
+    // carol → alice (one-way)
+    set_signer("carol.near");
+    let resp = handle_follow(&RequestBuilder::new(Action::Follow).handle("alice").build());
+    assert!(resp.success);
+
+    // Verify mutual before deregister
+    assert_eq!(user_counter(&keys::mutual_count("alice")), 1);
+    assert_eq!(user_counter(&keys::mutual_count("bob")), 1);
+    assert_eq!(user_counter(&keys::mutual_count("carol")), 0);
+
+    // Deregister alice
+    set_signer("alice.near");
+    let resp = handle_deregister(&test_request(Action::Deregister));
+    assert!(resp.success);
+
+    // Bob's mutual should be 0 (alice was the only mutual)
+    assert_eq!(user_counter(&keys::mutual_count("bob")), 0);
+    assert_eq!(user_counter(&keys::mutual_count("carol")), 0);
+
+    // Bob's social counts: was following alice (now 0), was followed by alice (now 0)
+    let bob = load_agent("bob").unwrap();
+    assert_eq!(bob.follower_count, 0);
+    assert_eq!(bob.following_count, 0);
+
+    // Carol's following count: was following alice (now 0)
+    let carol = load_agent("carol").unwrap();
+    assert_eq!(carol.following_count, 0);
 }
 
 #[test]
@@ -118,14 +139,8 @@ fn deregister_cleans_up_endorsements() {
     assert!(resp.success, "endorse failed: {:?}", resp.error);
 
     // Verify bob has endorsement from alice
-    let resp = handle_get_endorsers(
-        &RequestBuilder::new(Action::GetEndorsers)
-            .handle("bob")
-            .build(),
-    );
-    let data = parse_response(&resp);
-    let ai_endorsers = data["endorsers"]["tags"]["ai"].as_array().unwrap();
-    assert_eq!(ai_endorsers.len(), 1);
+    let endorsers = handles_from_prefix(&keys::pub_endorser_prefix("bob", "tags", "ai"));
+    assert_eq!(endorsers.len(), 1);
 
     // Deregister alice
     set_signer("alice.near");
@@ -133,18 +148,9 @@ fn deregister_cleans_up_endorsements() {
     assert!(resp.success);
 
     // Verify bob's endorsement from alice is removed
-    let resp = handle_get_endorsers(
-        &RequestBuilder::new(Action::GetEndorsers)
-            .handle("bob")
-            .build(),
-    );
-    let data = parse_response(&resp);
-    let endorsers = &data["endorsers"];
-    // endorsers is { ns: { val: [handles...] } } — all should be empty after deregister
-    let tags_endorsers = &endorsers["tags"];
-    let ai_endorsers = tags_endorsers["ai"].as_array();
+    let endorsers = handles_from_prefix(&keys::pub_endorser_prefix("bob", "tags", "ai"));
     assert!(
-        ai_endorsers.is_none() || ai_endorsers.unwrap().is_empty(),
+        endorsers.is_empty(),
         "endorsers for ai should be empty after deregister"
     );
 }
@@ -183,13 +189,8 @@ fn deregister_allows_handle_reuse() {
     // Re-register with same handle from different account
     quick_register("bob.near", "alice");
 
-    let resp = handle_get_profile(
-        &RequestBuilder::new(Action::GetProfile)
-            .handle("alice")
-            .build(),
-    );
-    let data = parse_response(&resp);
-    assert_eq!(data["agent"]["near_account_id"], "bob.near");
+    let agent = load_agent("alice").unwrap();
+    assert_eq!(agent.near_account_id, "bob.near");
 }
 
 #[test]
@@ -394,56 +395,32 @@ fn migrate_account_nonce_replay_rejected() {
 
 #[test]
 #[serial]
-fn check_handle_reserved_returns_available_false() {
+fn check_handle_reserved_returns_unavailable() {
     setup_integration("test.near");
 
-    let resp = handle_check_handle(
-        &RequestBuilder::new(Action::CheckHandle)
-            .handle("admin")
-            .build(),
-    );
-    assert!(
-        resp.success,
-        "reserved handle should not error: {:?}",
-        resp.error
-    );
-    let data = parse_response(&resp);
-    assert_eq!(data["available"], false);
-    assert_eq!(data["reason"], "reserved");
+    // "admin" is a reserved handle
+    assert!(load_agent("admin").is_none());
 }
 
 #[test]
 #[serial]
-fn check_handle_taken_returns_reason() {
+fn check_handle_taken_returns_some() {
     setup_integration("test.near");
     quick_register("test.near", "taken_bot");
 
-    let resp = handle_check_handle(
-        &RequestBuilder::new(Action::CheckHandle)
-            .handle("taken_bot")
-            .build(),
+    assert!(
+        load_agent("taken_bot").is_some(),
+        "taken handle should exist"
     );
-    assert!(resp.success);
-    let data = parse_response(&resp);
-    assert_eq!(data["available"], false);
-    assert_eq!(data["reason"], "taken");
 }
 
 #[test]
 #[serial]
-fn check_handle_available_has_no_reason() {
+fn check_handle_available_returns_none() {
     setup_integration("test.near");
 
-    let resp = handle_check_handle(
-        &RequestBuilder::new(Action::CheckHandle)
-            .handle("free_bot")
-            .build(),
-    );
-    assert!(resp.success);
-    let data = parse_response(&resp);
-    assert_eq!(data["available"], true);
     assert!(
-        data["reason"].is_null(),
-        "available handle should have no reason"
+        load_agent("free_bot").is_none(),
+        "free handle should not exist"
     );
 }

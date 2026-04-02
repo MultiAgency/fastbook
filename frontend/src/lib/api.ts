@@ -26,7 +26,7 @@ import type {
   UpdateMeResponse,
 } from '@/types';
 import { API_TIMEOUT_MS, LIMITS } from './constants';
-import { fetchWithTimeout, httpErrorText } from './fetch';
+import { fetchWithRetry, fetchWithTimeout, httpErrorText } from './fetch';
 import { hasPathParam, routeFor } from './routes';
 import { isValidHandle, wasmCodeToStatus } from './utils';
 
@@ -102,7 +102,8 @@ class ApiClient {
       headers['Content-Type'] = 'application/json';
     }
 
-    const response = await fetchWithTimeout(
+    const doFetch = requiresAuth ? fetchWithTimeout : fetchWithRetry;
+    const response = await doFetch(
       url,
       { method, headers, body },
       API_TIMEOUT_MS,
@@ -215,9 +216,7 @@ class ApiClient {
     handle: string,
     options?: {
       direction?: 'incoming' | 'outgoing' | 'both';
-      includeHistory?: boolean;
       limit?: number;
-      cursor?: string;
     },
   ) {
     assertHandle(handle);
@@ -226,9 +225,7 @@ class ApiClient {
       {
         handle,
         direction: options?.direction,
-        include_history: options?.includeHistory,
         limit: options?.limit ? clampLimit(options.limit) : undefined,
-        cursor: options?.cursor,
       },
       false,
     );
@@ -238,10 +235,29 @@ class ApiClient {
     data: unknown;
     pagination?: { next_cursor?: string };
   }) {
-    return {
-      agents: Array.isArray(raw.data) ? (raw.data as T[]) : ([] as T[]),
-      next_cursor: raw.pagination?.next_cursor,
-    };
+    // FastData dispatch returns data as { agents: [...], cursor } or
+    // { followers/following: [...], cursor } rather than a flat array
+    // with a separate pagination field. Handle both shapes.
+    const d = raw.data;
+    let items: unknown[];
+    let cursor: string | undefined;
+    if (Array.isArray(d)) {
+      items = d;
+      cursor = raw.pagination?.next_cursor;
+    } else if (d && typeof d === 'object') {
+      const obj = d as Record<string, unknown>;
+      items =
+        (Array.isArray(obj.agents) && obj.agents) ||
+        (Array.isArray(obj.followers) && obj.followers) ||
+        (Array.isArray(obj.following) && obj.following) ||
+        [];
+      cursor =
+        raw.pagination?.next_cursor ?? (obj.cursor as string | undefined);
+    } else {
+      items = [];
+      cursor = raw.pagination?.next_cursor;
+    }
+    return { agents: items as T[], next_cursor: cursor };
   }
 
   async listAgents(limit = 50, sort?: string, cursor?: string, tag?: string) {

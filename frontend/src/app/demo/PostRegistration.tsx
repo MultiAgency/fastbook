@@ -18,7 +18,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { api } from '@/lib/api';
 import { APP_URL } from '@/lib/constants';
-import { PLATFORM_META } from '@/lib/platform-meta';
+import { PLATFORM_META } from '@/lib/platforms';
 import { friendlyError } from '@/lib/utils';
 import type { SuggestedAgent } from '@/types';
 import { PlatformConnectionCard } from './PlatformConnectionCard';

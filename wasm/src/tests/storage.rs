@@ -8,13 +8,9 @@ fn storage_scope_pub_keys_are_public_private_keys_are_private() {
 
     // pub: keys must be written as public (unencrypted, cross-project readable).
     store::test_backend::assert_scope(&keys::pub_agent("scopetest"), true);
-    store::test_backend::assert_scope(keys::pub_agents(), true);
+    store::test_backend::assert_scope(&keys::pub_agent_reg("scopetest"), true);
     store::test_backend::assert_scope(&keys::near_account("scope.near"), true);
     store::test_backend::assert_scope(keys::pub_meta_count(), true);
-    store::test_backend::assert_scope(&keys::pub_sorted("followers"), true);
-    store::test_backend::assert_scope(&keys::pub_sorted("endorsements"), true);
-    store::test_backend::assert_scope(&keys::pub_sorted("newest"), true);
-    store::test_backend::assert_scope(&keys::pub_sorted("active"), true);
 
     // Follow to generate private keys.
     quick_register("other.near", "othertest");
@@ -25,10 +21,10 @@ fn storage_scope_pub_keys_are_public_private_keys_are_private() {
     let resp = handle_follow(&req);
     assert!(resp.success, "follow should succeed: {:?}", resp.error);
 
-    // Follow-generated pub: keys must be public.
+    // Follow-generated pub: keys must be public (now in user scope).
     store::test_backend::assert_scope(&keys::pub_edge("scopetest", "othertest"), true);
-    store::test_backend::assert_scope(&keys::pub_followers("othertest"), true);
-    store::test_backend::assert_scope(&keys::pub_following("scopetest"), true);
+    store::test_backend::assert_scope(&keys::pub_follower("othertest", "scopetest"), true);
+    store::test_backend::assert_scope(&keys::pub_following_key("scopetest", "othertest"), true);
 
     // Rate limit and notification keys must be private.
     store::test_backend::assert_scope(&keys::rate("follow", "scopetest"), false);
@@ -50,15 +46,21 @@ fn storage_scope_endorsement_keys_are_public() {
     let resp = handle_endorse(&req);
     assert!(resp.success, "endorse should succeed: {:?}", resp.error);
 
-    // Endorsement record must be public (readable by other projects).
+    // Endorsement record must be public (now in user scope).
     store::test_backend::assert_scope(
         &keys::endorsement("escope_alice", "tags", "security", "escope_bob"),
         true,
     );
-    // Endorsement-by index must be public.
-    store::test_backend::assert_scope(&keys::endorsement_by("escope_bob", "escope_alice"), true);
-    // Endorsers index must be public.
-    store::test_backend::assert_scope(&keys::endorsers("escope_alice", "tags", "security"), true);
+    // Individual endorsement_by key must be public.
+    store::test_backend::assert_scope(
+        &keys::pub_endorsement_by("escope_bob", "escope_alice", "tags", "security"),
+        true,
+    );
+    // Individual endorser key must be public.
+    store::test_backend::assert_scope(
+        &keys::pub_endorser("escope_alice", "tags", "security", "escope_bob"),
+        true,
+    );
     // Tag counts must be public.
     store::test_backend::assert_scope(keys::pub_tag_counts(), true);
 }
@@ -129,6 +131,44 @@ fn prune_index_noop_when_nothing_expired() {
 
     let remaining: Vec<String> = get_json(index_key).unwrap_or_default();
     assert_eq!(remaining.len(), 2);
+}
+
+/// Soft-delete pattern: writing empty bytes must make user_has return false.
+///
+/// Follow/unfollow and endorse/unendorse use `user_set(key, &[])` as a
+/// soft-delete.  Subsequent `user_has(key)` calls must return false so that
+/// idempotency checks (e.g. "already_following") and re-endorsement work
+/// correctly.  If this test fails, replace all `user_set(key, &[])` calls
+/// with `user_delete_key(key)` in follow.rs and endorse.rs.
+#[test]
+#[serial]
+fn soft_delete_empty_bytes_returns_false_for_has() {
+    store::test_backend::clear();
+
+    // Write a non-empty value, confirm has() returns true.
+    let key = "pub:test:soft_delete";
+    store::user_set(key, b"data").unwrap();
+    assert!(
+        store::user_has(key),
+        "user_has must return true for non-empty value"
+    );
+
+    // Overwrite with empty bytes (soft-delete pattern used by unfollow/unendorse).
+    store::user_set(key, &[]).unwrap();
+    assert!(
+        !store::user_has(key),
+        "user_has must return false after writing empty bytes — \
+        if this fails, the soft-delete pattern in follow.rs:69, endorse.rs:156, and \
+        endorse.rs:368 is broken and must be replaced with user_delete_key()"
+    );
+
+    // Confirm actual deletion also works.
+    store::user_set(key, b"data").unwrap();
+    store::user_delete_key(key);
+    assert!(
+        !store::user_has(key),
+        "user_has must return false after delete"
+    );
 }
 
 /// Storage errors must never leak backend details to clients.

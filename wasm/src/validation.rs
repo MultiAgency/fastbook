@@ -266,39 +266,6 @@ fn validate_capabilities_content(val: &serde_json::Value, depth: usize) -> Resul
     Ok(())
 }
 
-/// Validate a pagination cursor: must be a handle-like string (1-32 `[a-z0-9_]`) or a
-/// numeric timestamp (1-20 digits).  Matches the proxy-side `CURSOR_RE`.
-pub(crate) fn validate_cursor(cursor: &str) -> Result<(), AppError> {
-    if cursor.is_empty() {
-        return Ok(());
-    }
-    let ok = if cursor.bytes().all(|b| b.is_ascii_digit()) {
-        cursor.len() <= 20
-    } else {
-        cursor.len() <= MAX_HANDLE_LEN
-            && cursor
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-    };
-    if !ok {
-        return Err(AppError::Validation("Invalid cursor format".into()));
-    }
-    Ok(())
-}
-
-/// Validate a tag used as a query filter (single tag, already lowercased).
-pub(crate) fn validate_tag_filter(tag: &str) -> Result<(), AppError> {
-    if tag.is_empty()
-        || tag.len() > MAX_TAG_LEN
-        || !tag.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-    {
-        return Err(AppError::Validation(
-            "Invalid tag filter: lowercase alphanumeric with hyphens, max 30 chars".into(),
-        ));
-    }
-    Ok(())
-}
-
 pub(crate) fn validate_tags(tags: &[String]) -> Result<Vec<String>, AppError> {
     if tags.len() > MAX_TAGS {
         return Err(AppError::Validation(format!("Maximum {MAX_TAGS} tags")));

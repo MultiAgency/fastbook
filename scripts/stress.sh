@@ -17,6 +17,9 @@ set -euo pipefail
 
 NEARLY_API="https://nearly.social/api/v1"
 OUTLAYER_API="https://api.outlayer.fastnear.com"
+FASTDATA_KV_URL="${FASTDATA_KV_URL:-https://kv.main.fastnear.com}"
+FASTDATA_NS="${FASTDATA_NS:-nearly.hack.near}"
+FASTDATA_SIGNER="${FASTDATA_SIGNER:-hack.near}"
 CREDS_FILE="$HOME/.config/nearly/stress-credentials.json"
 REPORT_FILE="$(cd "$(dirname "$0")" && pwd)/stress-report.txt"
 TMP_DIR=$(mktemp -d)
@@ -28,7 +31,7 @@ RUN_ID=$(printf '%04d' $((RANDOM % 10000)))
 AGENTS=(sx${RUN_ID}a sx${RUN_ID}b sx${RUN_ID}c sx${RUN_ID}d sx${RUN_ID}e sx${RUN_ID}f sx${RUN_ID}g sx${RUN_ID}h sx${RUN_ID}i sx${RUN_ID}j)
 NUM_AGENTS=${#AGENTS[@]}
 
-# TAP counters
+# Test counters
 TEST_NUM=0
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -63,16 +66,46 @@ done
 
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 
-st_assert() {
+check() {
   local ok="$1" desc="$2"
   TEST_NUM=$((TEST_NUM + 1))
   if [[ "$ok" == "true" || "$ok" == "1" ]]; then
-    echo "ok $TEST_NUM - $desc"
+    printf '\033[32m[PASS]\033[0m %s\n' "$desc"
     PASS_COUNT=$((PASS_COUNT + 1))
   else
-    echo "not ok $TEST_NUM - $desc"
+    printf '\033[31m[FAIL]\033[0m %s\n' "$desc"
     FAIL_COUNT=$((FAIL_COUNT + 1))
   fi
+}
+
+dim_banner() { log ""; log "═══════════════════════════════════════════"; log "  $1"; log "═══════════════════════════════════════════"; }
+
+require_registered() {
+  local min="${1:-2}" dim_name="$2"
+  REGISTERED=()
+  for h in "${AGENTS[@]}"; do
+    local ak
+    ak=$(get_api_key "$h" 2>/dev/null)
+    [[ -n "$ak" ]] && REGISTERED+=("$h")
+  done
+  if [[ ${#REGISTERED[@]} -lt $min ]]; then
+    log "  SKIP: fewer than $min registered agents"
+    check "false" "${dim_name}: need at least $min agents (have ${#REGISTERED[@]})"
+    echo "SKIPPED: insufficient agents" > "$TMP_DIR/dims/${dim_name}.txt"
+    return 1
+  fi
+  return 0
+}
+
+build_targets_json() {
+  local self="$1"; shift
+  local arr=("$@")
+  local json="[]"
+  for t in "${arr[@]}"; do
+    [[ "$self" == "$t" ]] && continue
+    json=$(echo "$json" | jq --arg t "$t" '. + [$t]')
+  done
+  echo "$json"
 }
 
 finding() {
@@ -125,17 +158,6 @@ latency_stats() {
   p95=$(echo "$sorted" | sed -n "$((count * 95 / 100 + 1))p")
   p99=$(echo "$sorted" | sed -n "$((count * 99 / 100 + 1))p")
   echo "min=${min}ms avg=${avg}ms max=${max}ms p50=${p50}ms p95=${p95}ms p99=${p99}ms (n=$count)"
-}
-
-# Build array of agents that have credentials (successfully registered)
-get_registered() {
-  local arr=()
-  for h in "${AGENTS[@]}"; do
-    local ak
-    ak=$(get_api_key "$h" 2>/dev/null)
-    [[ -n "$ak" ]] && arr+=("$h")
-  done
-  echo "${arr[@]}"
 }
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -232,9 +254,9 @@ st_register() {
   local existing_key
   existing_key=$(get_api_key "$handle")
   if [[ -n "$existing_key" ]]; then
-    local check
-    check=$(st_get "/agents/${handle}" | jq -r '.success // false')
-    if [[ "$check" == "true" ]]; then
+    local exists
+    exists=$(st_get "/agents/${handle}" | jq -r '.success // false')
+    if [[ "$exists" == "true" ]]; then
       log "  $handle: already registered (previous run)"
       return 0
     fi
@@ -334,10 +356,7 @@ cleanup() {
     return
   fi
 
-  log ""
-  log "═══════════════════════════════════════════"
-  log "  CLEANUP: Deregistering test agents"
-  log "═══════════════════════════════════════════"
+  dim_banner "CLEANUP: Deregistering test agents"
 
   for handle in "${AGENTS[@]}"; do
     local api_key
@@ -347,9 +366,9 @@ cleanup() {
     fi
 
     # Check if still registered
-    local check
-    check=$(st_get "/agents/${handle}" | jq -r '.success // false' 2>/dev/null || echo "false")
-    if [[ "$check" != "true" ]]; then
+    local still_registered
+    still_registered=$(st_get "/agents/${handle}" | jq -r '.success // false' 2>/dev/null || echo "false")
+    if [[ "$still_registered" != "true" ]]; then
       continue
     fi
 
@@ -418,10 +437,7 @@ ensure_creds
 # ═══════════════════════════════════════════════════════════════════════
 
 dim1_registration() {
-  log ""
-  log "═══════════════════════════════════════════"
-  log "  DIMENSION 1: Registration Throughput"
-  log "═══════════════════════════════════════════"
+  dim_banner "DIMENSION 1: Registration Throughput"
 
   local dim_start batch1_end
   dim_start=$(now_ns)
@@ -482,9 +498,9 @@ dim1_registration() {
   log "  Verifying registrations..."
   local verified=0
   for handle in "${AGENTS[@]}"; do
-    local check
-    check=$(st_get "/agents/${handle}" 2>/dev/null | jq -r '.data.agent.handle // empty' 2>/dev/null || echo "")
-    if [[ "$check" == "$handle" ]]; then
+    local found_handle
+    found_handle=$(st_get "/agents/${handle}" 2>/dev/null | jq -r '.data.agent.handle // empty' 2>/dev/null || echo "")
+    if [[ "$found_handle" == "$handle" ]]; then
       verified=$((verified + 1))
     else
       finding "INVARIANT" "Agent $handle not found after successful registration"
@@ -496,11 +512,11 @@ dim1_registration() {
   new_count=$(st_get "/health" 2>/dev/null | jq -r '.data.agent_count // 0' 2>/dev/null || echo "0")
   local expected=$((BASELINE_COUNT + NUM_AGENTS))
 
-  st_assert "$([[ $success_count -eq $NUM_AGENTS ]] && echo true || echo false)" \
+  check "$([[ $success_count -eq $NUM_AGENTS ]] && echo true || echo false)" \
     "dim1: all $NUM_AGENTS registrations succeeded ($success_count/$NUM_AGENTS)"
-  st_assert "$([[ $verified -eq $NUM_AGENTS ]] && echo true || echo false)" \
+  check "$([[ $verified -eq $NUM_AGENTS ]] && echo true || echo false)" \
     "dim1: all $NUM_AGENTS agents verified via GET ($verified/$NUM_AGENTS)"
-  st_assert "$([[ $new_count -ge $expected ]] && echo true || echo false)" \
+  check "$([[ $new_count -ge $expected ]] && echo true || echo false)" \
     "dim1: health agent_count increased (expected >=$expected, got $new_count)"
 
   local dim_ms
@@ -516,86 +532,78 @@ dim1_registration() {
 # ═══════════════════════════════════════════════════════════════════════
 
 dim2_social_density() {
-  log ""
-  log "═══════════════════════════════════════════"
-  log "  DIMENSION 2: Social Graph Density"
-  log "═══════════════════════════════════════════"
+  dim_banner "DIMENSION 2: Social Graph Density"
 
   local total_follows=0
   local failed_follows=0
   local already_following=0
 
-  # Build list of successfully registered agents
-  local registered=()
-  for h in "${AGENTS[@]}"; do
-    local ak
-    ak=$(get_api_key "$h")
-    [[ -n "$ak" ]] && registered+=("$h")
-  done
-
-  if [[ ${#registered[@]} -lt 2 ]]; then
-    log "  SKIP: fewer than 2 registered agents"
-    st_assert "false" "dim2: need at least 2 agents (have ${#registered[@]})"
-    echo "SKIPPED: insufficient agents" > "$TMP_DIR/dims/dim2.txt"
-    return
-  fi
+  require_registered 2 "dim2" || return
+  local registered=("${REGISTERED[@]}")
 
   local reg_count=${#registered[@]}
-  local expected_follows=$((reg_count * (reg_count - 1)))
+  local expected_per_agent=$((reg_count - 1))
+  local expected_follows=$((reg_count * expected_per_agent))
 
-  # Each agent follows every other — process per-agent to respect rate limits
+  # Each agent batch-follows every other — one WASM invocation per agent
   for from in "${registered[@]}"; do
-    local agent_follows=0
-    for to in "${registered[@]}"; do
-      [[ "$from" == "$to" ]] && continue
+    local targets_json
+    targets_json=$(build_targets_json "$from" "${registered[@]}")
 
-      local t0 resp action
-      t0=$(now_ns)
-      resp=$(st_api POST "/agents/${to}/follow" "follow" "$from" 2>/dev/null || echo '{"success":false,"error":"timeout"}')
-      local ms
-      ms=$(elapsed_ms "$t0")
-      record_latency "dim2_follow" "$ms"
+    local t0 resp
+    t0=$(now_ns)
+    local batch_body
+    batch_body=$(jq -n --argjson targets "$targets_json" '{targets:$targets}')
+    resp=$(st_api POST "/agents/batch-follow" "batch_follow" "$from" "$batch_body" 2>/dev/null || echo '{"success":false,"error":"timeout"}')
+    local ms
+    ms=$(elapsed_ms "$t0")
+    record_latency "dim2_follow" "$ms"
 
-      action=$(echo "$resp" | jq -r '.data.action // .code // "error"')
-      case "$action" in
-        followed)
-          total_follows=$((total_follows + 1))
-          agent_follows=$((agent_follows + 1))
-          ;;
-        already_following)
-          already_following=$((already_following + 1))
-          total_follows=$((total_follows + 1))
-          ;;
-        RATE_LIMITED)
-          log "  $from → $to: RATE_LIMITED — waiting..."
-          local retry_after
-          retry_after=$(echo "$resp" | jq -r '.retry_after // 10')
-          sleep "$retry_after"
-          # Retry once
-          resp=$(st_api POST "/agents/${to}/follow" "follow" "$from" 2>/dev/null || echo '{"success":false,"error":"timeout"}')
-          action=$(echo "$resp" | jq -r '.data.action // "error"')
-          if [[ "$action" == "followed" || "$action" == "already_following" ]]; then
-            total_follows=$((total_follows + 1))
-          else
-            failed_follows=$((failed_follows + 1))
-            finding "FAILURE" "Follow ${from}→${to} failed after rate limit retry: $action"
-          fi
-          ;;
-        *)
-          failed_follows=$((failed_follows + 1))
-          finding "FAILURE" "Follow ${from}→${to} returned unexpected: $action"
-          ;;
-      esac
-      sleep 1
-    done
-    log "  $from: followed $agent_follows agents"
+    local batch_action
+    batch_action=$(echo "$resp" | jq -r '.data.action // .code // "error"')
+
+    if [[ "$batch_action" == "batch_followed" ]]; then
+      # Count individual results
+      local n_followed n_already n_errors
+      n_followed=$(echo "$resp" | jq '[.data.results[] | select(.action == "followed")] | length')
+      n_already=$(echo "$resp" | jq '[.data.results[] | select(.action == "already_following")] | length')
+      n_errors=$(echo "$resp" | jq '[.data.results[] | select(.action == "error")] | length')
+      total_follows=$((total_follows + n_followed + n_already))
+      already_following=$((already_following + n_already))
+      failed_follows=$((failed_follows + n_errors))
+      if [[ "$n_errors" -gt 0 ]]; then
+        local err_details
+        err_details=$(echo "$resp" | jq -r '[.data.results[] | select(.action == "error") | "\(.handle): \(.error)"] | join(", ")')
+        finding "FAILURE" "Batch follow from $from had $n_errors errors: $err_details"
+      fi
+      log "  $from: batch-followed $n_followed agents ($n_already already, $n_errors errors)"
+    elif [[ "$batch_action" == "RATE_LIMITED" ]]; then
+      log "  $from: RATE_LIMITED — waiting..."
+      local retry_after
+      retry_after=$(echo "$resp" | jq -r '.retry_after // 10')
+      sleep "$retry_after"
+      # Retry once
+      resp=$(st_api POST "/agents/batch-follow" "batch_follow" "$from" "$batch_body" 2>/dev/null || echo '{"success":false,"error":"timeout"}')
+      batch_action=$(echo "$resp" | jq -r '.data.action // "error"')
+      if [[ "$batch_action" == "batch_followed" ]]; then
+        local n_followed
+        n_followed=$(echo "$resp" | jq '[.data.results[] | select(.action == "followed" or .action == "already_following")] | length')
+        total_follows=$((total_follows + n_followed))
+      else
+        failed_follows=$((failed_follows + expected_per_agent))
+        finding "FAILURE" "Batch follow from $from failed after rate limit retry: $batch_action"
+      fi
+    else
+      failed_follows=$((failed_follows + expected_per_agent))
+      finding "FAILURE" "Batch follow from $from returned unexpected: $batch_action"
+    fi
+    sleep 2
   done
 
   # Verify counts
   log "  Verifying follower/following counts..."
   local count_ok=0
   local count_drift=0
-  local expected_per_agent=$((reg_count - 1))
   for handle in "${registered[@]}"; do
     local profile
     profile=$(st_get "/agents/${handle}" 2>/dev/null || echo '{}')
@@ -625,13 +633,13 @@ dim2_social_density() {
   local mutual_count
   mutual_count=$(echo "$edges_resp" | jq '[.data.edges[]? | select(.direction == "mutual")] | length' 2>/dev/null || echo "0")
 
-  st_assert "$([[ $total_follows -eq $expected_follows ]] && echo true || echo false)" \
+  check "$([[ $total_follows -eq $expected_follows ]] && echo true || echo false)" \
     "dim2: all $expected_follows follow edges created ($total_follows created, $failed_follows failed)"
-  st_assert "$([[ $count_ok -eq $reg_count ]] && echo true || echo false)" \
+  check "$([[ $count_ok -eq $reg_count ]] && echo true || echo false)" \
     "dim2: all agents have counts=$expected_per_agent ($count_ok/$reg_count correct)"
-  st_assert "$([[ "$follower_list_count" -eq $expected_per_agent ]] && echo true || echo false)" \
+  check "$([[ "$follower_list_count" -eq $expected_per_agent ]] && echo true || echo false)" \
     "dim2: $spot_handle followers list has $expected_per_agent entries (got $follower_list_count)"
-  st_assert "$([[ "$mutual_count" -eq $expected_per_agent ]] && echo true || echo false)" \
+  check "$([[ "$mutual_count" -eq $expected_per_agent ]] && echo true || echo false)" \
     "dim2: $spot_handle has $expected_per_agent mutual edges (got $mutual_count)"
 
   log "  Follow latency: $(latency_stats dim2_follow)"
@@ -645,16 +653,10 @@ dim2_social_density() {
 # ═══════════════════════════════════════════════════════════════════════
 
 dim3_heartbeat() {
-  log ""
-  log "═══════════════════════════════════════════"
-  log "  DIMENSION 3: Heartbeat Under Concurrent Load"
-  log "═══════════════════════════════════════════"
+  dim_banner "DIMENSION 3: Heartbeat Under Concurrent Load"
 
-  # Build registered agents list
-  local registered=()
-  for h in "${AGENTS[@]}"; do
-    [[ -n "$(get_api_key "$h")" ]] && registered+=("$h")
-  done
+  require_registered 2 "dim3" || return
+  local registered=("${REGISTERED[@]}")
   local reg_count=${#registered[@]}
 
   # Fire all heartbeats concurrently
@@ -714,9 +716,9 @@ dim3_heartbeat() {
     fi
   done
 
-  st_assert "$([[ $hb_success -eq $reg_count ]] && echo true || echo false)" \
+  check "$([[ $hb_success -eq $reg_count ]] && echo true || echo false)" \
     "dim3: all $reg_count heartbeats succeeded ($hb_success succeeded, $hb_timeout timeouts, $hb_502 502s)"
-  st_assert "$([[ $max_latency -lt 10000 ]] && echo true || echo false)" \
+  check "$([[ $max_latency -lt 10000 ]] && echo true || echo false)" \
     "dim3: max heartbeat latency < 10s (got ${max_latency}ms)"
 
   log "  Heartbeat latency: $(latency_stats dim3)"
@@ -730,74 +732,69 @@ dim3_heartbeat() {
 # ═══════════════════════════════════════════════════════════════════════
 
 dim4_endorsements() {
-  log ""
-  log "═══════════════════════════════════════════"
-  log "  DIMENSION 4: Endorsement Cascade"
-  log "═══════════════════════════════════════════"
+  dim_banner "DIMENSION 4: Endorsement Cascade"
 
-  local registered=()
-  read -ra registered <<< "$(get_registered)"
+  require_registered 2 "dim4" || return
+  local registered=("${REGISTERED[@]}")
   local reg_count=${#registered[@]}
-
-  if [[ $reg_count -lt 2 ]]; then
-    log "  SKIP: fewer than 2 registered agents"
-    echo "SKIPPED" > "$TMP_DIR/dims/dim4.txt"
-    return
-  fi
 
   local total_endorsed=0
   local endorse_failed=0
   local rollback_partials=0
   local warnings_seen=0
 
-  # Each agent endorses every other agent's "stress" tag
+  # Each agent batch-endorses every other agent's "stress" tag
   for from in "${registered[@]}"; do
-    local agent_endorsed=0
-    for to in "${registered[@]}"; do
-      [[ "$from" == "$to" ]] && continue
+    local targets_json
+    targets_json=$(build_targets_json "$from" "${registered[@]}")
 
-      local t0 resp action
-      t0=$(now_ns)
-      resp=$(st_api POST "/agents/${to}/endorse" "endorse" "$from" '{"tags":["stress"]}' 2>/dev/null || echo '{"success":false,"error":"timeout"}')
-      local ms
-      ms=$(elapsed_ms "$t0")
-      record_latency "dim4_endorse" "$ms"
+    local t0 resp batch_action
+    t0=$(now_ns)
+    local batch_body
+    batch_body=$(jq -n --argjson targets "$targets_json" '{targets:$targets,tags:["stress"]}')
+    resp=$(st_api POST "/agents/batch-endorse" "batch_endorse" "$from" "$batch_body" 2>/dev/null || echo '{"success":false,"error":"timeout"}')
+    local ms
+    ms=$(elapsed_ms "$t0")
+    record_latency "dim4_endorse" "$ms"
 
-      action=$(echo "$resp" | jq -r '.data.action // .code // "error"')
-      local has_warnings
-      has_warnings=$(echo "$resp" | jq 'has("warnings")' 2>/dev/null || echo "false")
+    batch_action=$(echo "$resp" | jq -r '.data.action // .code // "error"')
 
-      if [[ "$has_warnings" == "true" ]]; then
-        warnings_seen=$((warnings_seen + 1))
-        finding "OBSERVATION" "Endorsement ${from}→${to} had warnings: $(echo "$resp" | jq -c '.warnings')"
+    if [[ "$batch_action" == "batch_endorsed" ]]; then
+      local n_endorsed n_errors
+      n_endorsed=$(echo "$resp" | jq '[.data.results[] | select(.action == "endorsed")] | length')
+      n_errors=$(echo "$resp" | jq '[.data.results[] | select(.action == "error")] | length')
+      total_endorsed=$((total_endorsed + n_endorsed))
+      endorse_failed=$((endorse_failed + n_errors))
+      if [[ "$n_errors" -gt 0 ]]; then
+        local err_details
+        err_details=$(echo "$resp" | jq -r '[.data.results[] | select(.action == "error") | "\(.handle): \(.error)"] | join(", ")')
+        finding "FAILURE" "Batch endorse from $from had $n_errors errors: $err_details"
       fi
-
-      case "$action" in
-        endorsed)
-          total_endorsed=$((total_endorsed + 1))
-          agent_endorsed=$((agent_endorsed + 1))
-          ;;
-        RATE_LIMITED)
-          log "  $from → $to: endorse RATE_LIMITED — waiting..."
-          local retry_after
-          retry_after=$(echo "$resp" | jq -r '.retry_after // 10')
-          sleep "$retry_after"
-          resp=$(st_api POST "/agents/${to}/endorse" "endorse" "$from" '{"tags":["stress"]}' 2>/dev/null || echo '{"success":false,"error":"timeout"}')
-          action=$(echo "$resp" | jq -r '.data.action // "error"')
-          [[ "$action" == "endorsed" ]] && total_endorsed=$((total_endorsed + 1)) || endorse_failed=$((endorse_failed + 1))
-          ;;
-        ROLLBACK_PARTIAL)
-          rollback_partials=$((rollback_partials + 1))
-          finding "INVARIANT" "ROLLBACK_PARTIAL on endorsement ${from}→${to}"
-          ;;
-        *)
-          endorse_failed=$((endorse_failed + 1))
-          finding "FAILURE" "Endorsement ${from}→${to} returned: $action"
-          ;;
-      esac
-      sleep 1
-    done
-    log "  $from: endorsed $agent_endorsed agents"
+      # Check for ROLLBACK_PARTIAL in individual results
+      local n_rollback
+      n_rollback=$(echo "$resp" | jq '[.data.results[] | select(.error == "ROLLBACK_PARTIAL")] | length' 2>/dev/null || echo "0")
+      rollback_partials=$((rollback_partials + n_rollback))
+      log "  $from: batch-endorsed $n_endorsed agents ($n_errors errors)"
+    elif [[ "$batch_action" == "RATE_LIMITED" ]]; then
+      log "  $from: endorse RATE_LIMITED — waiting..."
+      local retry_after
+      retry_after=$(echo "$resp" | jq -r '.retry_after // 10')
+      sleep "$retry_after"
+      resp=$(st_api POST "/agents/batch-endorse" "batch_endorse" "$from" "$batch_body" 2>/dev/null || echo '{"success":false,"error":"timeout"}')
+      batch_action=$(echo "$resp" | jq -r '.data.action // "error"')
+      if [[ "$batch_action" == "batch_endorsed" ]]; then
+        local n_endorsed
+        n_endorsed=$(echo "$resp" | jq '[.data.results[] | select(.action == "endorsed")] | length')
+        total_endorsed=$((total_endorsed + n_endorsed))
+      else
+        endorse_failed=$((endorse_failed + ${#registered[@]} - 1))
+        finding "FAILURE" "Batch endorse from $from failed after rate limit retry: $batch_action"
+      fi
+    else
+      endorse_failed=$((endorse_failed + ${#registered[@]} - 1))
+      finding "FAILURE" "Batch endorse from $from returned: $batch_action"
+    fi
+    sleep 2
   done
 
   # Verify endorsement counts before cascade
@@ -844,15 +841,15 @@ dim4_endorsements() {
   done
 
   local expected_endorsements=$((reg_count * (reg_count - 1)))
-  st_assert "$([[ $total_endorsed -eq $expected_endorsements ]] && echo true || echo false)" \
+  check "$([[ $total_endorsed -eq $expected_endorsements ]] && echo true || echo false)" \
     "dim4: all $expected_endorsements endorsements created ($total_endorsed created, $endorse_failed failed)"
-  st_assert "$([[ $rollback_partials -eq 0 ]] && echo true || echo false)" \
+  check "$([[ $rollback_partials -eq 0 ]] && echo true || echo false)" \
     "dim4: no ROLLBACK_PARTIAL errors ($rollback_partials seen)"
-  st_assert "$([[ "$cascade_success" == "true" ]] && echo true || echo false)" \
+  check "$([[ "$cascade_success" == "true" ]] && echo true || echo false)" \
     "dim4: cascade trigger (tag removal) succeeded"
-  st_assert "$([[ $alpha_endorsers_after -eq 0 ]] && echo true || echo false)" \
+  check "$([[ $alpha_endorsers_after -eq 0 ]] && echo true || echo false)" \
     "dim4: $cascade_agent 'stress' endorsements removed after cascade (was $alpha_endorsers_before, now $alpha_endorsers_after)"
-  st_assert "$([[ $other_ok -eq $((reg_count - 1)) ]] && echo true || echo false)" \
+  check "$([[ $other_ok -eq $((reg_count - 1)) ]] && echo true || echo false)" \
     "dim4: other agents' endorsement counts unaffected ($other_ok/$((reg_count - 1)) correct)"
 
   log "  Endorse latency: $(latency_stats dim4_endorse)"
@@ -865,18 +862,10 @@ dim4_endorsements() {
 # ═══════════════════════════════════════════════════════════════════════
 
 dim5_concurrent_mutations() {
-  log ""
-  log "═══════════════════════════════════════════"
-  log "  DIMENSION 5: Concurrent Mutations"
-  log "═══════════════════════════════════════════"
+  dim_banner "DIMENSION 5: Concurrent Mutations"
 
-  local registered=()
-  read -ra registered <<< "$(get_registered)"
-  if [[ ${#registered[@]} -lt 3 ]]; then
-    log "  SKIP: fewer than 3 registered agents"
-    echo "SKIPPED" > "$TMP_DIR/dims/dim5.txt"
-    return
-  fi
+  require_registered 3 "dim5" || return
+  local registered=("${REGISTERED[@]}")
 
   local target="${registered[${#registered[@]}-1]}"
 
@@ -949,11 +938,11 @@ dim5_concurrent_mutations() {
   total_in_list=$(echo "$followers_resp" | jq '[.data[]?] | length')
   unique_followers=$(echo "$followers_resp" | jq '[.data[]?.handle] | unique | length')
 
-  st_assert "$([[ $cf_followed -eq $expected_concurrent || $((cf_followed + cf_already)) -eq $expected_concurrent ]] && echo true || echo false)" \
+  check "$([[ $cf_followed -eq $expected_concurrent || $((cf_followed + cf_already)) -eq $expected_concurrent ]] && echo true || echo false)" \
     "dim5: all $expected_concurrent concurrent follows completed ($cf_followed followed, $cf_already already, $cf_failed failed)"
-  st_assert "$([[ "$post_count" -eq $expected_concurrent ]] && echo true || echo false)" \
+  check "$([[ "$post_count" -eq $expected_concurrent ]] && echo true || echo false)" \
     "dim5: $target follower_count = $expected_concurrent after concurrent follows (got $post_count)"
-  st_assert "$([[ "$unique_followers" -eq "$total_in_list" ]] && echo true || echo false)" \
+  check "$([[ "$unique_followers" -eq "$total_in_list" ]] && echo true || echo false)" \
     "dim5: no duplicate followers ($unique_followers unique of $total_in_list listed)"
 
   if [[ "$post_count" -lt $expected_concurrent ]]; then
@@ -971,18 +960,10 @@ dim5_concurrent_mutations() {
 # ═══════════════════════════════════════════════════════════════════════
 
 dim6_rate_limits() {
-  log ""
-  log "═══════════════════════════════════════════"
-  log "  DIMENSION 6: Rate Limit Enforcement"
-  log "═══════════════════════════════════════════"
+  dim_banner "DIMENSION 6: Rate Limit Enforcement"
 
-  local registered=()
-  read -ra registered <<< "$(get_registered)"
-  if [[ ${#registered[@]} -lt 2 ]]; then
-    log "  SKIP: fewer than 2 registered agents"
-    echo "SKIPPED" > "$TMP_DIR/dims/dim6.txt"
-    return
-  fi
+  require_registered 2 "dim6" || return
+  local registered=("${REGISTERED[@]}")
 
   local actor="${registered[0]}"
   local target="${registered[1]}"
@@ -1027,10 +1008,10 @@ dim6_rate_limits() {
       retry_after=$(echo "$resp" | jq -r '.retry_after // 0')
       log "  Op $op_count: RATE_LIMITED (retry_after=${retry_after}s)"
 
-      st_assert "true" "dim6: rate limit enforced at operation $op_count (limit 10/60s)"
-      st_assert "$([[ $retry_after -gt 0 ]] && echo true || echo false)" \
+      check "true" "dim6: rate limit enforced at operation $op_count (limit 10/60s)"
+      check "$([[ $retry_after -gt 0 ]] && echo true || echo false)" \
         "dim6: retry_after present and > 0 (got ${retry_after}s)"
-      st_assert "$([[ $last_success_op -le 10 ]] && echo true || echo false)" \
+      check "$([[ $last_success_op -le 10 ]] && echo true || echo false)" \
         "dim6: last successful follow was op $last_success_op (expected <= 10)"
       break
     elif [[ "$action" == "followed" || "$action" == "already_following" ]]; then
@@ -1046,7 +1027,7 @@ dim6_rate_limits() {
   done
 
   if [[ $op_count -ge 15 ]]; then
-    st_assert "false" "dim6: rate limit never triggered after 15 operations"
+    check "false" "dim6: rate limit never triggered after 15 operations"
     finding "INVARIANT" "Follow rate limit not enforced after 15 operations"
   fi
 
@@ -1058,18 +1039,10 @@ dim6_rate_limits() {
 # ═══════════════════════════════════════════════════════════════════════
 
 dim7_deregister() {
-  log ""
-  log "═══════════════════════════════════════════"
-  log "  DIMENSION 7: Deregistration Under Load"
-  log "═══════════════════════════════════════════"
+  dim_banner "DIMENSION 7: Deregistration Under Load"
 
-  local registered=()
-  read -ra registered <<< "$(get_registered)"
-  if [[ ${#registered[@]} -lt 3 ]]; then
-    log "  SKIP: fewer than 3 registered agents"
-    echo "SKIPPED" > "$TMP_DIR/dims/dim7.txt"
-    return
-  fi
+  require_registered 3 "dim7" || return
+  local registered=("${REGISTERED[@]}")
 
   local target="${registered[0]}"
 
@@ -1128,19 +1101,19 @@ dim7_deregister() {
   peer_fc_after=$(st_get "/agents/${peer}" 2>/dev/null | jq -r '.data.agent.follower_count // 0' 2>/dev/null || echo "0")
   peer_fgc_after=$(st_get "/agents/${peer}" 2>/dev/null | jq -r '.data.agent.following_count // 0' 2>/dev/null || echo "0")
 
-  st_assert "$([[ "$action" == "deregistered" ]] && echo true || echo false)" \
+  check "$([[ "$action" == "deregistered" ]] && echo true || echo false)" \
     "dim7: deregister returned action=deregistered (got $action)"
-  st_assert "$([[ "$gone_check" == "false" ]] && echo true || echo false)" \
+  check "$([[ "$gone_check" == "false" ]] && echo true || echo false)" \
     "dim7: GET /agents/$target returns success=false after deregister"
-  st_assert "$([[ "$handle_available" == "true" ]] && echo true || echo false)" \
+  check "$([[ "$handle_available" == "true" ]] && echo true || echo false)" \
     "dim7: handle $target is available after deregister"
 
   # Count decrements — note caching may delay this
   local fc_diff=$((peer_fc_before - peer_fc_after))
   local fgc_diff=$((peer_fgc_before - peer_fgc_after))
-  st_assert "$([[ $fc_diff -ge 1 ]] && echo true || echo false)" \
+  check "$([[ $fc_diff -ge 1 ]] && echo true || echo false)" \
     "dim7: $peer follower_count decremented (was $peer_fc_before, now $peer_fc_after, diff=$fc_diff)"
-  st_assert "$([[ $fgc_diff -ge 1 ]] && echo true || echo false)" \
+  check "$([[ $fgc_diff -ge 1 ]] && echo true || echo false)" \
     "dim7: $peer following_count decremented (was $peer_fgc_before, now $peer_fgc_after, diff=$fgc_diff)"
 
   # Mark target as deregistered so cleanup skips it
@@ -1154,18 +1127,10 @@ dim7_deregister() {
 # ═══════════════════════════════════════════════════════════════════════
 
 dim8_pagination() {
-  log ""
-  log "═══════════════════════════════════════════"
-  log "  DIMENSION 8: Pagination Under Mutation"
-  log "═══════════════════════════════════════════"
+  dim_banner "DIMENSION 8: Pagination Under Mutation"
 
-  local registered=()
-  read -ra registered <<< "$(get_registered)"
-  if [[ ${#registered[@]} -lt 2 ]]; then
-    log "  SKIP: fewer than 2 registered agents"
-    echo "SKIPPED" > "$TMP_DIR/dims/dim8.txt"
-    return
-  fi
+  require_registered 2 "dim8" || return
+  local registered=("${REGISTERED[@]}")
 
   local deregister_target="${registered[1]}"
 
@@ -1229,9 +1194,9 @@ dim8_pagination() {
   local dereg_check
   dereg_check=$(st_get "/agents/${deregister_target}" 2>/dev/null | jq -r '.success // true' 2>/dev/null || echo "true")
 
-  st_assert "$([[ $duplicates -eq 0 ]] && echo true || echo false)" \
+  check "$([[ $duplicates -eq 0 ]] && echo true || echo false)" \
     "dim8: no duplicate agents across pages ($duplicates duplicates in $total_seen entries, $page pages)"
-  st_assert "$([[ "$dereg_check" == "false" ]] && echo true || echo false)" \
+  check "$([[ "$dereg_check" == "false" ]] && echo true || echo false)" \
     "dim8: $deregister_target deregistered successfully"
 
   if [[ $duplicates -gt 0 ]]; then
@@ -1247,6 +1212,113 @@ dim8_pagination() {
   log "  Pages: $page | Total entries: $total_seen | Unique: $unique_seen | Duplicates: $duplicates | Cursor resets: $cursor_resets"
 
   echo "Pagination: $page pages, $total_seen entries, $duplicates duplicates, $cursor_resets resets." > "$TMP_DIR/dims/dim8.txt"
+}
+
+# ═══════════════════════════════════════════════════════════════════════
+# DIMENSION 9: FastData KV Read Verification
+# ═══════════════════════════════════════════════════════════════════════
+
+dim9_fastdata_reads() {
+  dim_banner "DIMENSION 9: FastData KV Read Verification"
+
+  require_registered 2 "dim9" || return
+  local registered=("${REGISTERED[@]}")
+  local reg_count=${#registered[@]}
+
+  local kv_base="${FASTDATA_KV_URL}/v0/latest/${FASTDATA_NS}/${FASTDATA_SIGNER}"
+  local kv_multi="${FASTDATA_KV_URL}/v0/multi"
+
+  # --- 9a: Verify registered agents are readable from FastData KV ---
+  log "  9a: Checking agent records in FastData KV..."
+  local found=0 missing=0
+  for h in "${registered[@]}"; do
+    local resp
+    resp=$(curl -s --max-time 10 "${kv_base}/agent/${h}")
+    local has_entry
+    has_entry=$(echo "$resp" | jq -r '.entries[0].value.handle // empty' 2>/dev/null)
+    if [[ "$has_entry" == "$h" ]]; then
+      found=$((found + 1))
+    else
+      missing=$((missing + 1))
+      finding "OBSERVATION" "Agent $h not found in FastData KV"
+    fi
+  done
+  check "$( (( found > 0 )) && echo true || echo false)" \
+    "dim9: at least 1 agent readable from FastData KV ($found/$reg_count found)"
+
+  # --- 9b: kvMulti batch read ---
+  log "  9b: Batch multi-key read..."
+  local multi_keys
+  multi_keys=$(printf '%s\n' "${registered[@]}" | head -20 | \
+    jq -R "\"${FASTDATA_NS}/${FASTDATA_SIGNER}/agent/\" + ." | jq -s '{keys: .}')
+  local multi_start
+  multi_start=$(now_ns)
+  local multi_resp
+  multi_resp=$(curl -s --max-time 15 -X POST -H "Content-Type: application/json" \
+    -d "$multi_keys" "$kv_multi")
+  local multi_ms
+  multi_ms=$(elapsed_ms "$multi_start")
+  record_latency "dim9_multi" "$multi_ms"
+
+  local multi_count
+  multi_count=$(echo "$multi_resp" | jq '[.entries[]? | select(. != null)] | length' 2>/dev/null || echo 0)
+  local expected_multi
+  expected_multi=$(printf '%s\n' "${registered[@]}" | head -20 | wc -l | tr -d ' ')
+  check "$( (( multi_count >= expected_multi / 2 )) && echo true || echo false)" \
+    "dim9: kvMulti returned $multi_count/$expected_multi entries (${multi_ms}ms)"
+
+  # --- 9c: Eventual consistency after follow mutations ---
+  # Depends on dim2 having created a follow edge between the first two agents.
+  # Guard: verify the edge exists in the primary API before polling FastData,
+  # so a dim2 failure doesn't burn 30s and produce a misleading failure here.
+  log "  9c: Polling for follow-edge consistency..."
+  local agent0="${registered[0]}"
+  local agent1="${registered[1]}"
+  local convergence_ms=0
+
+  local api_edge
+  api_edge=$(st_get "/agents/${agent1}/followers" | jq -r ".followers[]?.handle // empty" 2>/dev/null)
+  if ! echo "$api_edge" | grep -q "^${agent0}$"; then
+    log "  9c: SKIP — ${agent0}→${agent1} follow edge not present in API (dim2 may have failed)"
+    finding "OBSERVATION" "dim9 9c skipped: follow edge ${agent0}→${agent1} not in API"
+  else
+    local poll_start poll_found=false
+    poll_start=$(now_ns)
+
+    for attempt in $(seq 1 15); do
+      local edge_resp
+      edge_resp=$(curl -s --max-time 10 "${kv_base}/follower/${agent1}/${agent0}")
+      local edge_val
+      edge_val=$(echo "$edge_resp" | jq -r '.entries[0].value // empty' 2>/dev/null)
+      if [[ -n "$edge_val" && "$edge_val" != "null" ]]; then
+        poll_found=true
+        convergence_ms=$(elapsed_ms "$poll_start")
+        break
+      fi
+      sleep 2
+    done
+
+    if [[ "$poll_found" == "true" ]]; then
+      record_latency "dim9_converge" "$convergence_ms"
+      log "  Follower edge converged in ${convergence_ms}ms"
+    else
+      convergence_ms=$(elapsed_ms "$poll_start")
+      finding "LIMIT" "FastData follower edge not found after ${convergence_ms}ms (${agent0}→${agent1})"
+    fi
+    check "$poll_found" \
+      "dim9: follower edge ${agent0}→${agent1} visible in FastData KV (${convergence_ms}ms)"
+  fi
+
+  # --- 9d: Verify agent_count metadata ---
+  log "  9d: Checking meta/agent_count..."
+  local meta_resp meta_count
+  meta_resp=$(curl -s --max-time 10 "${kv_base}/meta/agent_count")
+  meta_count=$(echo "$meta_resp" | jq -r '.entries[0].value // 0' 2>/dev/null || echo 0)
+  check "$( (( meta_count > 0 )) && echo true || echo false)" \
+    "dim9: meta/agent_count > 0 in FastData KV (got $meta_count)"
+
+  log "  Multi-read latency: $(latency_stats dim9_multi)"
+  echo "FastData: $found/$reg_count agents found. Multi: ${multi_ms}ms. Convergence: ${convergence_ms}ms." > "$TMP_DIR/dims/dim9.txt"
 }
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1325,7 +1397,7 @@ generate_report() {
     # Dimension results
     echo "DIMENSION RESULTS"
     echo "-----------------"
-    for i in 1 2 3 4 5 6 7 8; do
+    for i in 1 2 3 4 5 6 7 8 9; do
       local file="$TMP_DIR/dims/dim${i}.txt"
       if [[ -f "$file" ]]; then
         echo "  Dim $i: $(cat "$file")"
@@ -1350,13 +1422,10 @@ generate_report() {
     echo "  - Deregister rate limit is per-account, not global — cleanup parallelizes well"
     echo ""
 
-    # TAP summary
-    echo "TAP SUMMARY"
-    echo "-----------"
-    echo "  1..$TEST_NUM"
-    echo "  # tests $TEST_NUM"
-    echo "  # pass  $PASS_COUNT"
-    echo "  # fail  $FAIL_COUNT"
+    # Summary
+    echo "SUMMARY"
+    echo "-------"
+    echo "  $PASS_COUNT passed, $FAIL_COUNT failed (of $TEST_NUM)"
     echo ""
 
     if [[ $FAIL_COUNT -gt 0 ]]; then
@@ -1372,18 +1441,26 @@ generate_report() {
 # ═══════════════════════════════════════════════════════════════════════
 
 dim1_registration
+log "  [cooldown] 15s before social density..."
+sleep 15
 dim2_social_density
+log "  [cooldown] 5s before FastData read verification..."
+sleep 5
+dim9_fastdata_reads
+log "  [cooldown] 15s before heartbeat..."
+sleep 15
 dim3_heartbeat
+log "  [cooldown] 15s before endorsements..."
+sleep 15
 dim4_endorsements
+log "  [cooldown] 15s before concurrent mutations..."
+sleep 15
 dim5_concurrent_mutations
 dim6_rate_limits
 dim7_deregister
 dim8_pagination
 
-log ""
-log "═══════════════════════════════════════════"
-log "  ALL DIMENSIONS COMPLETE"
-log "═══════════════════════════════════════════"
+dim_banner "ALL DIMENSIONS COMPLETE"
 
 generate_report
 

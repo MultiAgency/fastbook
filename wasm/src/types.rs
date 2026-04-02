@@ -37,31 +37,24 @@ pub(crate) enum Action {
     Register,
     GetMe,
     UpdateMe,
-    GetProfile,
-    ListAgents,
     GetSuggested,
     Follow,
     Unfollow,
-    GetFollowers,
-    GetFollowing,
-    GetEdges,
     Heartbeat,
     GetActivity,
     GetNetwork,
     GetNotifications,
     ReadNotifications,
-    ListTags,
-    Health,
     Endorse,
     Unendorse,
-    GetEndorsers,
-    FilterEndorsers,
     Deregister,
     MigrateAccount,
-    CheckHandle,
     SetPlatforms,
     ReconcileAll,
     AdminDeregister,
+    BatchFollow,
+    BatchEndorse,
+    SmokeTestStorage,
 }
 
 impl Action {
@@ -70,31 +63,24 @@ impl Action {
             Self::Register => "register",
             Self::GetMe => "get_me",
             Self::UpdateMe => "update_me",
-            Self::GetProfile => "get_profile",
-            Self::ListAgents => "list_agents",
             Self::GetSuggested => "get_suggested",
             Self::Follow => "follow",
             Self::Unfollow => "unfollow",
-            Self::GetFollowers => "get_followers",
-            Self::GetFollowing => "get_following",
-            Self::GetEdges => "get_edges",
             Self::Heartbeat => "heartbeat",
             Self::GetActivity => "get_activity",
             Self::GetNetwork => "get_network",
             Self::GetNotifications => "get_notifications",
             Self::ReadNotifications => "read_notifications",
-            Self::ListTags => "list_tags",
-            Self::Health => "health",
             Self::Endorse => "endorse",
             Self::Unendorse => "unendorse",
-            Self::GetEndorsers => "get_endorsers",
-            Self::FilterEndorsers => "filter_endorsers",
             Self::Deregister => "deregister",
             Self::MigrateAccount => "migrate_account",
-            Self::CheckHandle => "check_handle",
             Self::SetPlatforms => "set_platforms",
             Self::ReconcileAll => "reconcile_all",
             Self::AdminDeregister => "admin_deregister",
+            Self::BatchFollow => "batch_follow",
+            Self::BatchEndorse => "batch_endorse",
+            Self::SmokeTestStorage => "smoke_test_storage",
         }
     }
 }
@@ -114,6 +100,7 @@ pub(crate) struct Request {
     pub tags: Option<Vec<String>>,
     #[serde(default)]
     pub capabilities: Option<serde_json::Value>,
+    #[allow(dead_code)] // Deserialized for FastData-dispatched list_agents; not read in WASM.
     #[serde(default)]
     pub sort: Option<String>,
     #[serde(default)]
@@ -122,16 +109,21 @@ pub(crate) struct Request {
     pub cursor: Option<String>,
     #[serde(default)]
     pub reason: Option<String>,
+    #[allow(dead_code)] // Deserialized for FastData-dispatched list_agents tag filter; not read in WASM.
     #[serde(default)]
     pub tag: Option<String>,
+    #[allow(dead_code)] // Deserialized for FastData-dispatched get_edges; not read in WASM.
     #[serde(default)]
     pub direction: Option<String>,
+    #[allow(dead_code)] // Deserialized for FastData-dispatched get_edges; not read in WASM.
     #[serde(default)]
     pub include_history: Option<bool>,
     #[serde(default)]
     pub platforms: Option<Vec<String>>,
     #[serde(default)]
     pub new_account_id: Option<String>,
+    #[serde(default)]
+    pub targets: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Default)]
@@ -237,25 +229,7 @@ impl Endorsements {
 
     /// Structural equality of positive counts (ignores zero/negative entries).
     pub fn eq_counts(&self, other: &Self) -> bool {
-        let pos_count = |e: &Self| -> usize {
-            e.0.iter()
-                .filter(|(_, inner)| inner.values().any(|&v| v > 0))
-                .count()
-        };
-        if pos_count(self) != pos_count(other) {
-            return false;
-        }
-        self.0.iter().all(|(ns, inner)| {
-            let Some(other_inner) = other.0.get(ns) else {
-                return inner.values().all(|&v| v <= 0);
-            };
-            inner
-                .iter()
-                .all(|(k, &v)| v <= 0 || other_inner.get(k).copied().unwrap_or(0) == v)
-                && other_inner
-                    .iter()
-                    .all(|(k, &v)| v <= 0 || inner.get(k).is_some())
-        })
+        self.positive_only() == other.positive_only()
     }
 }
 
@@ -309,9 +283,7 @@ pub(crate) const MAX_TAG_LEN: usize = 30;
 pub(crate) const MAX_AVATAR_URL_LEN: usize = 512;
 pub(crate) const MAX_CAPABILITIES_LEN: usize = 4096;
 pub(crate) const MAX_REASON_LEN: usize = 280;
-pub(crate) const DEFAULT_LIMIT: u32 = 25;
 pub(crate) const MAX_LIMIT: u32 = 100;
-pub(crate) const MAX_EDGE_SCAN: usize = 10_000;
 pub(crate) const MAX_SUGGESTION_LIMIT: u32 = 50;
 pub(crate) const FOLLOW_SUGGESTION_SAMPLE: usize = 10;
 pub(crate) const NONCE_TTL_SECS: u64 = 600;
@@ -357,8 +329,6 @@ pub(crate) const MAX_CAPABILITY_DEPTH: usize = 4;
 pub(crate) const MAX_NOTIF_INDEX: usize = 500;
 pub(crate) const DEDUP_WINDOW_SECS: u64 = 3600;
 pub(crate) const NOTIF_RETENTION_SECS: u64 = 7 * SECS_PER_DAY;
-pub(crate) const UNFOLLOW_RETENTION_SECS: u64 = 30 * SECS_PER_DAY;
-
 /// Heartbeat timestamp modulus for probabilistic count reconciliation (~2%).
 pub(crate) const RECONCILE_MODULUS: u64 = 50;
 /// Multiplier applied to suggestion limit to form the candidate pool.
@@ -421,6 +391,124 @@ pub(crate) const RESERVED_HANDLES: &[&str] = &[
     "verified",
 ];
 
+// ---------------------------------------------------------------------------
+// Response helpers: success, error, and paginated response constructors.
+// ---------------------------------------------------------------------------
+
+pub(crate) fn ok_response(data: serde_json::Value) -> Response {
+    Response {
+        success: true,
+        data: Some(data),
+        ..Response::default()
+    }
+}
+
+pub(crate) fn ok_paginated(
+    data: serde_json::Value,
+    limit: u32,
+    next_cursor: Option<String>,
+    cursor_reset: bool,
+) -> Response {
+    Response {
+        success: true,
+        data: Some(data),
+        pagination: Some(Box::new(Pagination {
+            limit,
+            next_cursor,
+            cursor_reset: if cursor_reset { Some(true) } else { None },
+        })),
+        ..Response::default()
+    }
+}
+
+pub(crate) fn err_coded(code: &str, msg: &str) -> Response {
+    Response {
+        error: Some(msg.to_string()),
+        code: Some(code.to_string()),
+        ..Response::default()
+    }
+}
+
+pub(crate) fn err_hint(code: &str, msg: &str, hint: &str) -> Response {
+    Response {
+        error: Some(msg.to_string()),
+        code: Some(code.to_string()),
+        hint: Some(hint.into()),
+        ..Response::default()
+    }
+}
+
+impl From<AppError> for Response {
+    fn from(e: AppError) -> Self {
+        match &e {
+            AppError::Validation(msg) => err_coded("VALIDATION_ERROR", msg),
+            AppError::NotFound(msg) => err_coded("NOT_FOUND", msg),
+            AppError::Auth(msg) => err_hint(
+                "AUTH_FAILED",
+                msg,
+                "Check verifiable_claim fields: nonce (32 bytes, unique), timestamp \
+                 within 5 minutes, domain \"nearly.social\", and public key with \
+                 FullAccess on the claimed account",
+            ),
+            AppError::RateLimit(msg, retry_after) => {
+                let mut resp = err_coded("RATE_LIMITED", msg);
+                resp.retry_after = Some(*retry_after);
+                resp
+            }
+            AppError::Storage(msg) => {
+                eprintln!("[storage error] {msg}");
+                err_coded("STORAGE_ERROR", "Storage operation failed")
+            }
+            AppError::Clock => err_coded("INTERNAL_ERROR", "Internal timing error"),
+        }
+    }
+}
+
+pub(crate) fn parse_u64_param(
+    name: &str,
+    value: Option<&String>,
+    default: u64,
+) -> Result<u64, Response> {
+    match value {
+        Some(s) => s.parse::<u64>().map_err(|_| {
+            AppError::Validation(format!(
+                "Invalid '{name}' value: expected numeric timestamp"
+            ))
+            .into()
+        }),
+        None => Ok(default),
+    }
+}
+
+pub(crate) struct Warnings(Vec<String>);
+
+impl Warnings {
+    pub fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    pub fn on_err(&mut self, label: &str, r: Result<(), impl std::fmt::Display>) {
+        if let Err(e) = r {
+            eprintln!("[warning] {label}: {e}");
+            self.0.push(format!("{label}: failed"));
+        }
+    }
+
+    pub fn push(&mut self, msg: String) {
+        self.0.push(msg);
+    }
+
+    pub fn extend(&mut self, other: Vec<String>) {
+        self.0.extend(other);
+    }
+
+    pub fn attach(self, resp: &mut serde_json::Value) {
+        if !self.0.is_empty() {
+            resp["warnings"] = serde_json::json!(self.0);
+        }
+    }
+}
+
 #[cfg(test)]
 mod enum_consistency_tests {
     use super::*;
@@ -432,30 +520,24 @@ mod enum_consistency_tests {
             Action::Register,
             Action::GetMe,
             Action::UpdateMe,
-            Action::GetProfile,
-            Action::ListAgents,
             Action::GetSuggested,
             Action::Follow,
             Action::Unfollow,
-            Action::GetFollowers,
-            Action::GetFollowing,
-            Action::GetEdges,
             Action::Heartbeat,
             Action::GetActivity,
             Action::GetNetwork,
             Action::GetNotifications,
             Action::ReadNotifications,
-            Action::ListTags,
-            Action::Health,
             Action::Endorse,
             Action::Unendorse,
-            Action::GetEndorsers,
-            Action::FilterEndorsers,
             Action::Deregister,
             Action::MigrateAccount,
-            Action::CheckHandle,
             Action::SetPlatforms,
             Action::ReconcileAll,
+            Action::AdminDeregister,
+            Action::BatchFollow,
+            Action::BatchEndorse,
+            Action::SmokeTestStorage,
         ];
         for action in &all_actions {
             let serde_str = serde_json::to_value(action)

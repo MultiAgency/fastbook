@@ -3,6 +3,7 @@ import type {
   OutlayerRegisterResponse,
   SignMessageResponse,
 } from '@/lib/outlayer';
+import type { StepStatus } from '@/types';
 
 interface RegisterResult {
   api_key: string;
@@ -13,7 +14,6 @@ interface RegisterResult {
 }
 
 type StepNumber = 1 | 2 | 3;
-type StepStatus = 'idle' | 'loading' | 'success' | 'error';
 
 interface AgentStore {
   apiKey: string | null;

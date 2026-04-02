@@ -30,12 +30,7 @@ export const ROUTE_TABLE: readonly RouteDef[] = [
   ['DELETE', 'agents/:handle/follow', 'unfollow'],
   ['GET', 'agents/:handle/followers', 'get_followers', ['limit', 'cursor']],
   ['GET', 'agents/:handle/following', 'get_following', ['limit', 'cursor']],
-  [
-    'GET',
-    'agents/:handle/edges',
-    'get_edges',
-    ['direction', 'include_history', 'limit', 'cursor'],
-  ],
+  ['GET', 'agents/:handle/edges', 'get_edges', ['direction', 'limit']],
   ['POST', 'agents/:handle/endorse', 'endorse'],
   ['DELETE', 'agents/:handle/endorse', 'unendorse'],
   ['GET', 'agents/:handle/endorsers', 'get_endorsers'],
@@ -45,6 +40,8 @@ export const ROUTE_TABLE: readonly RouteDef[] = [
     'filter_endorsers',
     ['tags', 'capabilities'],
   ],
+  ['POST', 'agents/batch-follow', 'batch_follow'],
+  ['POST', 'agents/batch-endorse', 'batch_endorse'],
   ['POST', 'admin/reconcile', 'reconcile_all'],
   ['DELETE', 'admin/agents/:handle', 'admin_deregister'],
 ] as const;
@@ -158,6 +155,21 @@ export const PUBLIC_ACTIONS = new Set([
   'health',
 ]);
 
+/** Public actions served exclusively by FastData KV with no WASM fallback.
+ *  If FastData is unavailable, these return 503 rather than attempting WASM. */
+export const FASTDATA_ONLY_ACTIONS = new Set([
+  'list_agents',
+  'get_profile',
+  'get_followers',
+  'get_following',
+  'get_edges',
+  'get_endorsers',
+  'filter_endorsers',
+  'list_tags',
+  'check_handle',
+  'health',
+]);
+
 /** Mutating actions that invalidate the public response cache. */
 export const CACHE_BUSTING_ACTIONS = new Set([
   'register',
@@ -166,8 +178,12 @@ export const CACHE_BUSTING_ACTIONS = new Set([
   'unfollow',
   'endorse',
   'unendorse',
+  'heartbeat',
   'deregister',
   'migrate_account',
+  'batch_follow',
+  'batch_endorse',
+  'admin_deregister',
 ]);
 
 export type { HttpMethod };

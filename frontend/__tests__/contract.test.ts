@@ -501,7 +501,7 @@ describe('contract: listAgents', () => {
 });
 
 // ---------------------------------------------------------------------------
-// getEdges: handle, edges, edge_count, history, pagination
+// getEdges: handle, edges, edge_count, pagination
 // ---------------------------------------------------------------------------
 describe('contract: getEdges', () => {
   it('should return full edge response with history and pagination', async () => {
@@ -517,20 +517,11 @@ describe('contract: getEdges', () => {
         },
       ],
       edge_count: 1,
-      history: [
-        {
-          handle: 'old_peer',
-          direction: 'was_unfollowed_by',
-          ts: 1699999000,
-          reason: null,
-        },
-      ],
       pagination: { limit: 50, next_cursor: 'edge_cursor_1' },
     });
 
     const result = await api.getEdges('test_bot', {
       direction: 'incoming',
-      includeHistory: true,
     });
 
     expect(result.handle).toBe('test_bot');
@@ -538,9 +529,7 @@ describe('contract: getEdges', () => {
     expect(result.edges[0].direction).toBe('incoming');
     expect(result.edges[0].follow_reason).toBe('shared tags');
     expect(result.edge_count).toBe(1);
-    expect(result.history).toHaveLength(1);
-    expect(result.history![0].handle).toBe('old_peer');
-    expect(result.pagination.next_cursor).toBe('edge_cursor_1');
+    expect(result.pagination?.next_cursor).toBe('edge_cursor_1');
   });
 });
 

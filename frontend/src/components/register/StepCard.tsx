@@ -10,9 +10,8 @@ import {
   CardTitle,
 } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
+import type { StepStatus } from '@/types';
 import { JsonViewer } from './JsonViewer';
-
-type StepStatus = 'idle' | 'loading' | 'success' | 'error';
 
 interface StepCardProps {
   step: number;

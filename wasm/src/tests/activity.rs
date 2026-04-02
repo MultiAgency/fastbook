@@ -235,6 +235,98 @@ fn integration_heartbeat_reconciles_corrupted_counts() {
     unsafe { std::env::remove_var("NEAR_BLOCK_TIMESTAMP") };
 }
 
+/// Heartbeat rate limit: 5 per 60s. The 6th call within the same window
+/// must return RATE_LIMITED with a positive retry_after.
+#[test]
+#[serial]
+fn heartbeat_rate_limited_after_five() {
+    setup_integration("hrl.near");
+
+    let reg_ts_ns = 1_700_000_000u64 * NANOS_PER_SEC;
+    unsafe { std::env::set_var("NEAR_BLOCK_TIMESTAMP", reg_ts_ns.to_string()) };
+
+    quick_register("hrl.near", "hrl_agent");
+
+    // 5 heartbeats should succeed (advance timestamp by 1s each to avoid
+    // identical last_active, but stay within the same 60s rate window).
+    for i in 1..=5u64 {
+        let ts_ns = (1_700_000_000 + i) * NANOS_PER_SEC;
+        unsafe { std::env::set_var("NEAR_BLOCK_TIMESTAMP", ts_ns.to_string()) };
+        let resp = handle_heartbeat(&test_request(Action::Heartbeat));
+        assert!(
+            resp.success,
+            "heartbeat #{i} should succeed: {:?}",
+            resp.error
+        );
+    }
+
+    // 6th heartbeat in the same 60s window should be rate limited.
+    let ts_ns = 1_700_000_006u64 * NANOS_PER_SEC;
+    unsafe { std::env::set_var("NEAR_BLOCK_TIMESTAMP", ts_ns.to_string()) };
+    let resp = handle_heartbeat(&test_request(Action::Heartbeat));
+    assert!(!resp.success, "6th heartbeat should be rate limited");
+    assert_eq!(resp.code.as_deref(), Some("RATE_LIMITED"));
+    assert!(
+        resp.retry_after.unwrap_or(0) > 0,
+        "retry_after should be positive"
+    );
+
+    unsafe { std::env::remove_var("NEAR_BLOCK_TIMESTAMP") };
+}
+
+/// Heartbeat delta.notifications includes follow notifications created
+/// since the previous heartbeat.
+#[test]
+#[serial]
+fn heartbeat_delta_includes_notifications() {
+    setup_integration("hbn_a.near");
+
+    let reg_ts_ns = 1_700_000_000u64 * NANOS_PER_SEC;
+    unsafe { std::env::set_var("NEAR_BLOCK_TIMESTAMP", reg_ts_ns.to_string()) };
+
+    quick_register("hbn_a.near", "hbn_alice");
+    quick_register("hbn_b.near", "hbn_bob");
+
+    // Bob follows Alice — generates a follow notification for Alice.
+    let follow_ts = 1_700_000_600u64;
+    let follow_ts_ns = follow_ts * NANOS_PER_SEC;
+    unsafe { std::env::set_var("NEAR_BLOCK_TIMESTAMP", follow_ts_ns.to_string()) };
+    set_signer("hbn_b.near");
+    handle_follow(
+        &RequestBuilder::new(Action::Follow)
+            .handle("hbn_alice")
+            .build(),
+    );
+
+    // Alice heartbeats — should see the notification in delta.
+    let hb_ts_ns = 1_700_001_800u64 * NANOS_PER_SEC;
+    unsafe { std::env::set_var("NEAR_BLOCK_TIMESTAMP", hb_ts_ns.to_string()) };
+    set_signer("hbn_a.near");
+    let resp = handle_heartbeat(&test_request(Action::Heartbeat));
+    assert!(resp.success, "heartbeat should succeed: {:?}", resp.error);
+
+    let data = parse_response(&resp);
+    let notifications = data["delta"]["notifications"]
+        .as_array()
+        .expect("notifications should be array");
+    assert!(
+        !notifications.is_empty(),
+        "should have at least 1 notification"
+    );
+    let notif = &notifications[0];
+    assert_eq!(
+        notif["type"], "follow",
+        "notification type should be follow"
+    );
+    assert_eq!(notif["from"], "hbn_bob", "notification from should be bob");
+    assert!(
+        notif["at"].as_u64().unwrap() >= follow_ts,
+        "notification at should be >= follow timestamp"
+    );
+
+    unsafe { std::env::remove_var("NEAR_BLOCK_TIMESTAMP") };
+}
+
 #[test]
 #[serial]
 fn get_activity_rejects_non_numeric_since() {

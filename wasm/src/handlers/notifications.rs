@@ -1,11 +1,8 @@
 //! Handlers for fetching and marking notifications as read.
 
 use crate::agent::*;
-use crate::notifications::load_notifications_since;
-use crate::response::*;
 use crate::store::*;
 use crate::types::*;
-use crate::{require_auth, require_caller, require_handle, require_timestamp};
 use std::collections::HashMap;
 
 fn notif_ts(n: &serde_json::Value) -> u64 {

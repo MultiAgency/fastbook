@@ -189,13 +189,14 @@ fn endorsement_cleared_on_tag_removal() {
         "endorsement record should be deleted"
     );
     assert!(
-        index_list(&keys::endorsers("cr_alice", "tags", "security")).is_empty(),
+        handles_from_prefix(&keys::pub_endorser_prefix("cr_alice", "tags", "security")).is_empty(),
         "endorsers index should be empty"
     );
-    let bob_endorsements = index_list(&keys::endorsement_by("cr_bob", "cr_alice"));
     assert!(
-        !bob_endorsements.contains(&"tags:security".to_string()),
-        "endorsement_by should not contain removed tag"
+        !user_has(&keys::pub_endorsement_by(
+            "cr_bob", "cr_alice", "tags", "security"
+        )),
+        "endorsement_by key should not exist for removed tag"
     );
 
     assert!(
@@ -203,7 +204,7 @@ fn endorsement_cleared_on_tag_removal() {
         "defi endorsement record should remain"
     );
     assert!(
-        !index_list(&keys::endorsers("cr_alice", "tags", "defi")).is_empty(),
+        !handles_from_prefix(&keys::pub_endorser_prefix("cr_alice", "tags", "defi")).is_empty(),
         "defi endorsers index should remain"
     );
 }
@@ -223,19 +224,26 @@ fn endorsement_namespace_no_collision() {
     register_endorsable_agent("nc_b.near", "nc_bob", &[], &[]);
 
     set_signer("nc_b.near");
+
+    // Bare "rust" resolves to tags namespace (tags wins over capabilities).
     let mut ereq = test_request(Action::Endorse);
     ereq.handle = Some("nc_alice".into());
     ereq.tags = Some(vec!["rust".into()]);
     let resp = handle_endorse(&ereq);
-    assert!(!resp.success, "should reject ambiguous value");
-    assert!(resp.error.as_deref().unwrap_or("").contains("ambiguous"));
+    assert!(
+        resp.success,
+        "bare rust should resolve to tags: {:?}",
+        resp.error
+    );
 
-    let mut ereq1 = test_request(Action::Endorse);
-    ereq1.handle = Some("nc_alice".into());
-    ereq1.tags = Some(vec!["tags:rust".into()]);
-    let resp1 = handle_endorse(&ereq1);
-    assert!(resp1.success, "endorse tags:rust failed: {:?}", resp1.error);
+    let agent = load_agent("nc_alice").unwrap();
+    assert_eq!(agent.endorsements["tags"]["rust"], 1);
+    assert!(
+        agent.endorsements.get("languages").is_none(),
+        "bare rust must not touch languages ns"
+    );
 
+    // Explicit ns:value prefix still works for capabilities.
     let mut ereq2 = test_request(Action::Endorse);
     ereq2.handle = Some("nc_alice".into());
     ereq2.tags = Some(vec!["languages:rust".into()]);
@@ -266,16 +274,14 @@ fn endorsement_get_endorsers_with_reason() {
         .build();
     handle_endorse(&req);
 
-    let greq = RequestBuilder::new(Action::GetEndorsers)
-        .handle("ge_alice")
-        .build();
-    let resp = handle_get_endorsers(&greq);
-    assert!(resp.success);
+    let endorsers = handles_from_prefix(&keys::pub_endorser_prefix("ge_alice", "tags", "security"));
+    assert_eq!(endorsers.len(), 1);
+    assert_eq!(endorsers[0], "ge_bob");
 
-    let data = parse_response(&resp);
-    let endorsers = &data["endorsers"]["tags"]["security"];
-    assert_eq!(endorsers[0]["handle"], "ge_bob");
-    assert_eq!(endorsers[0]["reason"], "excellent auditor");
+    // Verify endorsement record has the reason
+    let record_bytes = get_bytes(&keys::endorsement("ge_alice", "tags", "security", "ge_bob"));
+    let record: serde_json::Value = serde_json::from_slice(&record_bytes).unwrap();
+    assert_eq!(record["reason"], "excellent auditor");
 }
 
 #[test]
@@ -291,21 +297,17 @@ fn endorsement_profile_shows_my_endorsements() {
     req.tags = Some(vec!["security".into(), "audit".into()]);
     handle_endorse(&req);
 
-    let mut preq = test_request(Action::GetProfile);
-    preq.handle = Some("mp_alice".into());
-    let resp = handle_get_profile(&preq);
-    assert!(resp.success);
+    let agent = load_agent("mp_alice").unwrap();
+    assert_eq!(agent.endorsements["tags"]["security"], 1);
+    assert_eq!(agent.endorsements["skills"]["audit"], 1);
 
-    let data = parse_response(&resp);
-    let my = &data["my_endorsements"];
-    assert!(my["tags"]
-        .as_array()
-        .unwrap()
-        .contains(&serde_json::json!("security")));
-    assert!(my["skills"]
-        .as_array()
-        .unwrap()
-        .contains(&serde_json::json!("audit")));
+    // Verify endorsement records exist
+    assert!(has(&keys::endorsement(
+        "mp_alice", "tags", "security", "mp_bob"
+    )));
+    assert!(has(&keys::endorsement(
+        "mp_alice", "skills", "audit", "mp_bob"
+    )));
 }
 
 #[test]
@@ -387,7 +389,7 @@ fn integration_endorse_generates_notification() {
 
 #[test]
 #[serial]
-fn integration_endorse_save_failure_reports_partial_rollback() {
+fn integration_endorse_save_failure_reports_storage_error() {
     setup_integration("eidxrb_a.near");
     quick_register("eidxrb_a.near", "eidxrb_a");
 
@@ -400,10 +402,9 @@ fn integration_endorse_save_failure_reports_partial_rollback() {
     let before = load_agent("eidxrb_b").unwrap();
     assert_eq!(before.endorsements.total_count(), 0);
 
-    // Let the endorsement record + two index appends succeed (3 writes),
+    // Let the endorsement record + individual keys succeed (3 writes),
     // then fail everything after — which hits save_agent.
-    // Since fail_after_writes blocks ALL subsequent writes (including rollback),
-    // the rollback writes also fail → ROLLBACK_PARTIAL.
+    // With direct writes (no Transaction), save_agent failure returns STORAGE_ERROR.
     set_signer("eidxrb_a.near");
     store::test_backend::fail_after_writes(Some(3), u32::MAX);
 
@@ -415,8 +416,8 @@ fn integration_endorse_save_failure_reports_partial_rollback() {
     assert!(!resp.success, "endorse should fail when save_agent fails");
     assert_eq!(
         resp.code.as_deref(),
-        Some("ROLLBACK_PARTIAL"),
-        "rollback writes are also blocked, so rollback should be partial"
+        Some("STORAGE_ERROR"),
+        "direct-write save_agent failure should produce STORAGE_ERROR"
     );
 
     store::test_backend::fail_after_writes(None, 0);
@@ -452,15 +453,16 @@ fn integration_endorse_indices_consistent_after_success() {
     assert!(resp.success, "endorse should succeed: {:?}", resp.error);
 
     // All three storage locations must agree
-    let endorsers = index_list(&keys::endorsers("eidx_b", "tags", "rust"));
+    let endorsers = handles_from_prefix(&keys::pub_endorser_prefix("eidx_b", "tags", "rust"));
     assert!(
         endorsers.contains(&"eidx_a".to_string()),
         "endorsers index should contain eidx_a"
     );
-    let by_idx = index_list(&keys::endorsement_by("eidx_a", "eidx_b"));
     assert!(
-        by_idx.contains(&"tags:rust".to_string()),
-        "endorsement_by index should contain tags:rust"
+        user_has(&keys::pub_endorsement_by(
+            "eidx_a", "eidx_b", "tags", "rust"
+        )),
+        "endorsement_by key should exist for tags:rust"
     );
     assert!(
         has(&keys::endorsement("eidx_b", "tags", "rust", "eidx_a")),
@@ -516,16 +518,17 @@ fn integration_unendorse_rollback_on_failure_preserves_state() {
         "endorsement count should not change on failed unendorse"
     );
 
-    // Indices and record should still be intact (deletions are transactional now)
-    let endorsers = index_list(&keys::endorsers("ueidx_b", "tags", "python"));
+    // Indices and record should still be intact
+    let endorsers = handles_from_prefix(&keys::pub_endorser_prefix("ueidx_b", "tags", "python"));
     assert!(
         endorsers.contains(&"ueidx_a".to_string()),
         "endorsers index should still contain ueidx_a"
     );
-    let by_idx = index_list(&keys::endorsement_by("ueidx_a", "ueidx_b"));
     assert!(
-        by_idx.contains(&"tags:python".to_string()),
-        "endorsement_by index should still contain tags:python"
+        user_has(&keys::pub_endorsement_by(
+            "ueidx_a", "ueidx_b", "tags", "python"
+        )),
+        "endorsement_by key should still exist for tags:python"
     );
     assert!(
         has(&keys::endorsement("ueidx_b", "tags", "python", "ueidx_a")),
@@ -597,8 +600,181 @@ fn endorsement_reendorse_after_unendorse() {
         "re_alice", "tags", "security", "re_bob"
     )));
 
-    let endorsers = index_list(&keys::endorsers("re_alice", "tags", "security"));
+    let endorsers = handles_from_prefix(&keys::pub_endorser_prefix("re_alice", "tags", "security"));
     assert!(endorsers.contains(&"re_bob".to_string()));
-    let by_idx = index_list(&keys::endorsement_by("re_bob", "re_alice"));
-    assert!(by_idx.contains(&"tags:security".to_string()));
+    assert!(
+        user_has(&keys::pub_endorsement_by(
+            "re_bob", "re_alice", "tags", "security"
+        )),
+        "endorsement_by key should exist for tags:security"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// batch_endorse: basic flow — endorse multiple targets in a single call
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn batch_endorse_basic_flow() {
+    setup_integration("be_caller.near");
+    register_endorsable_agent("be_caller.near", "be_caller", &["security"], &[]);
+    register_endorsable_agent("be_t0.near", "be_t0", &["security", "defi"], &[]);
+    register_endorsable_agent("be_t1.near", "be_t1", &["security"], &[]);
+    register_endorsable_agent("be_t2.near", "be_t2", &["defi"], &[]); // no "security" tag
+
+    set_signer("be_caller.near");
+    let targets = vec!["be_t0".into(), "be_t1".into(), "be_t2".into()];
+    let req = RequestBuilder::new(Action::BatchEndorse)
+        .targets(targets)
+        .tags(&["security"])
+        .build();
+    let resp = handle_batch_endorse(&req);
+    assert!(
+        resp.success,
+        "batch_endorse should succeed: {:?}",
+        resp.error
+    );
+
+    let data = parse_response(&resp);
+    let results = data["results"].as_array().expect("results should be array");
+
+    // be_t0 and be_t1 have "security" tag — should be endorsed.
+    let endorsed: Vec<_> = results
+        .iter()
+        .filter(|r| r["action"] == "endorsed")
+        .collect();
+    assert_eq!(
+        endorsed.len(),
+        2,
+        "2 targets should be endorsed, got {}",
+        endorsed.len()
+    );
+
+    // be_t2 has no "security" tag — should fail with "no endorsable items match".
+    let no_match: Vec<_> = results
+        .iter()
+        .filter(|r| {
+            r["action"] == "error" && r["error"].as_str().unwrap_or("").contains("no endorsable")
+        })
+        .collect();
+    assert_eq!(
+        no_match.len(),
+        1,
+        "1 target should have no matching endorsable items"
+    );
+
+    // Verify storage: endorsement records exist for successful targets.
+    let agent_t0 = load_agent("be_t0").unwrap();
+    assert_eq!(agent_t0.endorsements["tags"]["security"], 1);
+    let agent_t1 = load_agent("be_t1").unwrap();
+    assert_eq!(agent_t1.endorsements["tags"]["security"], 1);
+}
+
+// ---------------------------------------------------------------------------
+// batch_endorse: rate limit budget respects existing usage
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn batch_endorse_respects_remaining_rate_budget() {
+    setup_integration("ber_caller.near");
+    register_endorsable_agent("ber_caller.near", "ber_caller", &["security"], &[]);
+
+    let individual_count = (ENDORSE_RATE_LIMIT - 2) as usize; // leave budget of 2
+    let batch_count = 5usize;
+    let total_targets = individual_count + batch_count;
+    for i in 0..total_targets {
+        let acct = format!("ber_t{i}.near");
+        let handle = format!("ber_t{i}");
+        register_endorsable_agent(&acct, &handle, &["security"], &[]);
+    }
+
+    // Consume (ENDORSE_RATE_LIMIT - 2) endorsements individually.
+    set_signer("ber_caller.near");
+    for i in 0..individual_count {
+        let req = RequestBuilder::new(Action::Endorse)
+            .handle(&format!("ber_t{i}"))
+            .tags(&["security"])
+            .build();
+        let resp = handle_endorse(&req);
+        assert!(resp.success, "individual endorse {i} should succeed");
+    }
+
+    // Now batch_endorse 5 targets — only 2 should succeed (remaining budget).
+    let batch_targets: Vec<String> = (individual_count..total_targets)
+        .map(|i| format!("ber_t{i}"))
+        .collect();
+    let req = RequestBuilder::new(Action::BatchEndorse)
+        .targets(batch_targets)
+        .tags(&["security"])
+        .build();
+    let resp = handle_batch_endorse(&req);
+    assert!(
+        resp.success,
+        "batch_endorse should return success (partial results)"
+    );
+
+    let data = parse_response(&resp);
+    let results = data["results"].as_array().expect("results should be array");
+    let endorsed: Vec<_> = results
+        .iter()
+        .filter(|r| r["action"] == "endorsed")
+        .collect();
+    let rate_limited: Vec<_> = results
+        .iter()
+        .filter(|r| {
+            r["action"] == "error" && r["error"].as_str().unwrap_or("").contains("rate limit")
+        })
+        .collect();
+
+    assert_eq!(
+        endorsed.len(),
+        2,
+        "only 2 endorsements should succeed (remaining budget), got {}",
+        endorsed.len()
+    );
+    assert_eq!(
+        rate_limited.len(),
+        3,
+        "3 targets should hit rate limit within batch, got {}",
+        rate_limited.len()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// batch_endorse: idempotent — re-endorsing already-endorsed targets is a no-op
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn batch_endorse_idempotent() {
+    setup_integration("bei_caller.near");
+    register_endorsable_agent("bei_caller.near", "bei_caller", &["security"], &[]);
+    register_endorsable_agent("bei_t0.near", "bei_t0", &["security"], &[]);
+
+    set_signer("bei_caller.near");
+
+    // First endorsement.
+    let req = RequestBuilder::new(Action::Endorse)
+        .handle("bei_t0")
+        .tags(&["security"])
+        .build();
+    let resp = handle_endorse(&req);
+    assert!(resp.success, "first endorse should succeed");
+
+    // Batch endorse the same target again.
+    let req = RequestBuilder::new(Action::BatchEndorse)
+        .targets(vec!["bei_t0".into()])
+        .tags(&["security"])
+        .build();
+    let resp = handle_batch_endorse(&req);
+    assert!(resp.success, "batch re-endorse should succeed");
+
+    // Count should still be 1 (not 2).
+    let agent = load_agent("bei_t0").unwrap();
+    assert_eq!(
+        agent.endorsements["tags"]["security"], 1,
+        "endorsement count should remain 1 after re-endorsement"
+    );
 }

@@ -167,7 +167,7 @@ fn integration_mutual_follow_detected() {
     let resp = handle_follow(&follow_req);
     assert!(resp.success);
 
-    let notifs = crate::notifications::load_notifications_since("mut_a", 0);
+    let notifs = crate::store::load_notifications_since("mut_a", 0);
     let mutual_notif = notifs.iter().find(|n: &&serde_json::Value| {
         n.get("from").and_then(|f| f.as_str()) == Some("mut_b")
             && n.get("type").and_then(|t| t.as_str()) == Some("follow")
@@ -185,6 +185,74 @@ fn integration_mutual_follow_detected() {
 
 #[test]
 #[serial]
+fn integration_mutual_counter_follow_unfollow_cycle() {
+    setup_integration("mc_a.near");
+    quick_register("mc_a.near", "mc_a");
+    quick_register("mc_b.near", "mc_b");
+
+    // Initially: no mutuals
+    assert_eq!(user_counter(&keys::mutual_count("mc_a")), 0);
+    assert_eq!(user_counter(&keys::mutual_count("mc_b")), 0);
+
+    // A follows B — not mutual yet (B doesn't follow A)
+    set_signer("mc_a.near");
+    let resp = handle_follow(&RequestBuilder::new(Action::Follow).handle("mc_b").build());
+    assert!(resp.success);
+    assert_eq!(
+        user_counter(&keys::mutual_count("mc_a")),
+        0,
+        "one-way follow is not mutual"
+    );
+    assert_eq!(user_counter(&keys::mutual_count("mc_b")), 0);
+
+    // B follows A — now mutual
+    set_signer("mc_b.near");
+    let resp = handle_follow(&RequestBuilder::new(Action::Follow).handle("mc_a").build());
+    assert!(resp.success);
+    assert_eq!(
+        user_counter(&keys::mutual_count("mc_a")),
+        1,
+        "A should have 1 mutual after B follows back"
+    );
+    assert_eq!(
+        user_counter(&keys::mutual_count("mc_b")),
+        1,
+        "B should have 1 mutual after following A"
+    );
+
+    // A unfollows B — breaks the mutual
+    set_signer("mc_a.near");
+    let resp = handle_unfollow(&RequestBuilder::new(Action::Unfollow).handle("mc_b").build());
+    assert!(resp.success);
+    assert_eq!(
+        user_counter(&keys::mutual_count("mc_a")),
+        0,
+        "A's mutual count should decrement on unfollow"
+    );
+    assert_eq!(
+        user_counter(&keys::mutual_count("mc_b")),
+        0,
+        "B's mutual count should decrement when A unfollows"
+    );
+
+    // B unfollows A — no mutual to break (already 0)
+    set_signer("mc_b.near");
+    let resp = handle_unfollow(&RequestBuilder::new(Action::Unfollow).handle("mc_a").build());
+    assert!(resp.success);
+    assert_eq!(
+        user_counter(&keys::mutual_count("mc_a")),
+        0,
+        "should stay 0 after non-mutual unfollow"
+    );
+    assert_eq!(
+        user_counter(&keys::mutual_count("mc_b")),
+        0,
+        "should stay 0 after non-mutual unfollow"
+    );
+}
+
+#[test]
+#[serial]
 fn integration_follow_unfollow_maintains_index_consistency() {
     setup_integration("idx_a.near");
     quick_register("idx_a.near", "idx_a");
@@ -195,23 +263,23 @@ fn integration_follow_unfollow_maintains_index_consistency() {
     handle_follow(&follow_req);
 
     let target = load_agent("idx_b").unwrap();
-    let followers_idx = index_list(&keys::pub_followers("idx_b"));
+    let followers = handles_from_prefix(&keys::pub_follower_prefix("idx_b"));
     assert_eq!(
         target.follower_count as usize,
-        followers_idx.len(),
-        "follower_count ({}) must match followers index length ({})",
+        followers.len(),
+        "follower_count ({}) must match followers key count ({})",
         target.follower_count,
-        followers_idx.len()
+        followers.len()
     );
 
     let follower = load_agent("idx_a").unwrap();
-    let following_idx = index_list(&keys::pub_following("idx_a"));
+    let following = handles_from_prefix(&keys::pub_following_prefix("idx_a"));
     assert_eq!(
         follower.following_count as usize,
-        following_idx.len(),
-        "following_count ({}) must match following index length ({})",
+        following.len(),
+        "following_count ({}) must match following key count ({})",
         follower.following_count,
-        following_idx.len()
+        following.len()
     );
 
     assert!(has(&keys::pub_edge("idx_a", "idx_b")));
@@ -222,8 +290,8 @@ fn integration_follow_unfollow_maintains_index_consistency() {
     handle_unfollow(&unfollow_req);
 
     let target = load_agent("idx_b").unwrap();
-    let followers_idx = index_list(&keys::pub_followers("idx_b"));
-    assert_eq!(target.follower_count as usize, followers_idx.len());
+    let followers = handles_from_prefix(&keys::pub_follower_prefix("idx_b"));
+    assert_eq!(target.follower_count as usize, followers.len());
     assert!(
         !has(&keys::pub_edge("idx_a", "idx_b")),
         "edge should be deleted"
@@ -288,7 +356,7 @@ fn integration_unfollow_with_injected_failure_rolls_back() {
         has(&keys::pub_edge("uf_a", "uf_b")),
         "edge should exist before unfollow"
     );
-    let before_followers = index_list(&keys::pub_followers("uf_b"));
+    let before_followers = handles_from_prefix(&keys::pub_follower_prefix("uf_b"));
     assert_eq!(before_followers.len(), 1);
 
     store::test_backend::fail_next_writes(10);
@@ -301,16 +369,18 @@ fn integration_unfollow_with_injected_failure_rolls_back() {
 
     store::test_backend::fail_next_writes(0);
 
+    // With direct writes (no transaction), the edge write is the first
+    // mutation and it fails, so the edge remains intact.
     assert!(
         has(&keys::pub_edge("uf_a", "uf_b")),
-        "edge should be restored after failed unfollow"
+        "edge should remain after failed unfollow (first write failed)"
     );
 
-    let after_followers = index_list(&keys::pub_followers("uf_b"));
+    let after_followers = handles_from_prefix(&keys::pub_follower_prefix("uf_b"));
     assert_eq!(
         after_followers.len(),
         before_followers.len(),
-        "follower index should be restored after failed unfollow"
+        "follower keys should remain after failed unfollow"
     );
 
     let after_target = load_agent("uf_b").unwrap();
@@ -353,13 +423,13 @@ fn integration_follow_partial_index_failure_rolls_back() {
         "edge should not exist after failed follow"
     );
 
-    let followers = index_list(&keys::pub_followers("pi_b"));
+    let followers = handles_from_prefix(&keys::pub_follower_prefix("pi_b"));
     assert!(
         followers.is_empty(),
         "follower index should be empty after failed follow"
     );
 
-    let following = index_list(&keys::pub_following("pi_a"));
+    let following = handles_from_prefix(&keys::pub_following_prefix("pi_a"));
     assert!(
         following.is_empty(),
         "following index should be empty after failed follow"
@@ -414,7 +484,7 @@ fn integration_rate_limit_check_utility() {
 
 #[test]
 #[serial]
-fn integration_unfollow_partial_index_failure_reports_partial_rollback() {
+fn integration_unfollow_partial_write_failure_preserves_count() {
     setup_integration("upf_a.near");
     quick_register("upf_a.near", "upf_a");
     quick_register("upf_b.near", "upf_b");
@@ -427,30 +497,97 @@ fn integration_unfollow_partial_index_failure_reports_partial_rollback() {
     let before_target = load_agent("upf_b").unwrap();
     assert_eq!(before_target.follower_count, 1);
 
-    // Let edge deletion succeed (1 write), then fail ALL subsequent writes
-    // including rollback writes. This means the edge write can't be rolled back.
-    store::test_backend::fail_after_writes(Some(1), u32::MAX);
+    // Fail all writes — the first write (edge clear) fails immediately,
+    // so unfollow returns STORAGE_ERROR with no state changed.
+    store::test_backend::fail_next_writes(10);
 
     let ureq = RequestBuilder::new(Action::Unfollow)
         .handle("upf_b")
         .build();
     let resp = handle_unfollow(&ureq);
-    assert!(!resp.success, "unfollow should fail with partial injection");
+    assert!(!resp.success, "unfollow should fail with write injection");
     assert_eq!(
         resp.code.as_deref(),
-        Some("ROLLBACK_PARTIAL"),
-        "rollback writes are also blocked, so rollback should be partial"
+        Some("STORAGE_ERROR"),
+        "direct-write failure should produce STORAGE_ERROR"
     );
 
-    store::test_backend::fail_after_writes(None, 0);
     store::test_backend::fail_next_writes(0);
 
-    // Agent record was never updated (save_agent failed), so follower_count
-    // remains unchanged — the only state that persists is the edge deletion
-    // which couldn't be rolled back.
+    // Agent record was never updated, so follower_count remains unchanged.
     let after_target = load_agent("upf_b").unwrap();
     assert_eq!(
         after_target.follower_count, before_target.follower_count,
-        "follower count should be unchanged since save_agent never succeeded"
+        "follower count should be unchanged since mutation never completed"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// batch_follow: rate limit budget respects existing usage
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn batch_follow_respects_remaining_rate_budget() {
+    setup_integration("bf_caller.near");
+    quick_register("bf_caller.near", "bf_caller");
+
+    // Register enough targets: FOLLOW_RATE_LIMIT individual + FOLLOW_RATE_LIMIT batch.
+    let individual_count = (FOLLOW_RATE_LIMIT - 2) as usize; // leave budget of 2
+    let batch_count = 5usize; // request more than remaining budget
+    let total_targets = individual_count + batch_count;
+    for i in 0..total_targets {
+        let acct = format!("bf_t{i}.near");
+        let handle = format!("bf_t{i}");
+        quick_register(&acct, &handle);
+    }
+
+    // Consume (FOLLOW_RATE_LIMIT - 2) follows individually.
+    set_signer("bf_caller.near");
+    for i in 0..individual_count {
+        let req = RequestBuilder::new(Action::Follow)
+            .handle(&format!("bf_t{i}"))
+            .build();
+        let resp = handle_follow(&req);
+        assert!(resp.success, "individual follow {i} should succeed");
+    }
+
+    // Now batch_follow 5 targets — only 2 should succeed (remaining budget).
+    let batch_targets: Vec<String> = (individual_count..total_targets)
+        .map(|i| format!("bf_t{i}"))
+        .collect();
+    let req = RequestBuilder::new(Action::BatchFollow)
+        .targets(batch_targets)
+        .build();
+    let resp = handle_batch_follow(&req);
+    assert!(
+        resp.success,
+        "batch_follow should return success (partial results)"
+    );
+
+    let data = parse_response(&resp);
+    let results = data["results"].as_array().expect("results should be array");
+    let followed: Vec<_> = results
+        .iter()
+        .filter(|r| r["action"] == "followed")
+        .collect();
+    let rate_limited: Vec<_> = results
+        .iter()
+        .filter(|r| {
+            r["action"] == "error" && r["error"].as_str().unwrap_or("").contains("rate limit")
+        })
+        .collect();
+
+    assert_eq!(
+        followed.len(),
+        2,
+        "only 2 follows should succeed (remaining budget), got {}",
+        followed.len()
+    );
+    assert_eq!(
+        rate_limited.len(),
+        3,
+        "3 targets should hit rate limit within batch, got {}",
+        rate_limited.len()
     );
 }

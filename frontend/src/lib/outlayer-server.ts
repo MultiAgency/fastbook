@@ -108,27 +108,23 @@ export function getOutlayerPaymentKey(): string {
 // the wallet's account, we call the free /wallet/v1/sign-message endpoint
 // and inject the result as a verifiable_claim before forwarding to WASM.
 //
-// Two caches avoid redundant calls:
-//   accountCache  — wk_ → account_id  (deterministic, never expires)
-//   claimCache    — wk_:action → signed claim  (4 min TTL)
+// accountCache maps wk_ → account_id (deterministic, never expires).
+// Claims are NOT cached — NEP-413 nonces are single-use, so each WASM
+// call requires a fresh signature from the sign-message endpoint.
 //
 // First request for a new wk_ key costs 2 sign calls (resolve + sign).
 // Subsequent requests with a warm account cache cost 1 sign call.
-// Cache-hit requests cost 0.
 // ---------------------------------------------------------------------------
 
-interface CachedClaim {
+interface MintedClaim {
   near_account_id: string;
   public_key: string;
   signature: string;
   nonce: string;
   message: string;
-  expiresAt: number;
 }
 
 const accountCache = new Map<string, string>();
-const claimCache = new Map<string, CachedClaim>();
-const CLAIM_TTL_MS = 4 * 60 * 1000; // 4 minutes (within 5-minute NEP-413 window)
 const SIGN_TIMEOUT_MS = 5_000;
 
 async function signMessage(
@@ -161,7 +157,12 @@ async function signMessage(
       typeof r.signature === 'string' &&
       typeof r.nonce === 'string'
     ) {
-      return r as unknown as Record<string, string>;
+      return {
+        account_id: r.account_id as string,
+        public_key: r.public_key as string,
+        signature: r.signature as string,
+        nonce: r.nonce as string,
+      };
     }
     return null;
   } catch {
@@ -182,16 +183,15 @@ async function resolveAccountId(walletKey: string): Promise<string | null> {
   return result.account_id;
 }
 
+// Each WASM call needs a fresh nonce — NEP-413 nonces are single-use
+// (consumed via set_if_absent in auth.rs).  Caching claims would cause
+// NONCE_REPLAY errors on the second call with the same action type.
+// The accountCache above is safe to keep: account IDs are deterministic.
+// Cost: one sign-message call per request (~network RTT to OutLayer API).
 export async function mintClaimForWalletKey(
   walletKey: string,
   action: string,
-): Promise<CachedClaim | null> {
-  const now = Date.now();
-
-  const cacheKey = `${walletKey}:${action}`;
-  const cached = claimCache.get(cacheKey);
-  if (cached && cached.expiresAt > now) return cached;
-
+): Promise<MintedClaim | null> {
   const accountId = await resolveAccountId(walletKey);
   if (!accountId) return null;
 
@@ -200,23 +200,19 @@ export async function mintClaimForWalletKey(
     domain: 'nearly.social',
     account_id: accountId,
     version: 1,
-    timestamp: now,
+    timestamp: Date.now(),
   });
 
   const result = await signMessage(walletKey, message);
   if (!result) return null;
 
-  const claim: CachedClaim = {
+  return {
     near_account_id: accountId,
     public_key: result.public_key,
     signature: result.signature,
     nonce: result.nonce,
     message,
-    expiresAt: now + CLAIM_TTL_MS,
   };
-
-  claimCache.set(cacheKey, claim);
-  return claim;
 }
 
 const OUTLAYER_RESOURCE_LIMITS = {
@@ -271,17 +267,21 @@ export async function callOutlayer(
 
   let response: Response;
   try {
-    response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...authHeaders,
+    response = await fetchWithTimeout(
+      url,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders,
+        },
+        body: JSON.stringify({
+          input: wasmBody,
+          resource_limits: OUTLAYER_RESOURCE_LIMITS,
+        }),
       },
-      body: JSON.stringify({
-        input: wasmBody,
-        resource_limits: OUTLAYER_RESOURCE_LIMITS,
-      }),
-    });
+      90_000,
+    );
   } catch {
     return errJson('Upstream unreachable', 502);
   }

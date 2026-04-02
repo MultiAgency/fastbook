@@ -1,20 +1,16 @@
 //! Handlers for endorsing, unendorsing, and querying endorsers.
 
 use crate::agent::*;
-use crate::response::*;
 use crate::store::*;
-use crate::transaction::Transaction;
 use crate::types::*;
 use crate::validation::*;
-use crate::{require_agent, require_field, require_target_handle, require_timestamp};
 use std::collections::{HashMap, HashSet};
 
-fn endorsement_entry(ns: &str, value: &str) -> String {
-    format!("{ns}:{value}")
-}
-
-/// Strict resolution (endorse path): the item must exist in the target's current profile.
-fn resolve_strict(
+/// The item must exist in the target's current profile.  Endorsements for
+/// items that are later removed from a profile are cleaned up by
+/// `EndorsementCascade` at profile-change time, so both endorse and unendorse
+/// can use the same strict resolution.
+fn resolve_item(
     ns: &str,
     val: &str,
     target_handle: &str,
@@ -28,20 +24,6 @@ fn resolve_strict(
             &format!("Agent @{target_handle} does not have {ns} '{val}'. Fetch GET /agents/{target_handle} to see endorsable tags and capabilities."),
         ))
     }
-}
-
-/// Lenient resolution (unendorse/cascade path): falls back to checking whether
-/// the caller already has an endorsement record, so removals succeed even if
-/// the target's profile changed since the endorsement was created.
-fn resolve_lenient(
-    ns: &str,
-    val: &str,
-    target_handle: &str,
-    caller_handle: &str,
-    endorsable: &HashSet<(String, String)>,
-) -> bool {
-    endorsable.contains(&(ns.to_string(), val.to_string()))
-        || has(&keys::endorsement(target_handle, ns, val, caller_handle))
 }
 
 pub fn collect_endorsable(
@@ -58,54 +40,31 @@ pub fn collect_endorsable(
     set
 }
 
-fn resolve_capabilities_strict(
-    caps: &serde_json::Value,
-    target_handle: &str,
-    endorsable: &HashSet<(String, String)>,
-    resolved: &mut Vec<(String, String)>,
-) -> Result<(), Response> {
-    for (ns, val) in extract_capability_pairs(caps) {
-        resolve_strict(&ns, &val, target_handle, endorsable)?;
-        resolved.push((ns, val));
-    }
-    Ok(())
-}
-
-fn resolve_capabilities_lenient(
-    caps: &serde_json::Value,
-    target_handle: &str,
-    caller_handle: &str,
-    endorsable: &HashSet<(String, String)>,
-    resolved: &mut Vec<(String, String)>,
-) {
-    for (ns, val) in extract_capability_pairs(caps) {
-        if resolve_lenient(&ns, &val, target_handle, caller_handle, endorsable) {
-            resolved.push((ns, val));
-        }
-    }
-}
-
-/// Resolve a bare tag or `ns:value` string (endorse path — strict).
+/// Resolve a bare tag or `ns:value` string.
 ///
 /// 1. Explicit `ns:value` prefix → must exist in profile
-/// 2. Unique match across namespaces → use it
-/// 3. Ambiguous → error with disambiguation hint
-/// 4. No match → error
-fn resolve_tag_strict(
+/// 2. Bare value in tags namespace → use it (tags wins)
+/// 3. Unique match across capability namespaces → use it
+/// 4. Ambiguous across capability namespaces → error with hint
+/// 5. No match → error
+fn resolve_tag(
     val: &str,
     target_handle: &str,
     endorsable: &HashSet<(String, String)>,
-    resolved: &mut Vec<(String, String)>,
-) -> Result<(), Response> {
+) -> Result<(String, String), Response> {
     if let Some((ns, v)) = val.split_once(':') {
-        resolve_strict(ns, v, target_handle, endorsable)?;
-        resolved.push((ns.to_string(), v.to_string()));
-        return Ok(());
+        resolve_item(ns, v, target_handle, endorsable)?;
+        return Ok((ns.to_string(), v.to_string()));
+    }
+
+    // Tags namespace wins for bare strings; fall back to capabilities.
+    if endorsable.contains(&("tags".to_string(), val.to_string())) {
+        return Ok(("tags".to_string(), val.to_string()));
     }
 
     let matches: Vec<&str> = endorsable
         .iter()
-        .filter(|(_, v)| *v == val)
+        .filter(|(ns, v)| *v == val && ns != "tags")
         .map(|(ns, _)| ns.as_str())
         .collect();
 
@@ -114,10 +73,7 @@ fn resolve_tag_strict(
             "VALIDATION_ERROR",
             &format!("Agent @{target_handle} does not have '{val}'. Fetch GET /agents/{target_handle} to see endorsable tags and capabilities."),
         )),
-        1 => {
-            resolved.push((matches[0].to_string(), val.to_string()));
-            Ok(())
-        }
+        1 => Ok((matches[0].to_string(), val.to_string())),
         _ => Err(err_coded(
             "VALIDATION_ERROR",
             &format!(
@@ -129,50 +85,7 @@ fn resolve_tag_strict(
     }
 }
 
-/// Resolve a bare tag or `ns:value` string (unendorse/cascade path — lenient).
-///
-/// 1. Explicit `ns:value` prefix → check profile or existing endorsement
-/// 2. Unique match across namespaces → use it
-/// 3. Ambiguous → include only namespaces where caller has existing endorsement
-/// 4. No match → probe storage for existing endorsement
-fn resolve_tag_lenient(
-    val: &str,
-    target_handle: &str,
-    caller_handle: &str,
-    endorsable: &HashSet<(String, String)>,
-    resolved: &mut Vec<(String, String)>,
-) {
-    if let Some((ns, v)) = val.split_once(':') {
-        if resolve_lenient(ns, v, target_handle, caller_handle, endorsable) {
-            resolved.push((ns.to_string(), v.to_string()));
-        }
-        return;
-    }
-
-    let matches: Vec<&str> = endorsable
-        .iter()
-        .filter(|(_, v)| *v == val)
-        .map(|(ns, _)| ns.as_str())
-        .collect();
-
-    match matches.len() {
-        0 => {
-            if let Some(ns) = probe_endorsement_ns(target_handle, val, caller_handle, endorsable) {
-                resolved.push((ns, val.to_string()));
-            }
-        }
-        1 => resolved.push((matches[0].to_string(), val.to_string())),
-        _ => {
-            for ns in &matches {
-                if has(&keys::endorsement(target_handle, ns, val, caller_handle)) {
-                    resolved.push((ns.to_string(), val.to_string()));
-                }
-            }
-        }
-    }
-}
-
-fn resolve_request_strict(
+fn resolve_request(
     req: &Request,
     target_handle: &str,
     endorsable: &HashSet<(String, String)>,
@@ -180,17 +93,15 @@ fn resolve_request_strict(
     let mut resolved = Vec::new();
 
     if let Some(caps) = req.capabilities.as_ref().filter(|c| !c.is_null()) {
-        resolve_capabilities_strict(caps, target_handle, endorsable, &mut resolved)?;
+        for (ns, val) in extract_capability_pairs(caps) {
+            resolve_item(&ns, &val, target_handle, endorsable)?;
+            resolved.push((ns, val));
+        }
     }
 
     if let Some(tags) = req.tags.as_deref() {
         for tag in tags {
-            resolve_tag_strict(
-                &tag.to_lowercase(),
-                target_handle,
-                endorsable,
-                &mut resolved,
-            )?;
+            resolved.push(resolve_tag(&tag.to_lowercase(), target_handle, endorsable)?);
         }
     }
 
@@ -201,56 +112,6 @@ fn resolve_request_strict(
         ));
     }
     Ok(resolved)
-}
-
-fn resolve_request_lenient(
-    req: &Request,
-    target_handle: &str,
-    caller_handle: &str,
-    endorsable: &HashSet<(String, String)>,
-) -> Vec<(String, String)> {
-    let mut resolved = Vec::new();
-
-    if let Some(caps) = req.capabilities.as_ref().filter(|c| !c.is_null()) {
-        resolve_capabilities_lenient(
-            caps,
-            target_handle,
-            caller_handle,
-            endorsable,
-            &mut resolved,
-        );
-    }
-
-    if let Some(tags) = req.tags.as_deref() {
-        for tag in tags {
-            resolve_tag_lenient(
-                &tag.to_lowercase(),
-                target_handle,
-                caller_handle,
-                endorsable,
-                &mut resolved,
-            );
-        }
-    }
-
-    resolved
-}
-
-fn probe_endorsement_ns(
-    target: &str,
-    val: &str,
-    caller: &str,
-    endorsable: &HashSet<(String, String)>,
-) -> Option<String> {
-    if has(&keys::endorsement(target, "tags", val, caller)) {
-        return Some("tags".to_string());
-    }
-    endorsable
-        .iter()
-        .map(|(ns, _)| ns.as_str())
-        .filter(|ns| *ns != "tags")
-        .find(|ns| has(&keys::endorsement(target, ns, val, caller)))
-        .map(String::from)
 }
 
 pub(crate) struct EndorsementCascade {
@@ -279,34 +140,36 @@ impl EndorsementCascade {
         agent.endorsements.prune_empty();
     }
 
+    /// Return the (ns, val) pairs being removed — used by fastdata sync.
+    pub fn removed_pairs(&self) -> Vec<(&str, &str)> {
+        self.removals
+            .iter()
+            .flat_map(|(ns, vals)| vals.iter().map(move |v| (ns.as_str(), v.as_str())))
+            .collect()
+    }
+
     pub fn cleanup_storage(&self, handle: &str) -> Vec<String> {
         let mut warnings = Vec::new();
         for (ns, vals) in &self.removals {
             for val in vals {
-                let endorser_handles = index_list(&keys::endorsers(handle, ns, val));
+                let endorser_handles =
+                    handles_from_prefix(&keys::pub_endorser_prefix(handle, ns, val));
                 for endorser in &endorser_handles {
-                    let Ok(remaining) = index_remove(
-                        &keys::endorsement_by(endorser, handle),
-                        &endorsement_entry(ns, val),
-                    ) else {
-                        warnings.push(format!("cleanup: failed to remove endorsement_by index for {endorser}->{ns}:{val}"));
-                        continue;
-                    };
-                    if delete(&keys::endorsement(handle, ns, val, endorser)).is_err() {
+                    // Remove individual endorsement_by key
+                    user_delete_key(&keys::pub_endorsement_by(endorser, handle, ns, val));
+                    // Delete the endorsement record
+                    if user_set(&keys::endorsement(handle, ns, val, endorser), &[]).is_err() {
                         warnings.push(format!(
                             "cleanup: failed to delete endorsement record {endorser}->{ns}:{val}"
                         ));
                     }
+                    // Remove the endorser key
+                    user_delete_key(&keys::pub_endorser(handle, ns, val, endorser));
                     // If no endorsements remain from this endorser to this target,
                     // remove the target from the endorser's endorsed_targets index.
-                    if remaining.is_empty() {
-                        let _ = index_remove(&keys::endorsed_targets(endorser), handle);
+                    if user_list(&keys::pub_endorsement_by_prefix(endorser, handle)).is_empty() {
+                        user_delete_key(&keys::pub_endorsed_target(endorser, handle));
                     }
-                }
-                if delete(&keys::endorsers(handle, ns, val)).is_err() {
-                    warnings.push(format!(
-                        "cleanup: failed to delete endorsers index for {ns}:{val}"
-                    ));
                 }
             }
         }
@@ -321,21 +184,14 @@ struct EndorsePreamble {
     requested: Vec<(String, String)>,
 }
 
-struct EndorseCommonResult {
-    caller_handle: String,
-    target_handle: String,
-    before: AgentRecord,
-    endorsable: HashSet<(String, String)>,
-}
-
-/// Shared validation for endorse/unendorse: auth, rate limit, self-check, load target.
-fn endorse_common(
+/// Auth, rate limit, self-check, load target, resolve requested items.
+fn endorse_preamble(
     req: &Request,
     rate_key: &str,
     self_code: &str,
-) -> Result<EndorseCommonResult, Response> {
+) -> Result<EndorsePreamble, Response> {
     let caller = crate::auth::get_caller_from(req)?;
-    let caller_handle = agent_handle_for_account(&caller)
+    let (caller_handle, _) = agent_handle_for_account(&caller)
         .ok_or_else(|| err_coded("NOT_REGISTERED", "No agent registered for this account"))?;
     if let Err(e) = check_rate_limit(
         rate_key,
@@ -355,32 +211,11 @@ fn endorse_common(
     }
     let before = load_agent(&target_handle).ok_or(AppError::NotFound("Agent not found"))?;
     let endorsable = collect_endorsable(Some(&before.tags), Some(&before.capabilities));
-    Ok(EndorseCommonResult {
+    let requested = resolve_request(req, &target_handle, &endorsable)?;
+    Ok(EndorsePreamble {
         caller_handle,
         target_handle,
         before,
-        endorsable,
-    })
-}
-
-fn endorse_preamble_strict(req: &Request) -> Result<EndorsePreamble, Response> {
-    let c = endorse_common(req, "endorse", "SELF_ENDORSE")?;
-    let requested = resolve_request_strict(req, &c.target_handle, &c.endorsable)?;
-    Ok(EndorsePreamble {
-        caller_handle: c.caller_handle,
-        target_handle: c.target_handle,
-        before: c.before,
-        requested,
-    })
-}
-
-fn endorse_preamble_lenient(req: &Request) -> Result<EndorsePreamble, Response> {
-    let c = endorse_common(req, "unendorse", "SELF_UNENDORSE")?;
-    let requested = resolve_request_lenient(req, &c.target_handle, &c.caller_handle, &c.endorsable);
-    Ok(EndorsePreamble {
-        caller_handle: c.caller_handle,
-        target_handle: c.target_handle,
-        before: c.before,
         requested,
     })
 }
@@ -393,7 +228,7 @@ pub fn handle_endorse(req: &Request) -> Response {
         target_handle,
         before,
         requested,
-    } = match endorse_preamble_strict(req) {
+    } = match endorse_preamble(req, "endorse", "SELF_ENDORSE") {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -416,18 +251,22 @@ pub fn handle_endorse(req: &Request) -> Response {
         }
     };
 
+    let to_resp = Response::from;
+
     let mut agent = before.clone();
     let mut endorsed: HashMap<String, Vec<String>> = HashMap::new();
     let mut already_endorsed: HashMap<String, Vec<String>> = HashMap::new();
     let mut warnings = Warnings::new();
-    let mut txn = Transaction::new();
-    let first_endorsement_to_target =
-        index_list(&keys::endorsement_by(&caller_handle, &target_handle)).is_empty();
+    let first_endorsement_to_target = user_list(&keys::pub_endorsement_by_prefix(
+        &caller_handle,
+        &target_handle,
+    ))
+    .is_empty();
 
     for (ns, v) in requested {
         let ekey = keys::endorsement(&target_handle, &ns, &v, &caller_handle);
 
-        if has(&ekey) {
+        if user_has(&ekey) {
             if agent.endorsements.count(&ns, &v) == 0 {
                 agent.endorsements.increment(&ns, &v);
                 warnings.push(format!("endorsement count corrected for {ns}:{v}"));
@@ -436,55 +275,65 @@ pub fn handle_endorse(req: &Request) -> Response {
             continue;
         }
 
-        if let Some(r) = txn.set_public("Failed to store endorsement", &ekey, &record_bytes) {
-            return r;
+        // Store endorsement record
+        if let Err(e) = user_set(&ekey, &record_bytes) {
+            return to_resp(e);
         }
         agent.endorsements.increment(&ns, &v);
-        if let Some(r) = txn.index_append(
-            "Failed to update endorsement_by index",
-            &keys::endorsement_by(&caller_handle, &target_handle),
-            &endorsement_entry(&ns, &v),
+        // Individual endorsement_by key
+        if let Err(e) = user_set(
+            &keys::pub_endorsement_by(&caller_handle, &target_handle, &ns, &v),
+            b"1",
         ) {
-            return r;
+            return to_resp(e);
         }
-        if let Some(r) = txn.index_append(
-            "Failed to update endorsers index",
-            &keys::endorsers(&target_handle, &ns, &v),
-            &caller_handle,
+        // Individual endorser key
+        if let Err(e) = user_set(
+            &keys::pub_endorser(&target_handle, &ns, &v, &caller_handle),
+            b"1",
         ) {
-            return r;
+            return to_resp(e);
         }
         endorsed.entry(ns).or_default().push(v);
     }
 
     // Track this target in endorsed_targets if this is the first endorsement to them.
     if first_endorsement_to_target && !endorsed.is_empty() {
-        if let Some(r) = txn.index_append(
-            "Failed to update endorsed_targets index",
-            &keys::endorsed_targets(&caller_handle),
-            &target_handle,
+        if let Err(e) = user_set(
+            &keys::pub_endorsed_target(&caller_handle, &target_handle),
+            b"1",
         ) {
-            return r;
+            return to_resp(e);
         }
     }
 
-    if let Some(r) = txn.save_agent("Failed to save agent", &agent, &before) {
-        return r;
+    if let Err(e) = save_agent(&agent) {
+        return to_resp(e);
     }
 
     if !endorsed.is_empty() {
         increment_rate_limit("endorse", &caller_handle, ENDORSE_RATE_WINDOW_SECS);
         warnings.on_err(
             "notification",
-            crate::notifications::store_notification_with_detail(
+            crate::store::store_notification(
                 &target_handle,
-                crate::notifications::NOTIF_ENDORSE,
+                crate::store::NOTIF_ENDORSE,
                 &caller_handle,
                 false,
                 ts,
                 Some(serde_json::json!(&endorsed)),
             ),
         );
+    }
+
+    // Sync to FastData KV.
+    {
+        let mut sync = crate::fastdata::SyncBatch::new();
+        sync.agent(&agent);
+        sync.endorsers(&target_handle, &endorsed);
+        if let Some(w) = sync.flush() {
+            warnings.push(w);
+        }
     }
 
     let mut resp = serde_json::json!({
@@ -505,7 +354,7 @@ pub fn handle_unendorse(req: &Request) -> Response {
         target_handle,
         before,
         requested,
-    } = match endorse_preamble_lenient(req) {
+    } = match endorse_preamble(req, "unendorse", "SELF_UNENDORSE") {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -517,7 +366,7 @@ pub fn handle_unendorse(req: &Request) -> Response {
 
     for (ns, val) in requested {
         let ekey = keys::endorsement(&target_handle, &ns, &val, &caller_handle);
-        if !has(&ekey) {
+        if !user_has(&ekey) {
             continue;
         }
 
@@ -528,38 +377,31 @@ pub fn handle_unendorse(req: &Request) -> Response {
 
     if !removed.is_empty() {
         agent.endorsements.prune_empty();
-        let mut txn = Transaction::new();
-        if let Some(r) = txn.save_agent("Failed to save agent", &agent, &before) {
-            return r;
+        if let Err(e) = save_agent(&agent) {
+            eprintln!("[storage error] {e}");
+            return err_coded("STORAGE_ERROR", "Storage operation failed");
         }
         for (ns, val, ekey) in &to_delete {
-            if let Some(r) = txn.set_public("Failed to delete endorsement", ekey, &[]) {
-                return r;
-            }
-            if let Some(r) = txn.index_remove(
-                "Failed to clean endorsement_by index",
-                &keys::endorsement_by(&caller_handle, &target_handle),
-                &endorsement_entry(ns, val),
-            ) {
-                return r;
-            }
-            if let Some(r) = txn.index_remove(
-                "Failed to clean endorsers index",
-                &keys::endorsers(&target_handle, ns, val),
+            // Clear endorsement record
+            let _ = user_set(ekey, &[]);
+            // Remove individual endorsement_by key
+            user_delete_key(&keys::pub_endorsement_by(
                 &caller_handle,
-            ) {
-                return r;
-            }
+                &target_handle,
+                ns,
+                val,
+            ));
+            // Remove individual endorser key
+            user_delete_key(&keys::pub_endorser(&target_handle, ns, val, &caller_handle));
         }
         // Remove target from endorsed_targets if no endorsements remain.
-        if index_list(&keys::endorsement_by(&caller_handle, &target_handle)).is_empty() {
-            if let Some(r) = txn.index_remove(
-                "Failed to clean endorsed_targets index",
-                &keys::endorsed_targets(&caller_handle),
-                &target_handle,
-            ) {
-                return r;
-            }
+        if user_list(&keys::pub_endorsement_by_prefix(
+            &caller_handle,
+            &target_handle,
+        ))
+        .is_empty()
+        {
+            user_delete_key(&keys::pub_endorsed_target(&caller_handle, &target_handle));
         }
         increment_rate_limit("unendorse", &caller_handle, ENDORSE_RATE_WINDOW_SECS);
         let notif_ts = now_secs().unwrap_or_else(|e| {
@@ -568,15 +410,25 @@ pub fn handle_unendorse(req: &Request) -> Response {
         });
         warnings.on_err(
             "notification",
-            crate::notifications::store_notification_with_detail(
+            crate::store::store_notification(
                 &target_handle,
-                crate::notifications::NOTIF_UNENDORSE,
+                crate::store::NOTIF_UNENDORSE,
                 &caller_handle,
                 false,
                 notif_ts,
                 Some(serde_json::json!(removed)),
             ),
         );
+    }
+
+    // Sync to FastData KV.
+    if !removed.is_empty() {
+        let mut sync = crate::fastdata::SyncBatch::new();
+        sync.agent(&agent);
+        sync.endorsers(&target_handle, &removed);
+        if let Some(w) = sync.flush() {
+            warnings.push(w);
+        }
     }
 
     let mut resp = serde_json::json!({
@@ -587,74 +439,4 @@ pub fn handle_unendorse(req: &Request) -> Response {
     });
     warnings.attach(&mut resp);
     ok_response(resp)
-}
-
-// RESPONSE: { handle, endorsers: { ns: { val: [{ handle, reason?, at? }] } } }
-pub fn handle_get_endorsers(req: &Request) -> Response {
-    let target_handle = require_target_handle!(req);
-    let target = require_agent!(&target_handle);
-
-    let endorsable = collect_endorsable(Some(&target.tags), Some(&target.capabilities));
-    let has_filter = req.tags.as_ref().map(|t| !t.is_empty()).unwrap_or(false)
-        || req
-            .capabilities
-            .as_ref()
-            .map(|c| !c.is_null())
-            .unwrap_or(false);
-    let query_pairs = if has_filter {
-        match resolve_request_strict(req, &target_handle, &endorsable) {
-            Ok(pairs) => pairs,
-            Err(resp) => return resp,
-        }
-    } else {
-        endorsable.into_iter().collect()
-    };
-
-    let mut result = serde_json::Map::new();
-    for (ns, v) in &query_pairs {
-        let handles = index_list(&keys::endorsers(&target_handle, ns, v));
-        if handles.is_empty() {
-            continue;
-        }
-
-        let entries: Vec<serde_json::Value> = handles
-            .iter()
-            .filter_map(|h| {
-                let raw = get_string(&keys::endorsement(&target_handle, ns, v, h))?;
-                let record = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
-                let mut entry = serde_json::json!({ "handle": h });
-                if let Some(agent) = load_agent(h) {
-                    entry["description"] = serde_json::json!(agent.description);
-                    entry["avatar_url"] = serde_json::json!(agent.avatar_url);
-                }
-                if let Some(reason) = record.get("reason").filter(|r| !r.is_null()) {
-                    entry["reason"] = reason.clone();
-                }
-                if let Some(ts) = record.get("ts") {
-                    entry["at"] = ts.clone();
-                }
-                Some(entry)
-            })
-            .collect();
-        if entries.is_empty() {
-            continue;
-        }
-
-        let Some(obj) = result
-            .entry(ns.clone())
-            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
-            .as_object_mut()
-        else {
-            return err_coded(
-                "INTERNAL_ERROR",
-                "internal: endorser map entry is not an Object",
-            );
-        };
-        obj.insert(v.clone(), serde_json::json!(entries));
-    }
-
-    ok_response(serde_json::json!({
-        "handle": target_handle,
-        "endorsers": result,
-    }))
 }

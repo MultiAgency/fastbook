@@ -124,25 +124,24 @@ fn all_action_variants_deserialize_from_snake_case() {
         "register",
         "get_me",
         "update_me",
-        "get_profile",
-        "list_agents",
         "get_suggested",
         "follow",
         "unfollow",
-        "get_followers",
-        "get_following",
-        "get_edges",
         "heartbeat",
         "get_activity",
         "get_network",
         "get_notifications",
         "read_notifications",
-        "list_tags",
-        "health",
         "endorse",
         "unendorse",
-        "get_endorsers",
+        "deregister",
+        "migrate_account",
+        "set_platforms",
         "reconcile_all",
+        "admin_deregister",
+        "batch_follow",
+        "batch_endorse",
+        "smoke_test_storage",
     ];
     for action_str in &actions {
         let json = format!(r#""{action_str}""#);
@@ -151,7 +150,7 @@ fn all_action_variants_deserialize_from_snake_case() {
     }
     assert_eq!(
         actions.len(),
-        22,
+        21,
         "Action count mismatch — did you add a new action?"
     );
 }
@@ -235,45 +234,6 @@ fn validate_capabilities_rejects_colons_in_values() {
     assert!(validate_capabilities(&arr).is_err());
 }
 
-// ── validate_cursor ─────────────────────────────────────────────────
-
-#[test]
-fn cursor_accepts_empty() {
-    assert!(validate_cursor("").is_ok());
-}
-
-#[test]
-fn cursor_accepts_valid_handle_format() {
-    assert!(validate_cursor("alice").is_ok());
-    assert!(validate_cursor("agent_007").is_ok());
-    assert!(validate_cursor(&"a".repeat(32)).is_ok());
-}
-
-#[test]
-fn cursor_accepts_valid_numeric() {
-    assert!(validate_cursor("0").is_ok());
-    assert!(validate_cursor("1234567890").is_ok());
-    assert!(validate_cursor(&"9".repeat(20)).is_ok());
-}
-
-#[test]
-fn cursor_rejects_too_long_handle() {
-    assert!(validate_cursor(&"a".repeat(33)).is_err());
-}
-
-#[test]
-fn cursor_rejects_too_long_numeric() {
-    assert!(validate_cursor(&"1".repeat(21)).is_err());
-}
-
-#[test]
-fn cursor_rejects_invalid_chars() {
-    assert!(validate_cursor("Alice").is_err()); // uppercase
-    assert!(validate_cursor("has space").is_err());
-    assert!(validate_cursor("has-dash").is_err());
-    assert!(validate_cursor("abc!def").is_err());
-}
-
 // ── platform unicode ────────────────────────────────────────────────
 
 #[test]
@@ -292,33 +252,6 @@ fn reject_unsafe_unicode_catches_zero_width() {
 fn reject_unsafe_unicode_accepts_clean_string() {
     assert!(reject_unsafe_unicode("near-protocol", false).is_ok());
     assert!(reject_unsafe_unicode("agent.ai", false).is_ok());
-}
-
-// ── validate_tag_filter ─────────────────────────────────────────────
-
-#[test]
-fn tag_filter_accepts_valid() {
-    assert!(validate_tag_filter("rust").is_ok());
-    assert!(validate_tag_filter("web-3").is_ok());
-    assert!(validate_tag_filter("ai").is_ok());
-    assert!(validate_tag_filter(&"a".repeat(30)).is_ok());
-}
-
-#[test]
-fn tag_filter_rejects_empty() {
-    assert!(validate_tag_filter("").is_err());
-}
-
-#[test]
-fn tag_filter_rejects_too_long() {
-    assert!(validate_tag_filter(&"a".repeat(31)).is_err());
-}
-
-#[test]
-fn tag_filter_rejects_invalid_chars() {
-    assert!(validate_tag_filter("near:mainnet").is_err()); // colon
-    assert!(validate_tag_filter("has space").is_err()); // space
-    assert!(validate_tag_filter("under_score").is_err()); // underscore
 }
 
 #[test]

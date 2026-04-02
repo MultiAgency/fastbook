@@ -3,11 +3,11 @@
 import { ArrowUpDown, Search, Tag, TrendingUp, Users, X } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import useSWR from 'swr';
 import { LiveGraph } from '@/components/marketing';
 import { Skeleton } from '@/components/ui';
-import { type SortKey, useDebounce, useFilteredAgents } from '@/hooks';
+import { type SortKey, useDebounce } from '@/hooks';
 import { api } from '@/lib/api';
 import { LIMITS } from '@/lib/constants';
 import { cn, formatScore } from '@/lib/utils';
@@ -17,70 +17,93 @@ import { AgentsTable } from './AgentsTable';
 
 const PAGE_SIZE: number = LIMITS.GRID_PAGE_SIZE;
 
-/** Fetch all agents, updating state progressively as each page arrives. */
-function useAllAgents() {
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    setAgents([]);
-    setLoading(true);
-    setError(null);
-
-    (async () => {
-      let fetched = 0;
-      try {
-        let cursor: string | undefined;
-        do {
-          const result = await api.listAgents(
-            LIMITS.MAX_LIMIT,
-            undefined,
-            cursor,
-          );
-          if (cancelled) return;
-          fetched += result.agents.length;
-          setAgents((prev) => [...prev, ...result.agents]);
-          setLoading(false);
-          cursor = result.next_cursor;
-        } while (cursor);
-      } catch {
-        if (!cancelled) {
-          // Only surface the error if nothing loaded; otherwise keep partial data.
-          if (fetched === 0) {
-            setError('Could not reach the OutLayer backend.');
-          }
-          setLoading(false);
-        }
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  return { agents, loading, error };
-}
-
 export default function AgentsPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const activeTag = searchParams.get('tag') || '';
-  const { agents, loading, error } = useAllAgents();
   const [searchInput, setSearchInput] = useState('');
   const SEARCH_DEBOUNCE_MS = 250;
   const debouncedSearch = useDebounce(searchInput, SEARCH_DEBOUNCE_MS);
   const [sortBy, setSortBy] = useState<SortKey>('followers');
   const [view, setView] = useState<'table' | 'cards' | 'graph'>('cards');
-  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
-  const filterKey = `${debouncedSearch}\0${activeTag}`;
-  const prevFilterKey = useRef(filterKey);
-  if (prevFilterKey.current !== filterKey) {
-    prevFilterKey.current = filterKey;
-    setVisibleCount(PAGE_SIZE);
+
+  // Accumulated pages of agents loaded so far.
+  const [pages, setPages] = useState<Agent[][]>([]);
+  const [nextCursor, setNextCursor] = useState<string | undefined>(undefined);
+  const [loadingMore, setLoadingMore] = useState(false);
+
+  // Track which SWR key we've seeded pages from, so we reset on sort/tag change.
+  // Two seed paths exist because SWR may serve from cache (sync, before onSuccess)
+  // or fetch fresh (async, triggers onSuccess). The ref prevents double-seeding.
+  const prevKey = useRef('');
+
+  // Primary fetch: first page, keyed on sort + tag.
+  const swrKey = `agents:${sortBy}:${activeTag}`;
+  const { data, error, isLoading } = useSWR(
+    swrKey,
+    async () => {
+      const result = await api.listAgents(
+        PAGE_SIZE,
+        sortBy,
+        undefined,
+        activeTag || undefined,
+      );
+      return result;
+    },
+    {
+      onSuccess(result) {
+        // Fresh fetch completed — seed pages (async path).
+        if (prevKey.current !== swrKey) {
+          prevKey.current = swrKey;
+          setPages([result.agents]);
+          setNextCursor(result.next_cursor);
+        }
+      },
+      revalidateOnFocus: false,
+    },
+  );
+
+  // SWR cache hit — seed pages immediately (sync path).
+  // No pages.length guard: handles both sort changes (explicit reset) and
+  // tag changes (URL param, no explicit reset) by detecting key drift.
+  if (data && prevKey.current !== swrKey) {
+    prevKey.current = swrKey;
+    setPages([data.agents]);
+    setNextCursor(data.next_cursor);
   }
+
+  const loadMore = useCallback(async () => {
+    if (!nextCursor || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const result = await api.listAgents(
+        PAGE_SIZE,
+        sortBy,
+        nextCursor,
+        activeTag || undefined,
+      );
+      setPages((prev) => [...prev, result.agents]);
+      setNextCursor(result.next_cursor);
+    } catch {
+      // Silently fail — user can try again.
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [nextCursor, loadingMore, sortBy, activeTag]);
+
+  // Flatten pages into a single list.
+  const agents = useMemo(() => pages.flat(), [pages]);
+
+  // Client-side search within loaded results.
+  const filtered = useMemo(() => {
+    if (!debouncedSearch) return agents;
+    const q = debouncedSearch.toLowerCase();
+    return agents.filter(
+      (a) =>
+        a.handle.toLowerCase().includes(q) ||
+        (a.description || '').toLowerCase().includes(q),
+    );
+  }, [agents, debouncedSearch]);
 
   const { data: popularTags = [] } = useSWR('tags', async () => {
     const result = await api.listTags();
@@ -89,19 +112,7 @@ export default function AgentsPage() {
       .map((t) => [t.tag, t.count] as [string, number]);
   });
 
-  const filtered = useFilteredAgents(
-    agents,
-    debouncedSearch,
-    activeTag,
-    sortBy,
-  );
-
-  const totalFollowers = useMemo(
-    () => agents.reduce((sum, a) => sum + (a.follower_count ?? 0), 0),
-    [agents],
-  );
-
-  const visible = filtered.slice(0, visibleCount);
+  const loading = isLoading;
   const hasResults = !loading && !error && filtered.length > 0;
 
   return (
@@ -123,6 +134,7 @@ export default function AgentsPage() {
               <div>
                 <span className="font-semibold text-foreground">
                   {agents.length}
+                  {nextCursor ? '+' : ''}
                 </span>
                 <span className="text-muted-foreground ml-1">agents</span>
               </div>
@@ -134,7 +146,9 @@ export default function AgentsPage() {
               </div>
               <div>
                 <span className="font-semibold text-foreground">
-                  {formatScore(totalFollowers)}
+                  {formatScore(
+                    agents.reduce((sum, a) => sum + (a.follower_count ?? 0), 0),
+                  )}
                 </span>
                 <span className="text-muted-foreground ml-1">connections</span>
               </div>
@@ -155,7 +169,7 @@ export default function AgentsPage() {
           <input
             id="agent-search"
             type="text"
-            placeholder="Search agents..."
+            placeholder="Search loaded agents..."
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
             className="w-full pl-11 pr-4 py-3 rounded-xl border border-border bg-card text-foreground text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/30"
@@ -166,7 +180,11 @@ export default function AgentsPage() {
             <ArrowUpDown className="h-3.5 w-3.5 text-muted-foreground" />
             <select
               value={sortBy}
-              onChange={(e) => setSortBy(e.target.value as SortKey)}
+              onChange={(e) => {
+                setSortBy(e.target.value as SortKey);
+                setPages([]);
+                setNextCursor(undefined);
+              }}
               aria-label="Sort agents by"
               className="bg-transparent text-sm text-foreground focus:outline-none"
             >
@@ -256,9 +274,11 @@ export default function AgentsPage() {
 
       {error && (
         <div className="text-center py-20">
-          <p className="text-muted-foreground mb-2">{error}</p>
+          <p className="text-muted-foreground mb-2">
+            Could not reach the backend.
+          </p>
           <p className="text-xs text-muted-foreground">
-            Check your OutLayer configuration and API key.
+            Check your configuration and API key.
           </p>
         </div>
       )}
@@ -277,7 +297,7 @@ export default function AgentsPage() {
 
       {hasResults && view === 'cards' && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {visible.map((agent) => (
+          {filtered.map((agent) => (
             <AgentCard key={agent.handle} agent={agent} />
           ))}
         </div>
@@ -285,7 +305,7 @@ export default function AgentsPage() {
 
       {hasResults && view === 'table' && (
         <AgentsTable
-          agents={visible}
+          agents={filtered}
           onRowClick={(handle) => router.push(`/agents/${handle}`)}
         />
       )}
@@ -299,14 +319,16 @@ export default function AgentsPage() {
       {!loading &&
         !error &&
         view !== 'graph' &&
-        visibleCount < filtered.length && (
+        nextCursor &&
+        !debouncedSearch && (
           <div className="flex justify-center mt-8">
             <button
               type="button"
-              onClick={() => setVisibleCount((c) => c + PAGE_SIZE)}
-              className="px-6 py-2.5 rounded-xl border border-border bg-card text-sm text-foreground hover:bg-muted transition-colors"
+              onClick={loadMore}
+              disabled={loadingMore}
+              className="px-6 py-2.5 rounded-xl border border-border bg-card text-sm text-foreground hover:bg-muted transition-colors disabled:opacity-50"
             >
-              Show more ({filtered.length - visibleCount} remaining)
+              {loadingMore ? 'Loading...' : 'Show more'}
             </button>
           </div>
         )}

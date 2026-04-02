@@ -158,67 +158,6 @@ fn contract_heartbeat_response_shape() {
 }
 
 // ---------------------------------------------------------------------------
-// get_profile: is_following absent when unauthenticated
-// ---------------------------------------------------------------------------
-#[test]
-#[serial]
-fn contract_get_profile_is_following_absent_unauthenticated() {
-    setup_integration("cpf.near");
-    quick_register("cpf.near", "cpf_target");
-
-    // Clear signer to simulate unauthenticated access
-    unsafe { std::env::remove_var("NEAR_SENDER_ID") };
-
-    let req = RequestBuilder::new(Action::GetProfile)
-        .handle("cpf_target")
-        .build();
-    let resp = handle_get_profile(&req);
-    assert!(resp.success, "get_profile failed: {:?}", resp.error);
-
-    let data = parse_response(&resp);
-    assert!(data["agent"].is_object(), "must have agent");
-    assert!(
-        data.get("is_following").is_none() || data["is_following"].is_null(),
-        "is_following must be absent for unauthenticated calls, got: {}",
-        data["is_following"]
-    );
-}
-
-// ---------------------------------------------------------------------------
-// get_profile: includes my_endorsements when caller has endorsed target
-// ---------------------------------------------------------------------------
-#[test]
-#[serial]
-fn contract_get_profile_includes_my_endorsements() {
-    setup_integration("cpe.near");
-    register_endorsable_agent("cpe.near", "cpe_endorser", &["ai"], &["review"]);
-    register_endorsable_agent("cpe_t.near", "cpe_target", &["ai", "ml"], &["audit"]);
-
-    // Endorser endorses target
-    set_signer("cpe.near");
-    let ereq = RequestBuilder::new(Action::Endorse)
-        .handle("cpe_target")
-        .tags(&["ai"])
-        .build();
-    let eresp = handle_endorse(&ereq);
-    assert!(eresp.success, "endorse failed: {:?}", eresp.error);
-
-    // Now get_profile as the endorser
-    let req = RequestBuilder::new(Action::GetProfile)
-        .handle("cpe_target")
-        .build();
-    let resp = handle_get_profile(&req);
-    assert!(resp.success, "get_profile failed: {:?}", resp.error);
-
-    let data = parse_response(&resp);
-    assert!(
-        data["my_endorsements"].is_object(),
-        "must include my_endorsements when caller has endorsed target, got: {}",
-        data["my_endorsements"]
-    );
-}
-
-// ---------------------------------------------------------------------------
 // get_suggested: vrf key must be present (even if null in test env)
 // ---------------------------------------------------------------------------
 #[test]
@@ -238,61 +177,6 @@ fn contract_get_suggested_includes_vrf_key() {
         data.get("vrf").is_some(),
         "response must include vrf key (may be null), keys present: {:?}",
         data.as_object().map(|m| m.keys().collect::<Vec<_>>())
-    );
-}
-
-// ---------------------------------------------------------------------------
-// get_followers: returns Edge objects with direction, follow_reason, followed_at
-// ---------------------------------------------------------------------------
-#[test]
-#[serial]
-fn contract_get_followers_returns_edges() {
-    setup_integration("cgfr.near");
-    quick_register("cgfr.near", "cgfr_target");
-    quick_register("cgfr_f.near", "cgfr_follower");
-
-    set_signer("cgfr_f.near");
-    let freq = RequestBuilder::new(Action::Follow)
-        .handle("cgfr_target")
-        .reason("shared interests")
-        .build();
-    handle_follow(&freq);
-
-    set_signer("cgfr.near");
-    let req = RequestBuilder::new(Action::GetFollowers)
-        .handle("cgfr_target")
-        .build();
-    let resp = handle_get_followers(&req);
-    assert!(resp.success, "get_followers failed: {:?}", resp.error);
-
-    let data = resp.data.as_ref().expect("must have data");
-    let edges = data.as_array().expect("data must be array of edges");
-    assert!(!edges.is_empty(), "should have at least one edge");
-
-    let edge = &edges[0];
-    // Standard agent fields
-    assert!(edge["handle"].is_string(), "edge must have handle");
-    assert!(
-        edge["follower_count"].is_number(),
-        "edge must have follower_count"
-    );
-
-    // Edge-specific fields
-    assert!(
-        edge["direction"].is_string(),
-        "edge must have direction, got: {}",
-        edge["direction"]
-    );
-    assert_eq!(edge["direction"], "incoming");
-
-    // follow_reason and followed_at must be present (may be null)
-    assert!(
-        edge.get("follow_reason").is_some(),
-        "edge must have follow_reason key"
-    );
-    assert!(
-        edge.get("followed_at").is_some(),
-        "edge must have followed_at key"
     );
 }
 
@@ -620,64 +504,5 @@ fn contract_unendorse_response_shape() {
         for w in warnings.as_array().unwrap() {
             assert!(w.is_string(), "each warning must be string");
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// check_handle: handle, available
-// ---------------------------------------------------------------------------
-#[test]
-#[serial]
-fn contract_check_handle_response_shape() {
-    setup_integration("cch.near");
-    quick_register("cch.near", "cch_taken");
-
-    // Check a taken handle
-    let req = RequestBuilder::new(Action::CheckHandle)
-        .handle("cch_taken")
-        .build();
-    let resp = handle_check_handle(&req);
-    assert!(resp.success, "check_handle failed: {:?}", resp.error);
-
-    let data = parse_response(&resp);
-    assert_eq!(data["handle"], "cch_taken", "handle must match");
-    assert_eq!(
-        data["available"], false,
-        "taken handle must not be available"
-    );
-    assert_eq!(data["reason"], "taken", "taken handle must have reason");
-
-    // Check an available handle
-    let req2 = RequestBuilder::new(Action::CheckHandle)
-        .handle("cch_free")
-        .build();
-    let resp2 = handle_check_handle(&req2);
-    assert!(resp2.success, "check_handle failed: {:?}", resp2.error);
-
-    let data2 = parse_response(&resp2);
-    assert_eq!(data2["handle"], "cch_free");
-    assert_eq!(data2["available"], true, "free handle must be available");
-}
-
-// ---------------------------------------------------------------------------
-// list_tags: { tags: [{ tag, count }] }
-// ---------------------------------------------------------------------------
-#[test]
-#[serial]
-fn contract_list_tags_response_shape() {
-    setup_integration("clt.near");
-    register_endorsable_agent("clt.near", "clt_agent", &["ai", "defi"], &[]);
-
-    let req = test_request(Action::ListTags);
-    let resp = handle_list_tags(&req);
-    assert!(resp.success, "list_tags failed: {:?}", resp.error);
-
-    let data = parse_response(&resp);
-    let tags = data["tags"].as_array().expect("tags must be array");
-    assert!(!tags.is_empty(), "should have at least one tag");
-
-    for tag in tags {
-        assert!(tag["tag"].is_string(), "tag.tag must be string");
-        assert!(tag["count"].is_number(), "tag.count must be number");
     }
 }

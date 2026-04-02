@@ -1,13 +1,12 @@
 import { type NextRequest, NextResponse } from 'next/server';
 import {
-  clearByAction,
-  clearCache,
-  currentGeneration,
   getCached,
+  invalidateForMutation,
   makeCacheKey,
   setCache,
 } from '@/lib/cache';
 import { LIMITS } from '@/lib/constants';
+import { dispatchFastData } from '@/lib/fastdata-dispatch';
 import {
   callOutlayer,
   getOutlayerPaymentKey,
@@ -21,6 +20,7 @@ import {
 } from '@/lib/platforms';
 import {
   CACHE_BUSTING_ACTIONS,
+  FASTDATA_ONLY_ACTIONS,
   PUBLIC_ACTIONS,
   type ResolvedRoute,
   resolveRoute,
@@ -32,85 +32,6 @@ const VALID_SORTS = new Set(['followers', 'endorsements', 'newest', 'active']);
 const VALID_DIRECTIONS = new Set(['incoming', 'outgoing', 'both']);
 const CURSOR_RE = /^[a-z0-9_]{1,32}$|^\d{1,20}$/;
 const MAX_BODY_BYTES = LIMITS.MAX_BODY_BYTES;
-
-const RATE_WINDOW_MS = 60_000;
-const RATE_LIMIT_PER_IP = 120;
-const REGISTER_RATE_LIMIT_PER_IP = 5;
-const REGISTER_PLATFORMS_RATE_LIMIT_PER_IP = 5;
-const MAX_IP_ENTRIES = 10_000;
-// Per-IP rate tracking.  Action-specific counters (registerCount, etc.) are
-// inlined for the current small set.  If more per-action limits are added,
-// generalize to a Map<string, number> keyed by action name.
-const ipCounts = new Map<
-  string,
-  {
-    count: number;
-    registerCount: number;
-    registerPlatformsCount: number;
-    resetAt: number;
-  }
->();
-
-function checkProxyRateLimit(ip: string, action?: string): boolean {
-  const now = Date.now();
-  const entry = ipCounts.get(ip);
-  if (!entry || now >= entry.resetAt) {
-    ipCounts.set(ip, {
-      count: 1,
-      registerCount: action === 'register' ? 1 : 0,
-      registerPlatformsCount: action === 'register_platforms' ? 1 : 0,
-      resetAt: now + RATE_WINDOW_MS,
-    });
-    evictStaleEntries(now);
-    return true;
-  }
-  entry.count += 1;
-  if (action === 'register') {
-    entry.registerCount += 1;
-    if (entry.registerCount > REGISTER_RATE_LIMIT_PER_IP) return false;
-  }
-  if (action === 'register_platforms') {
-    entry.registerPlatformsCount += 1;
-    if (entry.registerPlatformsCount > REGISTER_PLATFORMS_RATE_LIMIT_PER_IP)
-      return false;
-  }
-  return entry.count <= RATE_LIMIT_PER_IP;
-}
-
-function evictStaleEntries(now: number): void {
-  if (ipCounts.size <= MAX_IP_ENTRIES) return;
-  for (const [k, v] of ipCounts) {
-    if (now >= v.resetAt) ipCounts.delete(k);
-  }
-  // Hard cap: if still over limit after expiry sweep, drop oldest entries
-  if (ipCounts.size > MAX_IP_ENTRIES) {
-    const excess = ipCounts.size - MAX_IP_ENTRIES;
-    let dropped = 0;
-    for (const k of ipCounts.keys()) {
-      if (dropped >= excess) break;
-      ipCounts.delete(k);
-      dropped++;
-    }
-  }
-}
-
-function clientIp(request: NextRequest): string {
-  // Prefer the rightmost x-forwarded-for entry (set by our edge proxy) over
-  // the leftmost (client-supplied and trivially spoofable).  Fall back to the
-  // leftmost entry when only one hop is present (direct proxy → origin).
-  const xff = request.headers.get('x-forwarded-for');
-  if (xff) {
-    const parts = xff
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
-    return parts.length > 1 ? parts[parts.length - 1] : (parts[0] ?? 'unknown');
-  }
-  // x-real-ip is set by many reverse proxies (nginx, Vercel, Cloudflare).
-  const realIp = request.headers.get('x-real-ip');
-  if (realIp) return realIp.trim();
-  return 'unknown';
-}
 
 const CORS_HEADERS: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
@@ -252,7 +173,7 @@ async function dispatch(
 }
 
 async function dispatchPublic(
-  request: NextRequest,
+  _request: NextRequest,
   route: ResolvedRoute,
   wasmBody: Record<string, unknown>,
 ): Promise<NextResponse> {
@@ -263,42 +184,51 @@ async function dispatchPublic(
     });
   }
 
-  const paymentKey = getOutlayerPaymentKey();
-  if (!paymentKey) {
-    return NextResponse.json(
-      {
-        success: false,
-        error: 'Public API not configured',
-        code: 'INTERNAL_ERROR',
-      },
-      { status: 503 },
-    );
-  }
   const sanitized = sanitizePublic(wasmBody);
   const cacheKey = makeCacheKey(sanitized);
   const cached = getCached(cacheKey);
   if (cached) {
     return NextResponse.json(cached);
   }
-  if (!checkProxyRateLimit(clientIp(request), route.action)) {
+  const result = await dispatchFastData(route.action, sanitized);
+  if ('error' in result) {
+    const status = result.status ?? 502;
+    if (status >= 500 && !FASTDATA_ONLY_ACTIONS.has(route.action)) {
+      console.warn(
+        `[fastdata] ${route.action}: ${result.error} — falling back to WASM`,
+      );
+      const serverKey = getOutlayerPaymentKey();
+      if (serverKey) {
+        try {
+          const fallback = await callOutlayer(sanitized, serverKey);
+          if (fallback.ok) return fallback; // no cache — fallback responses get no TTL
+        } catch (err) {
+          console.error(
+            `[fastdata-fallback] WASM also failed for ${route.action}:`,
+            err,
+          );
+        }
+      }
+    }
+    const code =
+      status >= 500
+        ? FASTDATA_ONLY_ACTIONS.has(route.action)
+          ? 'FASTDATA_UNAVAILABLE'
+          : 'FASTDATA_ERROR'
+        : 'NOT_FOUND';
     return NextResponse.json(
+      { success: false, error: result.error, code },
       {
-        success: false,
-        error: 'Rate limit exceeded',
-        code: 'RATE_LIMITED',
-        retry_after: 60,
+        status:
+          FASTDATA_ONLY_ACTIONS.has(route.action) && status >= 500
+            ? 503
+            : status,
       },
-      { status: 429 },
     );
   }
-  const gen = currentGeneration();
-  const result = await callOutlayer(sanitized, paymentKey);
-  if (result.status === 200) {
-    const data = await result.json();
-    setCache(route.action, cacheKey, data, gen);
-    return NextResponse.json(data);
-  }
-  return result;
+  const data = { success: true, data: result.data };
+  setCache(route.action, cacheKey, data);
+  return NextResponse.json(data);
 }
 
 async function dispatchAuthenticated(
@@ -361,18 +291,6 @@ async function dispatchAuthenticated(
     authKey = serverKey;
   }
 
-  if (!checkProxyRateLimit(clientIp(request), route.action)) {
-    return NextResponse.json(
-      {
-        success: false,
-        error: 'Rate limit exceeded',
-        code: 'RATE_LIMITED',
-        retry_after: 60,
-      },
-      { status: 429 },
-    );
-  }
-
   if (authKey) {
     // Platform registration is handled entirely by the proxy and requires
     // multiple WASM calls (get_me → external APIs → set_platforms).  A
@@ -396,20 +314,18 @@ async function dispatchAuthenticated(
     const result = await callOutlayer(wasmBody, authKey);
 
     if (CACHE_BUSTING_ACTIONS.has(route.action) && result.status === 200) {
-      clearCache();
-    } else if (route.action === 'heartbeat' && result.status === 200) {
-      clearByAction('list_agents');
+      invalidateForMutation(route.action);
     }
 
     if (route.action === 'register' && result.status === 200) {
       // Fire platform registrations in the background — don't block the
       // registration response.  Agents can call POST /agents/me/platforms
       // later to retrieve platform credentials.
-      void tryPlatformRegistrationsOnRegister(
+      tryPlatformRegistrationsOnRegister(
         wasmBody,
         new NextResponse(result.clone().body, result),
         userAuthKey,
-      );
+      ).catch((err) => console.error('[platforms] auto-register failed:', err));
     }
 
     return result;
@@ -431,17 +347,10 @@ function OPTIONS() {
   return new NextResponse(null, { status: 204, headers: CORS_HEADERS });
 }
 
-/** @internal — test-only helper to reset the in-memory rate-limit state */
-function resetRateLimiter(): void {
-  ipCounts.clear();
-}
-
 export {
   dispatch as GET,
   dispatch as POST,
   dispatch as PATCH,
   dispatch as DELETE,
   OPTIONS,
-  RATE_LIMIT_PER_IP,
-  resetRateLimiter,
 };

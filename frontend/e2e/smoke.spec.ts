@@ -92,8 +92,9 @@ test('list_agents', async ({ request }) => {
   const res = await request.get('agents?limit=100');
   expect(res.ok()).toBe(true);
   const json = await res.json();
-  expect(json.data.length).toBeGreaterThanOrEqual(2);
-  const handles = json.data.map((a: { handle: string }) => a.handle);
+  expect(Array.isArray(json.data.agents)).toBe(true);
+  expect(json.data.agents.length).toBeGreaterThanOrEqual(2);
+  const handles = json.data.agents.map((a: { handle: string }) => a.handle);
   expect(handles).toContain(handleA);
   expect(handles).toContain(handleB);
 });
@@ -158,7 +159,8 @@ test('get_followers(B) — includes A', async ({ request }) => {
   const res = await request.get(`/agents/${handleB}/followers`);
   expect(res.ok()).toBe(true);
   const json = await res.json();
-  const handles = json.data.map((f: { handle: string }) => f.handle);
+  expect(Array.isArray(json.data.followers)).toBe(true);
+  const handles = json.data.followers.map((f: { handle: string }) => f.handle);
   expect(handles).toContain(handleA);
 });
 
@@ -168,7 +170,8 @@ test('get_following(A) — includes B', async ({ request }) => {
   const res = await request.get(`/agents/${handleA}/following`);
   expect(res.ok()).toBe(true);
   const json = await res.json();
-  const handles = json.data.map((f: { handle: string }) => f.handle);
+  expect(Array.isArray(json.data.following)).toBe(true);
+  const handles = json.data.following.map((f: { handle: string }) => f.handle);
   expect(handles).toContain(handleB);
 });
 
@@ -178,8 +181,8 @@ test('get_edges(B) — direction=both', async ({ request }) => {
   const res = await request.get(`/agents/${handleB}/edges?direction=both`);
   expect(res.ok()).toBe(true);
   const json = await res.json();
+  expect(Array.isArray(json.data.edges)).toBe(true);
   expect(json.data.edges.length).toBeGreaterThanOrEqual(1);
-  expect(typeof json.data.edge_count).toBe('number');
 });
 
 // ── 14. Endorse ────────────────────────────────────────────────────
@@ -219,6 +222,41 @@ test('heartbeat(B) — sees delta', async ({ request }) => {
   expect(typeof json.data.delta).toBe('object');
   expect(typeof json.data.delta.since).toBe('number');
   expect(json.data.agent.handle).toBe(handleB);
+});
+
+// ── 16b. FastData KV round-trip — validates NONE wait-until ───────
+// Heartbeat syncs sorted/active/{handle} with last_active timestamp.
+// Read it back from FastData KV REST to confirm the sync landed.
+
+const FASTDATA_KV_URL =
+  process.env.FASTDATA_KV_URL || 'https://kv.main.fastnear.com';
+const FASTDATA_NS = process.env.FASTDATA_NAMESPACE || 'nearly.hack.near';
+const FASTDATA_SIGNER = process.env.FASTDATA_SIGNER || 'hack.near';
+
+test('fastdata round-trip — sync lands via NONE', async ({ request }) => {
+  // Wait for the NEAR transaction from heartbeat to be indexed.
+  const maxWait = 15_000;
+  const interval = 2_000;
+  const key = `sorted/active/${handleB}`;
+  const url = `${FASTDATA_KV_URL}/v0/latest/${FASTDATA_NS}/${FASTDATA_SIGNER}/${key}`;
+
+  let landed = false;
+  for (let elapsed = 0; elapsed < maxWait; elapsed += interval) {
+    if (elapsed > 0) await new Promise((r) => setTimeout(r, interval));
+    const res = await request.get(url);
+    if (!res.ok()) continue;
+    const data = await res.json();
+    const entry = data.entries?.[0];
+    if (entry?.value?.ts) {
+      // Verify timestamp is recent (within last 120 seconds)
+      const now = Math.floor(Date.now() / 1000);
+      const delta = now - Number(entry.value.ts);
+      expect(delta).toBeLessThan(120);
+      landed = true;
+      break;
+    }
+  }
+  expect(landed).toBe(true);
 });
 
 // ── 17. Notifications ──────────────────────────────────────────────
@@ -269,7 +307,7 @@ test('get_network(A)', async ({ request }) => {
   expect(json.data.following_count).toBeGreaterThanOrEqual(1);
   expect(typeof json.data.mutual_count).toBe('number');
   expect(typeof json.data.last_active).toBe('number');
-  expect(typeof json.data.member_since).toBe('number');
+  expect(typeof json.data.created_at).toBe('number');
 });
 
 // ── 21. Unendorse (cleanup) ────────────────────────────────────────

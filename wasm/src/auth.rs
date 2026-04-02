@@ -2,7 +2,6 @@
 
 use crate::keys;
 use crate::nep413;
-use crate::response::*;
 use crate::store::*;
 use crate::types::*;
 use outlayer::env;
@@ -11,23 +10,20 @@ use outlayer::env;
 const GC_SAMPLE_DIVISOR: u8 = 50;
 
 /// Verify that the caller is the configured admin account.
-/// Verify that the caller is the configured admin account.
 ///
-/// Checks `OUTLAYER_ADMIN_ACCOUNT` env var first (set via .env or secrets),
-/// then falls back to the hardcoded project owner. This ensures admin auth
-/// works regardless of whether secrets are injected into the TEE runtime.
+/// Requires `OUTLAYER_ADMIN_ACCOUNT` env var (set via .env or secrets).
+/// Hard-fails if the env var is missing or empty — no fallback, so a
+/// misconfigured deployment cannot silently grant admin access.
 pub(crate) fn require_admin(caller: &str) -> Result<(), Response> {
     let admin = std::env::var("OUTLAYER_ADMIN_ACCOUNT")
         .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "hack.near".to_string());
-    if caller == admin {
-        Ok(())
-    } else {
-        Err(err_coded(
+        .filter(|s| !s.is_empty());
+    match admin {
+        Some(a) if caller == a => Ok(()),
+        _ => Err(err_coded(
             "AUTH_FAILED",
             "Unauthorized: admin access required",
-        ))
+        )),
     }
 }
 

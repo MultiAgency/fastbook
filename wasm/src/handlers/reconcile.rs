@@ -1,20 +1,17 @@
-//! Admin handler for reconciling follower/following counts and sorted indices.
+//! Admin handler for reconciling follower/following counts and endorsement indices.
 
 use crate::agent::*;
-use crate::registry::{load_registry, write_sorted_indices};
-use crate::require_caller;
-use crate::response::*;
+use crate::registry::load_registry;
 use crate::store::*;
 use crate::types::*;
 use std::collections::{HashMap, HashSet};
 
 use super::endorse::collect_endorsable;
 
-/// Validate an endorser index against actual records, prune orphans, repair reverse indices.
+/// Validate endorser keys against actual records, prune orphans, repair reverse indices.
 /// Returns `(valid_endorsers, orphans_pruned)`.
 fn reconcile_endorser_index(handle: &str, ns: &str, val: &str) -> (Vec<String>, u64) {
-    let endorser_idx_key = keys::endorsers(handle, ns, val);
-    let endorsers = index_list(&endorser_idx_key);
+    let endorsers = handles_from_prefix(&keys::pub_endorser_prefix(handle, ns, val));
     let mut valid = Vec::new();
     let mut pruned = 0u64;
 
@@ -22,27 +19,38 @@ fn reconcile_endorser_index(handle: &str, ns: &str, val: &str) -> (Vec<String>, 
         if has(&keys::endorsement(handle, ns, val, endorser)) {
             valid.push(endorser.clone());
             // Repair reverse index if missing
-            let by_key = keys::endorsement_by(endorser, handle);
-            let entry = format!("{ns}:{val}");
-            if !index_list(&by_key).iter().any(|e| e == &entry) {
-                let _ = index_append(&by_key, &entry);
+            let by_key = keys::pub_endorsement_by(endorser, handle, ns, val);
+            if !user_has(&by_key) {
+                let _ = user_set(&by_key, b"1");
             }
         } else {
-            let _ = index_remove(
-                &keys::endorsement_by(endorser, handle),
-                &format!("{ns}:{val}"),
-            );
+            // Remove orphaned endorser key
+            user_delete_key(&keys::pub_endorser(handle, ns, val, endorser));
+            // Remove reverse index key
+            user_delete_key(&keys::pub_endorsement_by(endorser, handle, ns, val));
             pruned += 1;
         }
     }
 
-    if valid.len() != endorsers.len() {
-        if let Ok(bytes) = serde_json::to_vec(&valid) {
-            let _ = set_public(&endorser_idx_key, &bytes);
+    (valid, pruned)
+}
+
+/// Prune individual user-scope keys under `prefix` whose handle suffix is not in `live`.
+/// Deletes dead keys. Returns `(pruned_count, clean_handles)`.
+fn prune_prefix_keys(prefix: &str, live: &HashSet<&str>) -> (u64, Vec<String>) {
+    let all = handles_from_prefix(prefix);
+    let mut clean = Vec::new();
+    let mut pruned = 0u64;
+    for handle in all {
+        if live.contains(handle.as_str()) {
+            clean.push(handle);
+        } else {
+            // Delete the individual key: prefix + handle
+            user_delete_key(&format!("{prefix}{handle}"));
+            pruned += 1;
         }
     }
-
-    (valid, pruned)
+    (pruned, clean)
 }
 
 /// Clean endorsement records left behind when tags or capabilities were removed.
@@ -63,24 +71,26 @@ fn clean_orphaned_endorsements(handles: &[String], agents: &[AgentRecord]) -> u6
         .collect();
 
     let mut cleaned: u64 = 0;
-    // Read old endorsed_targets BEFORE the caller rebuilds them.
+    // Scan endorsed_target keys BEFORE the caller rebuilds them.
     for handle in handles {
-        let old_targets = index_list(&keys::endorsed_targets(handle));
+        let old_targets = handles_from_prefix(&keys::pub_endorsed_target_prefix(handle));
         for target in &old_targets {
-            let by_key = keys::endorsement_by(handle, target);
-            let entries = index_list(&by_key);
-            if entries.is_empty() {
+            // Scan all endorsement_by keys for this (handle → target) pair.
+            let by_keys = user_list(&keys::pub_endorsement_by_prefix(handle, target));
+            if by_keys.is_empty() {
                 continue;
             }
             let target_endorsable = endorsable_by_handle.get(target.as_str());
-            for entry in &entries {
-                if let Some((ns, val)) = entry.split_once(':') {
+            let prefix = keys::pub_endorsement_by_prefix(handle, target);
+            for by_key in &by_keys {
+                let after_prefix = by_key.strip_prefix(&prefix).unwrap_or("");
+                if let Some((ns, val)) = after_prefix.split_once(':') {
                     let is_current = target_endorsable
                         .is_some_and(|e| e.contains(&(ns.to_string(), val.to_string())));
                     if !is_current {
                         let _ = delete(&keys::endorsement(target, ns, val, handle));
-                        let _ = index_remove(&keys::endorsers(target, ns, val), handle);
-                        let _ = index_remove(&by_key, entry);
+                        user_delete_key(&keys::pub_endorser(target, ns, val, handle));
+                        user_delete_key(by_key);
                         cleaned += 1;
                     }
                 }
@@ -140,36 +150,17 @@ pub fn handle_reconcile_all(req: &Request) -> Response {
         };
         agents_checked += 1;
 
-        // Prune follower/following indices: remove handles whose agent no longer exists.
+        // Prune follower/following keys: remove keys whose handle suffix no longer exists.
         // This heals partial deregistrations where Phase 2 (edge cleanup) did not complete.
-        let followers = index_list(&keys::pub_followers(&agent.handle));
-        let clean_followers: Vec<String> = followers
-            .iter()
-            .filter(|h| live.contains(h.as_str()))
-            .cloned()
-            .collect();
-        if clean_followers.len() != followers.len() {
-            edges_pruned += (followers.len() - clean_followers.len()) as u64;
-            if let Ok(bytes) = serde_json::to_vec(&clean_followers) {
-                let _ = set_public(&keys::pub_followers(&agent.handle), &bytes);
-            }
-        }
+        let (pruned, clean_followers) =
+            prune_prefix_keys(&keys::pub_follower_prefix(&agent.handle), &live);
+        edges_pruned += pruned;
 
-        let following = index_list(&keys::pub_following(&agent.handle));
-        let clean_following: Vec<String> = following
-            .iter()
-            .filter(|h| live.contains(h.as_str()))
-            .cloned()
-            .collect();
-        if clean_following.len() != following.len() {
-            edges_pruned += (following.len() - clean_following.len()) as u64;
-            if let Ok(bytes) = serde_json::to_vec(&clean_following) {
-                let _ = set_public(&keys::pub_following(&agent.handle), &bytes);
-            }
-        }
+        let (pruned, clean_following) =
+            prune_prefix_keys(&keys::pub_following_prefix(&agent.handle), &live);
+        edges_pruned += pruned;
 
-        // Note: we recount from the already-pruned indices rather than calling
-        // `recount_social` because reconcile prunes dead handles first.
+        // Recount from the already-pruned key lists.
         let actual_followers = clean_followers.len() as i64;
         let actual_following = clean_following.len() as i64;
 
@@ -188,6 +179,27 @@ pub fn handle_reconcile_all(req: &Request) -> Response {
             let _ = set_public(&keys::pub_agent(&agent.handle), &bytes);
             counts_corrected += 1;
         }
+
+        // Derive mutual count: followers who this agent also follows.
+        let follower_set: HashSet<&str> = clean_followers.iter().map(String::as_str).collect();
+        let actual_mutual = clean_following
+            .iter()
+            .filter(|h| follower_set.contains(h.as_str()))
+            .count() as i64;
+
+        // Sync atomic counters to match derived counts.
+        let _ = user_set(
+            &keys::follower_count(&agent.handle),
+            actual_followers.to_string().as_bytes(),
+        );
+        let _ = user_set(
+            &keys::following_count(&agent.handle),
+            actual_following.to_string().as_bytes(),
+        );
+        let _ = user_set(
+            &keys::mutual_count(&agent.handle),
+            actual_mutual.to_string().as_bytes(),
+        );
 
         // Rebuild near account mapping
         let _ = set_public(
@@ -242,30 +254,24 @@ pub fn handle_reconcile_all(req: &Request) -> Response {
     // --- Phase 1c: clean orphaned endorsements for removed tags/capabilities ---
     let orphaned_endorsements_cleaned = clean_orphaned_endorsements(&handles, &agents);
 
-    // Rebuild endorsed_targets indices from the data collected above.
+    // Rebuild endorsed_target keys from the data collected above.
     for handle in &handles {
-        let targets: Vec<String> = endorsed_targets_map
+        let targets: HashSet<String> = endorsed_targets_map
             .remove(handle.as_str())
-            .map(|s| s.into_iter().collect())
             .unwrap_or_default();
-        let key = keys::endorsed_targets(handle);
-        if targets.is_empty() {
-            let _ = delete(&key);
-        } else if let Ok(bytes) = serde_json::to_vec(&targets) {
-            let _ = set_public(&key, &bytes);
+        // Delete existing endorsed_target keys, then write current ones.
+        let existing = handles_from_prefix(&keys::pub_endorsed_target_prefix(handle));
+        for t in &existing {
+            if !targets.contains(t) {
+                user_delete_key(&keys::pub_endorsed_target(handle, t));
+            }
+        }
+        for t in &targets {
+            let _ = user_set(&keys::pub_endorsed_target(handle, t), b"1");
         }
     }
 
-    // --- Phase 2: rebuild all sorted indices from scratch ---
-    // Clear existing sorted indices
-    for sort in &["followers", "endorsements", "newest", "active"] {
-        let _ = set_public(&keys::pub_sorted(sort), b"[]");
-    }
-    for agent in &agents {
-        let _ = write_sorted_indices(agent);
-    }
-
-    // --- Phase 3: rebuild tag counts ---
+    // --- Phase 2: rebuild tag counts ---
     let mut tag_counts: HashMap<String, u32> = HashMap::new();
     for tag in &all_tags {
         *tag_counts.entry(tag.clone()).or_insert(0) += 1;
@@ -274,17 +280,62 @@ pub fn handle_reconcile_all(req: &Request) -> Response {
         let _ = set_public(keys::pub_tag_counts(), &bytes);
     }
 
-    // --- Phase 4: update meta ---
+    // --- Phase 3: update meta ---
     let _ = set_public(
         keys::pub_meta_count(),
         agents_checked.to_string().as_bytes(),
     );
 
-    // --- Phase 5: count nonces for monitoring ---
+    // --- Phase 4: count nonces for monitoring ---
     let nonce_count = index_list(keys::nonce_idx()).len() as u64;
 
-    // --- Phase 6: prune dangling notification index entries ---
+    // --- Phase 5: prune dangling notification index entries ---
     let notif_entries_pruned = prune_dangling_notifications(&handles);
+
+    // --- Phase 6: Full FastData KV sync ---
+    // Batches all public state into __fastdata_kv calls (max 256 keys each).
+    {
+        let mut sync = crate::fastdata::SyncBatch::new();
+        sync.global_counts(agents_checked, &tag_counts);
+
+        for agent in &agents {
+            sync.agent(agent);
+
+            for f in &handles_from_prefix(&keys::pub_follower_prefix(&agent.handle)) {
+                sync.push(
+                    crate::fastdata::follower_key(&agent.handle, f),
+                    serde_json::json!({ "ts": 0 }),
+                );
+            }
+            for f in &handles_from_prefix(&keys::pub_following_prefix(&agent.handle)) {
+                sync.push(
+                    crate::fastdata::following_key(&agent.handle, f),
+                    serde_json::json!({ "ts": 0 }),
+                );
+                let edge_val = get_string(&keys::pub_edge(&agent.handle, f))
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                    .unwrap_or(serde_json::json!({ "ts": 0 }));
+                sync.push(crate::fastdata::edge_key(&agent.handle, f), edge_val);
+            }
+
+            let endorsable = collect_endorsable(Some(&agent.tags), Some(&agent.capabilities));
+            for (ns, ev) in &endorsable {
+                let endorsers =
+                    handles_from_prefix(&keys::pub_endorser_prefix(&agent.handle, ns, ev));
+                let json_val = if endorsers.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::json!(endorsers)
+                };
+                sync.push(
+                    crate::fastdata::endorsers_key(&agent.handle, ns, ev),
+                    json_val,
+                );
+            }
+        }
+
+        sync.flush();
+    }
 
     ok_response(serde_json::json!({
         "agents_checked": agents_checked,
@@ -294,8 +345,8 @@ pub fn handle_reconcile_all(req: &Request) -> Response {
         "endorsement_indices_pruned": endorsement_indices_pruned,
         "orphaned_endorsements_cleaned": orphaned_endorsements_cleaned,
         "notif_entries_pruned": notif_entries_pruned,
-        "sorted_rebuilt": true,
         "near_mappings_rebuilt": near_mappings_rebuilt,
         "nonce_count": nonce_count,
+        "fastdata_synced": true,
     }))
 }

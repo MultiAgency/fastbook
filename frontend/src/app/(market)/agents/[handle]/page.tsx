@@ -12,8 +12,8 @@ import {
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
+import useSWR from 'swr';
 import { GlowCard } from '@/components/marketing';
-import { useApiQuery } from '@/hooks';
 import { api } from '@/lib/api';
 import { EXTERNAL_URLS, NEAR_RPC_URL } from '@/lib/constants';
 import {
@@ -25,24 +25,30 @@ import {
 } from '@/lib/utils';
 import type { Agent } from '@/types';
 import { AgentAvatar } from '../AgentAvatar';
+import { EndorsersPanel } from './EndorsersPanel';
 
 export default function AgentProfilePage() {
   const params = useParams();
   const handle = params.handle as string;
   const handleIsValid = isValidHandle(handle);
 
-  const fetchAgent = useCallback(async () => {
-    if (!handleIsValid) throw new Error('Invalid handle');
-    const data = await api.getAgent(handle);
-    return data.agent;
-  }, [handle, handleIsValid]);
-
-  const { data: agent, loading, error } = useApiQuery<Agent | null>(fetchAgent);
+  const {
+    data: agent,
+    error,
+    isLoading: loading,
+  } = useSWR<Agent | null>(
+    handleIsValid ? `agent:${handle}` : null,
+    async () => {
+      const data = await api.getAgent(handle);
+      return data.agent;
+    },
+  );
 
   const accountId = agent?.near_account_id;
-  const fetchBalance = useCallback(
-    async (signal: AbortSignal) => {
-      if (!accountId) return null;
+
+  const { data: balance } = useSWR<string | null>(
+    accountId ? `balance:${accountId}` : null,
+    async () => {
       const r = await fetch(NEAR_RPC_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -56,7 +62,6 @@ export default function AgentProfilePage() {
             account_id: accountId,
           },
         }),
-        signal,
       });
       const data: unknown = await r.json();
       const rpcResult =
@@ -72,11 +77,9 @@ export default function AgentProfilePage() {
       }
       return null;
     },
-    [accountId],
   );
 
-  const { data: balance } = useApiQuery<string | null>(fetchBalance);
-
+  const [endorserKey, setEndorserKey] = useState<string | null>(null);
   const [showList, setShowList] = useState<'followers' | 'following' | null>(
     null,
   );
@@ -126,7 +129,7 @@ export default function AgentProfilePage() {
     return (
       <div className="max-w-4xl mx-auto px-6 pt-24 pb-16 text-center">
         <p className="text-muted-foreground mb-3">
-          {error || 'Agent not found'}
+          {error?.message || 'Agent not found'}
         </p>
         <Link
           href="/agents"
@@ -268,23 +271,40 @@ export default function AgentProfilePage() {
           <div className="flex flex-wrap gap-1.5 mb-4">
             {agent.tags.map((tag) => {
               const count = agent.endorsements?.tags?.[tag] ?? 0;
+              const isSelected = endorserKey === tag;
               return (
-                <Link
+                <button
                   key={tag}
-                  href={`/agents?tag=${encodeURIComponent(tag)}`}
-                  className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
+                  type="button"
+                  onClick={() => setEndorserKey(isSelected ? null : tag)}
+                  className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full transition-colors ${
+                    isSelected
+                      ? 'bg-primary text-primary-foreground'
+                      : 'bg-primary/10 text-primary hover:bg-primary/20'
+                  }`}
+                  aria-pressed={isSelected}
                 >
                   {tag}
                   {count > 0 && (
-                    <span className="inline-flex items-center gap-0.5 text-primary/70">
+                    <span
+                      className={`inline-flex items-center gap-0.5 ${isSelected ? 'text-primary-foreground/80' : 'text-primary/70'}`}
+                    >
                       <ThumbsUp className="h-2.5 w-2.5" />
                       {count}
                     </span>
                   )}
-                </Link>
+                </button>
               );
             })}
           </div>
+        )}
+
+        {endorserKey && (
+          <EndorsersPanel
+            handle={agent.handle}
+            selectedKey={endorserKey}
+            onClose={() => setEndorserKey(null)}
+          />
         )}
 
         {agent.capabilities &&
@@ -295,19 +315,51 @@ export default function AgentProfilePage() {
                 Capabilities
               </h3>
               <div className="flex flex-wrap gap-1.5">
-                {Object.entries(agent.capabilities).map(([key, val]) => (
-                  <span
-                    key={key}
-                    className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full bg-muted text-muted-foreground"
-                  >
-                    {key}
-                    {Array.isArray(val) && val.length > 0 && (
-                      <span className="text-muted-foreground/60">
-                        {val.length}
+                {Object.entries(agent.capabilities).flatMap(([ns, vals]) => {
+                  const items = Array.isArray(vals)
+                    ? vals.filter((v): v is string => typeof v === 'string')
+                    : [];
+                  if (items.length === 0) {
+                    return (
+                      <span
+                        key={ns}
+                        className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full bg-muted text-muted-foreground"
+                      >
+                        {ns}
                       </span>
-                    )}
-                  </span>
-                ))}
+                    );
+                  }
+                  return items.map((v) => {
+                    const capKey = `${ns}:${v}`;
+                    const count = agent.endorsements?.[ns]?.[v] ?? 0;
+                    const isSelected = endorserKey === capKey;
+                    return (
+                      <button
+                        key={capKey}
+                        type="button"
+                        onClick={() =>
+                          setEndorserKey(isSelected ? null : capKey)
+                        }
+                        className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full transition-colors ${
+                          isSelected
+                            ? 'bg-foreground text-background'
+                            : 'bg-muted text-muted-foreground hover:bg-muted/80'
+                        }`}
+                        aria-pressed={isSelected}
+                      >
+                        {ns}:{v}
+                        {count > 0 && (
+                          <span
+                            className={`inline-flex items-center gap-0.5 ${isSelected ? 'text-background/70' : 'text-muted-foreground/70'}`}
+                          >
+                            <ThumbsUp className="h-2.5 w-2.5" />
+                            {count}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  });
+                })}
               </div>
             </div>
           )}

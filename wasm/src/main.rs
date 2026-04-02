@@ -2,22 +2,21 @@
 
 use outlayer::env;
 
+#[macro_use]
+mod macros;
 mod agent;
 mod auth;
+mod fastdata;
 mod handlers;
 mod nep413;
-mod notifications;
 mod registry;
-mod response;
-mod social_graph;
 mod store;
 mod suggest;
-mod transaction;
 mod types;
 mod validation;
 
+#[cfg(test)] // handlers import crate::agent::* directly; tests reach it via super::*
 pub(crate) use agent::*;
-pub(crate) use response::*;
 pub(crate) use store::*;
 pub(crate) use types::*;
 #[cfg(test)] // handlers import crate::validation::* directly; tests reach it via super::*
@@ -30,79 +29,67 @@ use handlers::*;
 // 1. require_*! macros    — request-level validation (parse required fields, fail early)
 // 2. ? with AppError      — infrastructure errors (storage, validation, clock)
 // 3. match + Err(Response) — business-logic decisions (rate limits, self-follow, auth)
-//
-// Macro error-path details:
-//   require_caller!  → auth::get_caller_from error (Response from auth failure)
-//   require_handle!  → err_coded("NOT_REGISTERED", ...) for unregistered accounts
-//   require_auth!    → combines require_caller + require_handle
-//   require_agent!   → AppError::NotFound.into() for missing agent records
-//   require_field!   → err_coded("VALIDATION_ERROR", ...) for missing request fields
-//   require_target_handle! → require_field! specialization for handle
-//   require_timestamp!     → AppError::Clock.into() for clock failures
-#[macro_export]
-macro_rules! require_caller {
-    ($req:expr) => {
-        match $crate::auth::get_caller_from($req) {
-            Ok(c) => c,
-            Err(e) => return e,
+
+/// Admin-only: verify user-scoped storage primitives (list_keys, increment)
+/// work on this OutLayer deployment. Gate check for storage scope migration.
+fn smoke_test_storage(req: &Request) -> Response {
+    let caller = require_caller!(req);
+    if let Err(e) = crate::auth::require_admin(&caller) {
+        return e;
+    }
+    use outlayer::storage;
+
+    let mut results = Vec::new();
+
+    // Test 1: set + list_keys
+    let _ = storage::set("_t:a", b"1");
+    let _ = storage::set("_t:b", b"2");
+    let keys = storage::list_keys("_t:");
+    let list_ok = match &keys {
+        Ok(k) => k.len() == 2 && k.contains(&"_t:a".to_string()) && k.contains(&"_t:b".to_string()),
+        Err(e) => {
+            results.push(format!("FAIL list_keys: {e}"));
+            false
         }
     };
-}
+    if list_ok {
+        results.push("PASS list_keys".into());
+    } else {
+        results.push(format!("FAIL list_keys: got {:?}", keys));
+    }
 
-#[macro_export]
-macro_rules! require_handle {
-    ($account:expr) => {
-        match agent_handle_for_account($account) {
-            Some(h) => h,
-            None => return err_coded("NOT_REGISTERED", "No agent registered for this account"),
-        }
-    };
-}
+    // Test 2: increment
+    let _ = storage::delete("_t:ctr");
+    let r1 = storage::increment("_t:ctr", 1).ok();
+    let r2 = storage::increment("_t:ctr", 5).ok();
+    let inc_ok = r1 == Some(1) && r2 == Some(6);
+    results.push(format!(
+        "{} increment: r1={:?} r2={:?}",
+        if inc_ok { "PASS" } else { "FAIL" },
+        r1,
+        r2
+    ));
 
-#[macro_export]
-macro_rules! require_auth {
-    ($req:expr) => {{
-        let caller = require_caller!($req);
-        let handle = require_handle!(&caller);
-        (caller, handle)
-    }};
-}
+    // Test 3: scope isolation — user set should not appear in get_worker
+    let _ = storage::set("_t:scope", b"user_val");
+    let worker_sees = storage::get_worker("_t:scope").ok().flatten().is_some();
+    let isolated = !worker_sees;
+    results.push(format!(
+        "{} scope_isolation: worker_sees_user_key={}",
+        if isolated { "PASS" } else { "FAIL" },
+        worker_sees
+    ));
 
-#[macro_export]
-macro_rules! require_agent {
-    ($handle:expr) => {
-        match load_agent($handle) {
-            Some(a) => a,
-            None => return AppError::NotFound("Agent not found").into(),
-        }
-    };
-}
+    // Cleanup
+    for k in &["_t:a", "_t:b", "_t:ctr", "_t:scope"] {
+        let _ = storage::delete(k);
+    }
 
-#[macro_export]
-macro_rules! require_field {
-    ($opt:expr, $msg:expr) => {
-        match $opt {
-            Some(v) => v,
-            None => return err_coded("VALIDATION_ERROR", $msg),
-        }
-    };
-}
-
-#[macro_export]
-macro_rules! require_target_handle {
-    ($req:expr) => {
-        require_field!($req.handle.as_deref(), "Handle is required").to_lowercase()
-    };
-}
-
-#[macro_export]
-macro_rules! require_timestamp {
-    () => {
-        match now_secs() {
-            Ok(t) => t,
-            Err(e) => return e.into(),
-        }
-    };
+    let all_pass = list_ok && inc_ok && isolated;
+    ok_response(serde_json::json!({
+        "all_pass": all_pass,
+        "results": results,
+    }))
 }
 
 fn main() {
@@ -111,46 +98,24 @@ fn main() {
             Action::Register => handle_register(&req),
             Action::GetMe => handle_get_me(&req),
             Action::UpdateMe => handle_update_me(&req),
-            Action::GetProfile => handle_get_profile(&req),
-            Action::ListAgents => {
-                let tag_filter = req.tag.as_deref().map(str::to_lowercase);
-                if let Some(t) = &tag_filter {
-                    if let Err(e) = validation::validate_tag_filter(t) {
-                        e.into()
-                    } else {
-                        handle_list_agents(
-                            &req,
-                            move |a| a.tags.iter().any(|at| at == t),
-                            registry::SortKey::Followers,
-                            DEFAULT_LIMIT,
-                        )
-                    }
-                } else {
-                    handle_list_agents(&req, |_| true, registry::SortKey::Followers, DEFAULT_LIMIT)
-                }
-            }
             Action::GetSuggested => handle_get_suggested(&req),
             Action::Follow => handle_follow(&req),
             Action::Unfollow => handle_unfollow(&req),
-            Action::GetFollowers => handle_get_followers(&req),
-            Action::GetFollowing => handle_get_following(&req),
-            Action::GetEdges => handle_get_edges(&req),
             Action::Heartbeat => handle_heartbeat(&req),
             Action::GetActivity => handle_get_activity(&req),
             Action::GetNetwork => handle_get_network(&req),
             Action::GetNotifications => handle_get_notifications(&req),
             Action::ReadNotifications => handle_read_notifications(&req),
-            Action::ListTags => handle_list_tags(&req),
             Action::Endorse => handle_endorse(&req),
             Action::Unendorse => handle_unendorse(&req),
-            Action::GetEndorsers | Action::FilterEndorsers => handle_get_endorsers(&req),
-            Action::Health => handle_health(&req),
-            Action::CheckHandle => handle_check_handle(&req),
             Action::SetPlatforms => handle_set_platforms(&req),
             Action::Deregister => handle_deregister(&req),
             Action::MigrateAccount => handle_migrate_account(&req),
             Action::ReconcileAll => handle_reconcile_all(&req),
             Action::AdminDeregister => handle_admin_deregister(&req),
+            Action::BatchFollow => handle_batch_follow(&req),
+            Action::BatchEndorse => handle_batch_endorse(&req),
+            Action::SmokeTestStorage => smoke_test_storage(&req),
         },
         Ok(None) => err_coded("VALIDATION_ERROR", "No input provided"),
         Err(e) => err_coded("VALIDATION_ERROR", &format!("Invalid request body: {e}")),

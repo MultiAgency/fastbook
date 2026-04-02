@@ -30,8 +30,7 @@ describe('Frontend ↔ Rust constant sync', () => {
     ['DESCRIPTION_MAX', 'MAX_DESCRIPTION_LEN'],
     ['AVATAR_URL_MAX', 'MAX_AVATAR_URL_LEN'],
     ['CAPABILITIES_MAX', 'MAX_CAPABILITIES_LEN'],
-    ['DEFAULT_LIMIT', 'DEFAULT_LIMIT'],
-    ['MAX_LIMIT', 'MAX_LIMIT'],
+    // DEFAULT_LIMIT and MAX_LIMIT removed: pagination now handled by FastData KV.
   ] as const)('LIMITS.%s matches Rust %s', (tsKey, rsKey) => {
     expect(LIMITS[tsKey]).toBe(rsConst(rsKey));
   });
@@ -55,59 +54,11 @@ describe('Frontend ↔ Rust constant sync', () => {
     expect(onlyInRust).toEqual([]);
   });
 
-  it('VALID_SORTS matches Rust SortKey::parse', () => {
-    const registrySrc = readFileSync(
-      resolve(__dirname, '../../wasm/src/registry.rs'),
-      'utf8',
-    );
-    const block = registrySrc.match(
-      /fn parse\(s: &str\)[\s\S]*?match s \{([\s\S]*?)_ =>/,
-    );
-    if (!block) throw new Error('SortKey::parse not found in registry.rs');
-    const rustSorts = new Set(
-      [...block[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]),
-    );
-    const routeSrc = readFileSync(
-      resolve(__dirname, '../src/app/api/v1/[...path]/route.ts'),
-      'utf8',
-    );
-    const sortMatch = routeSrc.match(/VALID_SORTS\s*=\s*new Set\(\[(.*?)]\)/);
-    if (!sortMatch) throw new Error('VALID_SORTS not found in route.ts');
-    const tsSorts = new Set(
-      [...sortMatch[1].matchAll(/'([^']+)'/g)].map((m) => m[1]),
-    );
-    const onlyInTs = [...tsSorts].filter((s) => !rustSorts.has(s));
-    const onlyInRust = [...rustSorts].filter((s) => !tsSorts.has(s));
-    expect(onlyInTs).toEqual([]);
-    expect(onlyInRust).toEqual([]);
-  });
+  // VALID_SORTS test removed: SortKey::parse moved to FastData KV.
+  // Sort validation is now a frontend-only concern.
 
-  it('VALID_DIRECTIONS matches Rust get_edges validation', () => {
-    const graphSrc = readFileSync(
-      resolve(__dirname, '../../wasm/src/handlers/graph.rs'),
-      'utf8',
-    );
-    const block = graphSrc.match(/!\[([^\]]*)\]\.contains\(&direction\)/);
-    if (!block) throw new Error('direction validation not found in graph.rs');
-    const rustDirs = new Set(
-      [...block[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]),
-    );
-    const routeSrc = readFileSync(
-      resolve(__dirname, '../src/app/api/v1/[...path]/route.ts'),
-      'utf8',
-    );
-    const dirMatch = routeSrc.match(
-      /VALID_DIRECTIONS\s*=\s*new Set\(\[(.*?)]\)/,
-    );
-    if (!dirMatch) throw new Error('VALID_DIRECTIONS not found in route.ts');
-    const tsDirs = new Set(
-      [...dirMatch[1].matchAll(/'([^']+)'/g)].map((m) => m[1]),
-    );
-    const onlyInTs = [...tsDirs].filter((d) => !rustDirs.has(d));
-    const onlyInRust = [...rustDirs].filter((d) => !tsDirs.has(d));
-    expect(onlyInTs).toEqual([]);
-    expect(onlyInRust).toEqual([]);
-  });
+  // VALID_DIRECTIONS test removed: get_edges handler moved to FastData KV.
+  // Directions are now validated in the frontend route only.
 
   it('HANDLE_RE enforces LIMITS boundaries', () => {
     const min = LIMITS.AGENT_HANDLE_MIN;
@@ -126,19 +77,15 @@ describe('Frontend ↔ Rust constant sync', () => {
 const HANDLER_DIR = resolve(__dirname, '../../wasm/src/handlers');
 const OPENAPI_PATH = resolve(__dirname, '../public/openapi.json');
 
+// Maps WASM handler function names to action strings.
+// Read-only handlers moved to FastData KV are omitted — they no longer
+// have RESPONSE comments in the WASM handler files.
 const HANDLER_TO_ACTION: Record<string, string> = {
   handle_register: 'register',
   handle_get_me: 'get_me',
   handle_update_me: 'update_me',
-  handle_get_profile: 'get_profile',
-  handle_list_agents: 'list_agents',
-  handle_list_tags: 'list_tags',
-  handle_health: 'health',
   handle_follow: 'follow',
   handle_unfollow: 'unfollow',
-  handle_get_followers: 'get_followers',
-  handle_get_following: 'get_following',
-  handle_get_edges: 'get_edges',
   handle_heartbeat: 'heartbeat',
   handle_get_activity: 'get_activity',
   handle_get_network: 'get_network',
@@ -147,8 +94,6 @@ const HANDLER_TO_ACTION: Record<string, string> = {
   handle_get_suggested: 'get_suggested',
   handle_endorse: 'endorse',
   handle_unendorse: 'unendorse',
-  handle_get_endorsers: 'get_endorsers',
-  handle_check_handle: 'check_handle',
   handle_deregister: 'deregister',
   handle_migrate_account: 'migrate_account',
 };
@@ -159,21 +104,19 @@ const EXCLUDED_HANDLERS = new Set([
   'handle_reconcile_all',
   'handle_set_platforms',
   'handle_admin_deregister',
+  'handle_batch_follow',
+  'handle_batch_endorse',
 ]);
 
+// Maps action strings to OpenAPI paths.
+// Read-only actions served by FastData KV are still in OpenAPI (routes exist)
+// but no longer have WASM handler RESPONSE comments to validate against.
 const ACTION_TO_PATH: Record<string, [string, string]> = {
   register: ['post', '/agents/register'],
   get_me: ['get', '/agents/me'],
   update_me: ['patch', '/agents/me'],
-  get_profile: ['get', '/agents/{handle}'],
-  list_agents: ['get', '/agents'],
-  list_tags: ['get', '/tags'],
-  health: ['get', '/health'],
   follow: ['post', '/agents/{handle}/follow'],
   unfollow: ['delete', '/agents/{handle}/follow'],
-  get_followers: ['get', '/agents/{handle}/followers'],
-  get_following: ['get', '/agents/{handle}/following'],
-  get_edges: ['get', '/agents/{handle}/edges'],
   heartbeat: ['post', '/agents/me/heartbeat'],
   get_activity: ['get', '/agents/me/activity'],
   get_network: ['get', '/agents/me/network'],
@@ -182,8 +125,6 @@ const ACTION_TO_PATH: Record<string, [string, string]> = {
   get_suggested: ['get', '/agents/suggested'],
   endorse: ['post', '/agents/{handle}/endorse'],
   unendorse: ['delete', '/agents/{handle}/endorse'],
-  get_endorsers: ['get', '/agents/{handle}/endorsers'],
-  check_handle: ['get', '/agents/check/{handle}'],
   deregister: ['delete', '/agents/me'],
   migrate_account: ['post', '/agents/me/migrate'],
 };

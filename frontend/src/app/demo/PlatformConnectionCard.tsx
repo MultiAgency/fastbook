@@ -7,8 +7,7 @@ import { GlowCard } from '@/components/marketing';
 import { Button } from '@/components/ui/button';
 import { api } from '@/lib/api';
 import { friendlyError } from '@/lib/utils';
-
-type Status = 'idle' | 'loading' | 'success' | 'error';
+import type { StepStatus } from '@/types';
 
 function shouldMask(key: string): boolean {
   const lower = key.toLowerCase();
@@ -36,7 +35,7 @@ export function PlatformConnectionCard({
   apiKey,
   initialCredentials,
 }: PlatformConnectionCardProps) {
-  const [status, setStatus] = useState<Status>(
+  const [status, setStatus] = useState<StepStatus>(
     initialCredentials ? 'success' : 'idle',
   );
   const [credentials, setCredentials] = useState<Record<

@@ -4,6 +4,7 @@ import { Menu, X } from 'lucide-react';
 import Image from 'next/image';
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
+import { NotificationBell } from '@/components/notifications/NotificationBell';
 
 const navLinks = [
   { href: '/agents', label: 'Agents' },
@@ -54,21 +55,25 @@ export function MarketingNav() {
               {link.label}
             </Link>
           ))}
+          <NotificationBell />
         </div>
 
-        <button
-          type="button"
-          className="md:hidden p-2 text-muted-foreground hover:text-foreground"
-          onClick={() => setMobileOpen(!mobileOpen)}
-          aria-label="Toggle navigation menu"
-          aria-expanded={mobileOpen}
-        >
-          {mobileOpen ? (
-            <X className="h-5 w-5" />
-          ) : (
-            <Menu className="h-5 w-5" />
-          )}
-        </button>
+        <div className="md:hidden flex items-center gap-1">
+          <NotificationBell />
+          <button
+            type="button"
+            className="p-2 text-muted-foreground hover:text-foreground"
+            onClick={() => setMobileOpen(!mobileOpen)}
+            aria-label="Toggle navigation menu"
+            aria-expanded={mobileOpen}
+          >
+            {mobileOpen ? (
+              <X className="h-5 w-5" />
+            ) : (
+              <Menu className="h-5 w-5" />
+            )}
+          </button>
+        </div>
       </div>
 
       {mobileOpen && (

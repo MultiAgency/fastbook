@@ -2,12 +2,10 @@
 
 use super::follow::suggestion_reason;
 use crate::agent::*;
-use crate::registry::{load_agents_sorted, SortKey};
-use crate::response::*;
+use crate::registry::load_agents_by_followers;
 use crate::store::*;
 use crate::suggest;
 use crate::types::*;
-use crate::{require_caller, require_timestamp};
 use std::collections::{HashMap, HashSet};
 
 const SUGGESTION_SALT_KEY: &str = "suggestion_salt";
@@ -68,16 +66,15 @@ pub fn handle_get_suggested(req: &Request) -> Response {
         .unwrap_or_else(|| caller_seed(&caller));
     let mut rng = suggest::Rng::from_bytes(&rng_seed);
 
-    let own_handle = agent_handle_for_account(&caller);
+    let resolved = agent_handle_for_account(&caller);
+    let own_handle = resolved.as_ref().map(|(h, _)| h.as_str());
     let follows: Vec<String> = own_handle
-        .as_ref()
-        .map(|h| index_list(&keys::pub_following(h)))
+        .map(|h| handles_from_prefix(&keys::pub_following_prefix(h)))
         .unwrap_or_default();
     let follow_set: HashSet<String> = follows.iter().cloned().collect();
-    let my_tags: Vec<String> = own_handle
+    let my_tags: Vec<String> = resolved
         .as_ref()
-        .and_then(|h| load_agent(h))
-        .map(|a| a.tags)
+        .map(|(_, a)| a.tags.clone())
         .unwrap_or_default();
 
     let mut outgoing_cache: HashMap<String, Vec<String>> = HashMap::new();
@@ -85,7 +82,7 @@ pub fn handle_get_suggested(req: &Request) -> Response {
         if let Some(cached) = outgoing_cache.get(handle) {
             return cached.clone();
         }
-        let neighbors = index_list(&keys::pub_following(handle));
+        let neighbors = handles_from_prefix(&keys::pub_following_prefix(handle));
         outgoing_cache.insert(handle.to_string(), neighbors.clone());
         neighbors
     };
@@ -94,18 +91,17 @@ pub fn handle_get_suggested(req: &Request) -> Response {
         &mut rng,
         &follows,
         &follow_set,
-        own_handle.as_deref(),
+        own_handle,
         &mut get_outgoing,
     );
 
     let candidate_limit = (limit * SUGGESTION_CANDIDATE_MULTIPLIER).max(MIN_SUGGESTION_CANDIDATES);
-    let candidates: Vec<AgentRecord> =
-        match load_agents_sorted(SortKey::Followers, candidate_limit, &None, |a| {
-            !follow_set.contains(&a.handle) && own_handle.as_deref() != Some(a.handle.as_str())
-        }) {
-            Ok((agents, _)) => agents,
-            Err(_) => Vec::new(),
-        };
+    let candidates: Vec<AgentRecord> = match load_agents_by_followers(candidate_limit, &None, |a| {
+        !follow_set.contains(&a.handle) && own_handle != Some(a.handle.as_str())
+    }) {
+        Ok((agents, _)) => agents,
+        Err(_) => Vec::new(),
+    };
 
     if candidates.is_empty() {
         return ok_response(serde_json::json!({ "agents": [], "vrf": null }));
@@ -113,30 +109,11 @@ pub fn handle_get_suggested(req: &Request) -> Response {
 
     let ranked = suggest::rank_candidates(&mut rng, candidates, &visits, &my_tags, limit);
 
-    // Prune stale suggestion audit entries here as well as in heartbeat, since
-    // heartbeat may not have run recently for infrequent callers.
-    let _ = prune_index(
-        &keys::suggested_idx(&caller),
-        now_secs().unwrap_or(0).saturating_sub(SECS_PER_DAY),
-        |key| key.rsplit(':').next().and_then(|s| s.parse::<u64>().ok()),
-    );
-
-    let ts = require_timestamp!();
-    let mut warnings = Warnings::new();
     let mut results: Vec<serde_json::Value> = Vec::with_capacity(limit);
     for s in ranked.into_iter().take(limit) {
         let v = visits.get(&s.agent.handle).copied().unwrap_or(0);
         let mut e = format_suggestion(&s.agent, suggestion_reason(v, &s.shared_tags));
         e["is_following"] = serde_json::json!(false);
-
-        let skey = keys::suggested(&caller, &s.agent.handle, ts);
-        if let Err(e) = set_string(&skey, &format!("{v}")) {
-            eprintln!("[warning] suggestion audit: {e}");
-            warnings.push("suggestion audit: failed".into());
-        } else {
-            let _ = index_append(&keys::suggested_idx(&caller), &skey);
-        }
-
         results.push(e);
     }
 
@@ -148,7 +125,5 @@ pub fn handle_get_suggested(req: &Request) -> Response {
 
     increment_rate_limit("suggested", &caller, SUGGEST_RATE_WINDOW_SECS);
 
-    let mut resp = serde_json::json!({ "agents": results, "vrf": vrf_json });
-    warnings.attach(&mut resp);
-    ok_response(resp)
+    ok_response(serde_json::json!({ "agents": results, "vrf": vrf_json }))
 }

@@ -4,19 +4,29 @@ use crate::keys;
 use crate::store::*;
 use crate::types::*;
 
-pub(crate) fn agent_handle_for_account(account_id: &str) -> Option<String> {
-    if let Some(handle) = get_string(&keys::near_account(account_id)) {
-        return Some(handle);
+/// Resolve account → handle, returning `None` if the mapping is absent or stale.
+///
+/// A mapping can become stale when a multi-step write (register, migrate_account)
+/// fails partway through.  Rather than requiring every caller to handle staleness,
+/// we verify here: the mapped handle must have an agent record whose
+/// `near_account_id` matches.  Stale mappings are invisible to the rest of the
+/// codebase.
+pub(crate) fn agent_handle_for_account(account_id: &str) -> Option<(String, AgentRecord)> {
+    let bytes = user_get_bytes(&keys::near_account(account_id));
+    if bytes.is_empty() {
+        return None;
     }
-    // Legacy key format from pre-v2 storage.  Migrates on read by writing the
-    // canonical key.  Safe to remove once reconcile_all has run on all deployments.
-    let handle = get_string(&format!("near:{account_id}"))?;
-    let _ = set_public(&keys::near_account(account_id), handle.as_bytes());
-    Some(handle)
+    let handle = String::from_utf8(bytes).ok()?;
+    let agent = load_agent(&handle)?;
+    if agent.near_account_id == account_id {
+        Some((handle, agent))
+    } else {
+        None
+    }
 }
 
 pub(crate) fn load_agent(handle: &str) -> Option<AgentRecord> {
-    get_json::<AgentRecord>(&keys::pub_agent(handle))
+    user_get_json::<AgentRecord>(&keys::pub_agent(handle))
 }
 
 /// Write agent record to storage without updating sorted indices.
@@ -24,39 +34,70 @@ pub(crate) fn load_agent(handle: &str) -> Option<AgentRecord> {
 /// are rebuilt by ReconcileAll rather than updated per-edge during teardown.
 pub(crate) fn write_agent_record(agent: &AgentRecord) -> Result<(), AppError> {
     let bytes = serde_json::to_vec(agent).map_err(|e| AppError::Storage(e.to_string()))?;
-    set_public(&keys::pub_agent(&agent.handle), &bytes)
+    user_set(&keys::pub_agent(&agent.handle), &bytes)
 }
 
-pub(crate) fn save_agent(agent: &AgentRecord, before: &AgentRecord) -> Result<(), AppError> {
-    use crate::registry::{replace_sorted_indices, write_sorted_indices};
+/// Serialize an agent to a `serde_json::Value` and the corresponding byte
+/// representation.  Call once and reuse: pass bytes to OutLayer storage and
+/// the Value to FastData sync, avoiding double-serialization.
+pub(crate) fn agent_to_value_and_bytes(
+    agent: &AgentRecord,
+) -> Result<(serde_json::Value, Vec<u8>), AppError> {
+    let val = serde_json::to_value(agent).map_err(|e| AppError::Storage(e.to_string()))?;
+    let bytes = serde_json::to_vec(&val).map_err(|e| AppError::Storage(e.to_string()))?;
+    Ok((val, bytes))
+}
 
+pub(crate) fn save_agent(agent: &AgentRecord) -> Result<(), AppError> {
     let bytes = serde_json::to_vec(agent).map_err(|e| AppError::Storage(e.to_string()))?;
-    set_public(&keys::pub_agent(&agent.handle), &bytes)?;
-
-    if before.follower_count != agent.follower_count
-        || before.last_active != agent.last_active
-        || before.endorsements.total_count() != agent.endorsements.total_count()
-    {
-        replace_sorted_indices(agent, before)?;
-    } else {
-        // First save (registration) — just insert, nothing to remove.
-        // Also triggers if no sortable fields changed — safe because insert is idempotent.
-        write_sorted_indices(agent)?;
-    }
-    Ok(())
+    save_agent_preserialized(&bytes, agent)
 }
 
-/// Recount follower/following from index lengths and endorsements from endorser
-/// indices.  Used by both heartbeat (~2% reconciliation) and admin reconcile_all.
+/// Like `save_agent`, but accepts pre-serialized bytes to avoid double-
+/// serialization when the caller also needs the Value for FastData sync.
+/// Sorted indices are maintained by FastData KV, not OutLayer storage.
+pub(crate) fn save_agent_preserialized(bytes: &[u8], agent: &AgentRecord) -> Result<(), AppError> {
+    user_set(&keys::pub_agent(&agent.handle), bytes)
+}
+
+/// Recount follower/following from individual key counts and endorsements from
+/// endorser prefix scans.  Used by heartbeat (~2% reconciliation) and admin
+/// reconcile_all.
 pub(crate) fn recount_social(agent: &mut AgentRecord) {
     let handle = &agent.handle;
-    agent.follower_count = index_list(&keys::pub_followers(handle)).len() as i64;
-    agent.following_count = index_list(&keys::pub_following(handle)).len() as i64;
+    let follower_handles = handles_from_prefix(&keys::pub_follower_prefix(handle));
+    let following_handles = handles_from_prefix(&keys::pub_following_prefix(handle));
+    let fc = follower_handles.len() as i64;
+    let gc = following_handles.len() as i64;
+    agent.follower_count = fc;
+    agent.following_count = gc;
+
+    // Sync atomic counters to match actual key counts.
+    let _ = user_increment(
+        &keys::follower_count(handle),
+        fc - user_counter(&keys::follower_count(handle)),
+    );
+    let _ = user_increment(
+        &keys::following_count(handle),
+        gc - user_counter(&keys::following_count(handle)),
+    );
+
+    // Recount mutual relationships: intersection of followers and following.
+    let follower_set: std::collections::HashSet<&str> =
+        follower_handles.iter().map(String::as_str).collect();
+    let mc = following_handles
+        .iter()
+        .filter(|h| follower_set.contains(h.as_str()))
+        .count() as i64;
+    let _ = user_increment(
+        &keys::mutual_count(handle),
+        mc - user_counter(&keys::mutual_count(handle)),
+    );
 
     let endorsable = crate::collect_endorsable(Some(&agent.tags), Some(&agent.capabilities));
     let mut rebuilt = Endorsements::new();
     for (ns, val) in &endorsable {
-        let count = index_list(&keys::endorsers(handle, ns, val)).len() as i64;
+        let count = handles_from_prefix(&keys::pub_endorser_prefix(handle, ns, val)).len() as i64;
         if count > 0 {
             rebuilt.set_count(ns, val, count);
         }

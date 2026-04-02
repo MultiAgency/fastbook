@@ -1,21 +1,14 @@
 //! Handlers for get_me, get_profile, update_me, and set_platforms.
 
 use crate::agent::*;
-use crate::auth::get_caller_from;
-use crate::response::*;
 use crate::store::*;
-use crate::transaction::Transaction;
 use crate::types::*;
 use crate::validation::*;
-use crate::{
-    require_agent, require_auth, require_caller, require_field, require_handle,
-    require_target_handle, require_timestamp,
-};
 
 // RESPONSE: { agent: Agent, profile_completeness, suggestions: { quality, hint } }
 pub fn handle_get_me(req: &Request) -> Response {
     let (_caller, handle) = require_auth!(req);
-    let _ = index_append(keys::pub_agents(), &handle);
+    let _ = user_set(&keys::pub_agent_reg(&handle), b"1");
     match load_agent(&handle) {
         Some(agent) => {
             let has_tags = !agent.tags.is_empty();
@@ -92,9 +85,13 @@ pub fn handle_update_me(req: &Request) -> Response {
         super::endorse::EndorsementCascade::empty()
     };
 
-    let mut txn = Transaction::new();
-    if let Some(r) = txn.save_agent("Failed to save agent", &agent, &before) {
-        return r;
+    let (agent_val, agent_bytes) = match agent_to_value_and_bytes(&agent) {
+        Ok(pair) => pair,
+        Err(e) => return e.into(),
+    };
+
+    if let Err(e) = save_agent_preserialized(&agent_bytes, &agent) {
+        return e.into();
     }
 
     increment_rate_limit("update_me", &handle, UPDATE_RATE_WINDOW_SECS);
@@ -102,6 +99,20 @@ pub fn handle_update_me(req: &Request) -> Response {
     warnings.extend(cascade.cleanup_storage(&handle));
 
     crate::registry::update_tag_counts(&before.tags, &agent.tags);
+
+    // Sync to FastData KV.
+    {
+        let tag_counts: std::collections::HashMap<String, u32> =
+            get_json(keys::pub_tag_counts()).unwrap_or_default();
+        let mut sync = crate::fastdata::SyncBatch::new();
+        sync.agent_with_val(&agent, agent_val);
+        sync.tag_counts(&tag_counts);
+        sync.tag_removals(&before.tags, &agent.tags, &handle);
+        sync.null_endorsers(&handle, &cascade.removed_pairs());
+        if let Some(w) = sync.flush() {
+            warnings.push(w);
+        }
+    }
 
     let agent_json = format_agent(&agent);
     let mut resp = serde_json::json!({ "agent": agent_json, "profile_completeness": profile_completeness(&agent) });
@@ -117,9 +128,9 @@ pub fn handle_set_platforms(req: &Request) -> Response {
         return e;
     }
     let handle = require_target_handle!(req);
-    let before = require_agent!(&handle);
+    let mut agent = require_agent!(&handle);
     let Some(platforms) = &req.platforms else {
-        return err_coded("VALIDATION_ERROR", "platforms array is required");
+        return err_coded("VALIDATION_ERROR", "Platforms array is required");
     };
     if platforms.len() > MAX_PLATFORMS {
         return err_coded(
@@ -135,40 +146,20 @@ pub fn handle_set_platforms(req: &Request) -> Response {
             return e.into();
         }
     }
-    let mut agent = before.clone();
     let mut seen = std::collections::HashSet::new();
     agent.platforms = platforms
         .iter()
         .filter(|p| seen.insert(p.as_str()))
         .cloned()
         .collect();
-    let mut txn = Transaction::new();
-    if let Some(r) = txn.save_agent("Failed to save agent", &agent, &before) {
-        return r;
+    if let Err(e) = save_agent(&agent) {
+        return e.into();
     }
-    ok_response(serde_json::json!({ "agent": format_agent(&agent) }))
-}
 
-// RESPONSE: { agent: Agent, is_following?: bool, my_endorsements?: { ns: [val] } }
-pub fn handle_get_profile(req: &Request) -> Response {
-    let handle = require_target_handle!(req);
-    let agent = require_agent!(&handle);
-    let mut data = serde_json::json!({ "agent": format_agent(&agent) });
-    if let Ok(caller) = get_caller_from(req) {
-        if let Some(caller_handle) = agent_handle_for_account(&caller) {
-            data["is_following"] = serde_json::json!(has(&keys::pub_edge(&caller_handle, &handle)));
-            let raw = index_list(&keys::endorsement_by(&caller_handle, &handle));
-            if !raw.is_empty() {
-                let mut grouped: std::collections::HashMap<&str, Vec<&str>> =
-                    std::collections::HashMap::new();
-                for entry in &raw {
-                    if let Some((ns, val)) = entry.split_once(':') {
-                        grouped.entry(ns).or_default().push(val);
-                    }
-                }
-                data["my_endorsements"] = serde_json::json!(grouped);
-            }
-        }
-    }
-    ok_response(data)
+    // Sync to FastData KV.
+    let mut sync = crate::fastdata::SyncBatch::new();
+    sync.agent(&agent);
+    sync.flush();
+
+    ok_response(serde_json::json!({ "agent": format_agent(&agent) }))
 }
