@@ -11,6 +11,21 @@ fn notif_ts(n: &serde_json::Value) -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+/// Deterministic notification ID from (type, from, at) using FNV-1a 64-bit.
+/// Stable across restarts — same inputs always produce the same ID.
+pub(crate) fn notif_id(n: &serde_json::Value) -> String {
+    let ntype = n.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let from = n.get("from").and_then(|v| v.as_str()).unwrap_or("");
+    let at = notif_ts(n);
+    let input = format!("{ntype}:{from}:{at}");
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in input.as_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("{h:016x}")
+}
+
 // RESPONSE: { notifications: [{ type, from, from_agent?, is_mutual, read, at, detail? }],
 //   unread_count, pagination: { limit, next_cursor? } }
 pub fn handle_get_notifications(req: &Request) -> Response {
@@ -70,6 +85,7 @@ pub fn handle_get_notifications(req: &Request) -> Response {
     let results: Vec<serde_json::Value> = page
         .into_iter()
         .map(|mut n| {
+            n["id"] = serde_json::json!(notif_id(&n));
             let at = notif_ts(&n);
             n["read"] = serde_json::json!(at <= read_ts);
             if let Some(from) = n.get("from").and_then(|v| v.as_str()) {

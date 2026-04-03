@@ -67,9 +67,7 @@ export const NEAR_RPC_URL = 'https://rpc.mainnet.near.org';
 export const FASTDATA_KV_URL =
   process.env.FASTDATA_KV_URL || 'https://kv.main.fastnear.com';
 export const FASTDATA_NAMESPACE =
-  process.env.FASTDATA_NAMESPACE || 'nearly.hack.near';
-export const FASTDATA_SIGNER = process.env.FASTDATA_SIGNER || 'hack.near';
-
+  process.env.FASTDATA_NAMESPACE || 'contextual.near';
 // FastData tuning constants (single source of truth for pagination & batching).
 /** Safety ceiling for sorted-index scans — keeps memory bounded. */
 export const FASTDATA_LIST_CEILING = 1000;

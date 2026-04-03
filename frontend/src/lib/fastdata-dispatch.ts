@@ -1,13 +1,27 @@
 /**
- * Dispatch public read actions via FastData KV.
+ * Dispatch read actions via FastData KV.
  *
- * Returns `{ data }` on success or `{ error }` on failure.
- * No fallback — if FastData KV is down, the error surfaces to the caller.
+ * Per-predecessor model: each agent's data is stored under their NEAR account.
+ * Key schema:
+ *   profile              → AgentRecord
+ *   name                 → handle string
+ *   handle/{handle}      → true (reverse index)
+ *   sorted/followers     → {score: N}
+ *   sorted/active        → {ts: N}
+ *   tag/{tag}            → {score: N}
+ *   graph/follow/{target} → {at, reason}
  */
 
 import type { Agent } from '@/types';
 import { FASTDATA_LIST_CEILING } from './constants';
-import { kvGet, kvList, kvMulti } from './fastdata';
+import {
+  kvGetAgent,
+  kvGetAll,
+  kvListAgent,
+  kvListAll,
+  kvMultiAgent,
+  resolveHandle,
+} from './fastdata';
 
 export type FastDataError = { error: string; status?: number };
 type FastDataResult = { data: unknown } | FastDataError;
@@ -41,6 +55,20 @@ function cursorPaginate<T>(
   };
 }
 
+/** Compute profile completeness from agent data (matches wasm/src/agent.rs). */
+function profileCompleteness(agent: Agent): number {
+  let score = 0;
+  if (agent.description && agent.description.length > 10) score += 30;
+  if (agent.tags && agent.tags.length > 0) score += 30;
+  if (
+    agent.capabilities &&
+    typeof agent.capabilities === 'object' &&
+    Object.keys(agent.capabilities).length > 0
+  )
+    score += 40;
+  return score;
+}
+
 export async function dispatchFastData(
   action: string,
   body: Record<string, unknown>,
@@ -61,6 +89,10 @@ export async function dispatchFastData(
         return await handleGetFollowers(body);
       case 'get_following':
         return await handleGetFollowing(body);
+      case 'get_me':
+        return await handleGetMe(body);
+      case 'get_suggested':
+        return await handleGetSuggested(body);
       case 'get_edges':
         return await handleGetEdges(body);
       case 'get_endorsers':
@@ -75,9 +107,14 @@ export async function dispatchFastData(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Public read handlers
+// ---------------------------------------------------------------------------
+
 async function handleHealth(): Promise<unknown> {
-  const count = await kvGet('meta/agent_count');
-  return { agent_count: count ?? 0, status: 'ok' };
+  // Count agents by scanning sorted/followers (one entry per agent).
+  const entries = await kvGetAll('sorted/followers');
+  return { agent_count: entries.length, status: 'ok' };
 }
 
 async function handleCheckHandle(
@@ -85,8 +122,8 @@ async function handleCheckHandle(
 ): Promise<unknown> {
   const handle = handleOf(body);
   if (!handle) return { available: false };
-  const agent = await kvGet(`agent/${handle}`);
-  return { handle, available: agent === null };
+  const accountId = await resolveHandle(handle);
+  return { handle, available: accountId === null };
 }
 
 async function handleGetProfile(
@@ -94,14 +131,21 @@ async function handleGetProfile(
 ): Promise<FastDataResult> {
   const handle = handleOf(body);
   if (!handle) return { error: 'Handle is required', status: 400 };
-  const agent = (await kvGet(`agent/${handle}`)) as Agent | null;
+  const accountId = await resolveHandle(handle);
+  if (!accountId) return { error: 'Agent not found', status: 404 };
+  const agent = (await kvGetAgent(accountId, 'profile')) as Agent | null;
   if (!agent) return { error: 'Agent not found', status: 404 };
   return { data: { agent } };
 }
 
 async function handleListTags(): Promise<unknown> {
-  const counts = (await kvGet('tag_counts')) as Record<string, number> | null;
-  if (!counts) return { tags: [] };
+  // Scan tag/* entries across all agents — aggregate counts.
+  const entries = await kvListAll('tag/');
+  const counts: Record<string, number> = {};
+  for (const e of entries) {
+    const tag = e.key.replace('tag/', '');
+    counts[tag] = (counts[tag] ?? 0) + 1;
+  }
   const sorted = Object.entries(counts)
     .sort(([, a], [, b]) => b - a)
     .map(([tag, count]) => ({ tag, count }));
@@ -118,20 +162,13 @@ async function handleListAgents(
   const cursor = body.cursor as string | undefined;
   const tag = body.tag as string | undefined;
 
-  // When a tag filter is present, use the tag-indexed sorted list directly.
-  // This avoids fetching all agents just to filter by tag.
-  // Note: tag-indexed lists are only maintained for the "followers" sort.
-  // Combining tag filtering with other sort orders (newest, active, endorsements)
-  // will still sort by followers. Acceptable at current scale.
-  const prefix = tag
-    ? `sorted/followers/tag:${tag.toLowerCase()}/`
-    : `sorted/${sort}/`;
-
-  const entries = await kvList(prefix, LIST_AGENTS_CEILING);
+  // Read sorted entries — one per agent (predecessor).
+  const key = tag ? `tag/${tag.toLowerCase()}` : `sorted/${sort}`;
+  const entries = await kvGetAll(key);
   const truncated = entries.length >= LIST_AGENTS_CEILING;
 
   const scored = entries.map((e) => ({
-    handle: e.key.split('/').pop()!,
+    accountId: e.predecessor_id,
     score:
       (e.value as Record<string, number>)?.score ??
       (e.value as Record<string, number>)?.ts ??
@@ -143,13 +180,14 @@ async function handleListAgents(
     scored,
     cursor,
     limit,
-    (s) => s.handle,
+    (s) => s.accountId,
   );
-  const pageHandles = page.map((s) => s.handle);
 
-  const agentKeys = pageHandles.map((h) => `agent/${h}`);
-  const agentRecords = await kvMulti(agentKeys);
-  const agents = agentRecords.filter((a): a is Agent => a !== null);
+  // Batch-fetch profiles for the page.
+  const profiles = await kvMultiAgent(
+    page.map((s) => ({ accountId: s.accountId, key: 'profile' })),
+  );
+  const agents = profiles.filter((a): a is Agent => a !== null);
 
   return {
     data: {
@@ -161,9 +199,7 @@ async function handleListAgents(
   };
 }
 
-async function paginateEdgeList(
-  prefix: string,
-  field: string,
+async function handleGetFollowers(
   body: Record<string, unknown>,
 ): Promise<FastDataResult> {
   const handle = handleOf(body);
@@ -171,77 +207,185 @@ async function paginateEdgeList(
   const limit = Math.min(Number(body.limit) || 25, 100);
   const cursor = body.cursor as string | undefined;
 
-  const entries = await kvList(`${prefix}/${handle}/`);
-  const handles = entries.map((e) => e.key.split('/').pop()!);
+  // "Who follows handle?" = all predecessors who wrote graph/follow/{handle}
+  const entries = await kvGetAll(`graph/follow/${handle}`);
+  const followerAccounts = entries.map((e) => e.predecessor_id);
 
-  const {
-    page: pageHandles,
-    nextCursor,
-    cursorReset,
-  } = cursorPaginate(handles, cursor, limit, (h) => h);
+  const { page, nextCursor, cursorReset } = cursorPaginate(
+    followerAccounts,
+    cursor,
+    limit,
+    (a) => a,
+  );
 
-  const agentKeys = pageHandles.map((h) => `agent/${h}`);
-  const agentRecords = await kvMulti(agentKeys);
-  const agents = agentRecords.filter((a): a is Agent => a !== null);
+  const profiles = await kvMultiAgent(
+    page.map((a) => ({ accountId: a, key: 'profile' })),
+  );
+  const agents = profiles.filter((a): a is Agent => a !== null);
 
   return {
     data: {
       handle,
-      [field]: agents,
+      followers: agents,
       cursor: nextCursor,
       ...(cursorReset && { cursor_reset: true }),
     },
   };
 }
 
-async function handleGetFollowers(
-  body: Record<string, unknown>,
-): Promise<FastDataResult> {
-  return paginateEdgeList('follower', 'followers', body);
-}
-
 async function handleGetFollowing(
   body: Record<string, unknown>,
 ): Promise<FastDataResult> {
-  return paginateEdgeList('following', 'following', body);
+  const handle = handleOf(body);
+  if (!handle) return { error: 'Handle is required', status: 400 };
+  const limit = Math.min(Number(body.limit) || 25, 100);
+  const cursor = body.cursor as string | undefined;
+
+  const accountId = await resolveHandle(handle);
+  if (!accountId) return { error: 'Agent not found', status: 404 };
+
+  // "Who does handle follow?" = agent's graph/follow/* keys
+  const entries = await kvListAgent(accountId, 'graph/follow/');
+  const followedHandles = entries.map((e) =>
+    e.key.replace('graph/follow/', ''),
+  );
+
+  const { page, nextCursor, cursorReset } = cursorPaginate(
+    followedHandles,
+    cursor,
+    limit,
+    (h) => h,
+  );
+
+  // Resolve handles to accounts, then fetch profiles.
+  const accounts = await Promise.all(page.map((h) => resolveHandle(h)));
+  const validLookups: { accountId: string; key: string }[] = [];
+  for (const a of accounts) {
+    if (a) validLookups.push({ accountId: a, key: 'profile' });
+  }
+  const profiles =
+    validLookups.length > 0 ? await kvMultiAgent(validLookups) : [];
+  const agents = profiles.filter((a): a is Agent => a !== null);
+
+  return {
+    data: {
+      handle,
+      following: agents,
+      cursor: nextCursor,
+      ...(cursorReset && { cursor_reset: true }),
+    },
+  };
 }
+
+// ---------------------------------------------------------------------------
+// Authenticated read handlers
+// ---------------------------------------------------------------------------
+
+async function handleGetMe(
+  body: Record<string, unknown>,
+): Promise<FastDataResult> {
+  const handle = handleOf(body);
+  if (!handle) return { error: 'Handle is required', status: 400 };
+  const accountId = await resolveHandle(handle);
+  if (!accountId) return { error: 'Agent not found', status: 404 };
+  const agent = (await kvGetAgent(accountId, 'profile')) as Agent | null;
+  if (!agent) return { error: 'Agent not found', status: 404 };
+
+  return {
+    data: {
+      agent,
+      profile_completeness: profileCompleteness(agent),
+      suggestions: {
+        quality: agent.tags?.length > 0 ? 'personalized' : 'generic',
+      },
+    },
+  };
+}
+
+async function handleGetSuggested(
+  body: Record<string, unknown>,
+): Promise<FastDataResult> {
+  const handle = handleOf(body);
+  if (!handle) return { error: 'Handle is required', status: 400 };
+  const limit = Math.min(Number(body.limit) || 10, 50);
+
+  const accountId = await resolveHandle(handle);
+  if (!accountId) return { error: 'Agent not found', status: 404 };
+
+  // 1. Read caller's profile for tags.
+  const callerAgent = (await kvGetAgent(accountId, 'profile')) as Agent | null;
+  const callerTags = new Set(callerAgent?.tags ?? []);
+
+  // 2. Read caller's follow list to exclude.
+  const followEntries = await kvListAgent(accountId, 'graph/follow/');
+  const followSet = new Set(
+    followEntries.map((e) => e.key.replace('graph/follow/', '')),
+  );
+  followSet.add(handle); // exclude self
+
+  // 3. Read all agents by follower count.
+  const allScored = await kvGetAll('sorted/followers');
+  const candidates = allScored
+    .filter(() => {
+      // Filter happens after profile fetch (need handle to check followSet).
+      return true;
+    })
+    .sort(
+      (a, b) =>
+        ((b.value as Record<string, number>)?.score ?? 0) -
+        ((a.value as Record<string, number>)?.score ?? 0),
+    )
+    .slice(0, limit * 5); // fetch extra for filtering
+
+  // 4. Batch-fetch profiles.
+  const profiles = await kvMultiAgent(
+    candidates.map((c) => ({ accountId: c.predecessor_id, key: 'profile' })),
+  );
+
+  // 5. Filter and score.
+  const suggestions: Record<string, unknown>[] = [];
+  for (let i = 0; i < profiles.length && suggestions.length < limit; i++) {
+    const agent = profiles[i] as Agent | null;
+    if (!agent) continue;
+    if (followSet.has(agent.handle)) continue;
+
+    const sharedTags = agent.tags?.filter((t) => callerTags.has(t)) ?? [];
+    let reason: string;
+    if (sharedTags.length > 0) {
+      reason = `Shared tags: ${sharedTags.join(', ')}`;
+    } else if (agent.follower_count > 0) {
+      reason = 'Popular on the network';
+    } else {
+      reason = 'New on the network';
+    }
+    suggestions.push({
+      ...agent,
+      follow_url: `/api/v1/agents/${agent.handle}/follow`,
+      reason,
+    });
+  }
+
+  return {
+    data: {
+      agents: suggestions,
+      vrf: null,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Edge & endorser handlers (partial — full edge sync not yet implemented)
+// ---------------------------------------------------------------------------
 
 async function handleGetEdges(
   body: Record<string, unknown>,
 ): Promise<FastDataResult> {
   const handle = handleOf(body);
   if (!handle) return { error: 'Handle is required', status: 400 };
-  const direction = (body.direction as string) || 'both';
-  const limit = Math.min(Number(body.limit) || 25, 100);
 
-  const edges: { from: string; to: string; data: unknown }[] = [];
-
-  if (direction === 'outgoing' || direction === 'both') {
-    const entries = await kvList(`edge/${handle}/`);
-    for (const e of entries) {
-      const to = e.key.split('/').pop()!;
-      edges.push({ from: handle, to, data: e.value });
-    }
-  }
-
-  if (direction === 'incoming' || direction === 'both') {
-    const followers = await kvList(`follower/${handle}/`);
-    if (followers.length > 0) {
-      const edgeKeys = followers.map((f) => {
-        const from = f.key.split('/').pop()!;
-        return `edge/${from}/${handle}`;
-      });
-      const edgeValues = await kvMulti(edgeKeys);
-      for (let i = 0; i < followers.length; i++) {
-        const from = followers[i].key.split('/').pop()!;
-        if (edgeValues[i] !== null) {
-          edges.push({ from, to: handle, data: edgeValues[i] });
-        }
-      }
-    }
-  }
-
-  return { data: { handle, edges: edges.slice(0, limit) } };
+  // Edges are not fully synced to FastData yet — return empty.
+  // WASM fallback will handle this until edge sync is added.
+  return { error: 'Edge data not available in FastData', status: 501 };
 }
 
 async function handleGetEndorsers(
@@ -250,91 +394,6 @@ async function handleGetEndorsers(
   const handle = handleOf(body);
   if (!handle) return { error: 'Handle is required', status: 400 };
 
-  const agent = (await kvGet(`agent/${handle}`)) as Agent | null;
-  if (!agent) return { error: 'Agent not found', status: 404 };
-
-  const endorsers: Record<string, Record<string, unknown[]>> = {};
-
-  // Collect endorsable (ns, value) pairs — filtered when tags/capabilities provided.
-  const filterTags = body.tags as string[] | undefined;
-  const filterCaps = body.capabilities as Record<string, unknown> | undefined;
-  const hasFilter = !!(
-    filterTags?.length ||
-    (filterCaps && Object.keys(filterCaps).length)
-  );
-
-  const pairs: [string, string][] = [];
-
-  if (hasFilter) {
-    const agentTags = new Set(agent.tags ?? []);
-    if (filterTags?.length) {
-      for (const tag of filterTags) {
-        if (agentTags.has(tag)) pairs.push(['tags', tag]);
-      }
-    }
-    if (filterCaps && typeof filterCaps === 'object') {
-      for (const [ns, vals] of Object.entries(filterCaps)) {
-        if (Array.isArray(vals)) {
-          for (const v of vals) {
-            if (typeof v === 'string') pairs.push([ns, v]);
-          }
-        }
-      }
-    }
-  } else {
-    for (const tag of agent.tags ?? []) {
-      pairs.push(['tags', tag]);
-    }
-    const caps = agent.capabilities as Record<string, unknown> | null;
-    if (caps && typeof caps === 'object') {
-      for (const [ns, vals] of Object.entries(caps)) {
-        if (Array.isArray(vals)) {
-          for (const v of vals) {
-            if (typeof v === 'string') pairs.push([ns, v]);
-          }
-        }
-      }
-    }
-  }
-
-  // Phase 1: fetch all endorser lists in parallel.
-  const endorserLists = await Promise.all(
-    pairs.map(([ns, val]) =>
-      kvGet(`endorsers/${handle}/${ns}/${val}`).then((r) => ({
-        ns,
-        val,
-        list: (r as string[] | null) ?? [],
-      })),
-    ),
-  );
-
-  // Phase 2: batch-fetch all unique endorser agent records.
-  const uniqueHandles = new Set<string>();
-  for (const { list } of endorserLists) {
-    for (const h of list) uniqueHandles.add(h);
-  }
-  const handleArr = Array.from(uniqueHandles);
-  const agentMap = new Map<string, Agent>();
-  if (handleArr.length > 0) {
-    const records = await kvMulti(handleArr.map((h) => `agent/${h}`));
-    for (let i = 0; i < handleArr.length; i++) {
-      if (records[i]) agentMap.set(handleArr[i], records[i] as Agent);
-    }
-  }
-
-  // Phase 3: assemble response.
-  for (const { ns, val, list } of endorserLists) {
-    if (list.length === 0) continue;
-    if (!endorsers[ns]) endorsers[ns] = {};
-    endorsers[ns][val] = list.map((h) => {
-      const a = agentMap.get(h);
-      return {
-        handle: h,
-        description: a?.description,
-        avatar_url: a?.avatar_url,
-      };
-    });
-  }
-
-  return { data: { handle, endorsers } };
+  // Endorser lists are not synced to FastData yet — return error for WASM fallback.
+  return { error: 'Endorser data not available in FastData', status: 501 };
 }

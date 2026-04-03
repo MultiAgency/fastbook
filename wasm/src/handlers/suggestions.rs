@@ -112,7 +112,9 @@ pub fn handle_get_suggested(req: &Request) -> Response {
     let mut results: Vec<serde_json::Value> = Vec::with_capacity(limit);
     for s in ranked.into_iter().take(limit) {
         let v = visits.get(&s.agent.handle).copied().unwrap_or(0);
-        let mut e = format_suggestion(&s.agent, suggestion_reason(v, &s.shared_tags));
+        let (reason, reason_data) = suggestion_reason(v, &s.shared_tags);
+        let mut e = format_suggestion(&s.agent, reason);
+        e["reason_data"] = reason_data;
         e["is_following"] = serde_json::json!(false);
         results.push(e);
     }

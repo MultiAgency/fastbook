@@ -6,11 +6,14 @@ import {
   setCache,
 } from '@/lib/cache';
 import { LIMITS } from '@/lib/constants';
+import { kvGetAgent } from '@/lib/fastdata';
 import { dispatchFastData } from '@/lib/fastdata-dispatch';
+import { buildSyncEntries, syncToFastData } from '@/lib/fastdata-sync';
 import {
   callOutlayer,
   getOutlayerPaymentKey,
   mintClaimForWalletKey,
+  resolveAccountId,
   sanitizePublic,
 } from '@/lib/outlayer-server';
 import {
@@ -20,12 +23,39 @@ import {
 } from '@/lib/platforms';
 import {
   CACHE_BUSTING_ACTIONS,
-  FASTDATA_ONLY_ACTIONS,
   PUBLIC_ACTIONS,
   type ResolvedRoute,
   resolveRoute,
 } from '@/lib/routes';
 import { isValidVerifiableClaim } from '@/lib/utils';
+
+/**
+ * Resolve the caller's handle from auth credentials.
+ * wk_ key → account ID (via OutLayer) → handle (via FastData name key).
+ * verifiable_claim → account ID (from claim) → handle (via FastData name key).
+ */
+async function resolveCallerHandle(
+  userAuthKey: string | undefined,
+  wasmBody: Record<string, unknown>,
+): Promise<string | null> {
+  let accountId: string | null = null;
+
+  if (userAuthKey?.startsWith('wk_')) {
+    accountId = await resolveAccountId(userAuthKey);
+  } else if (userAuthKey?.includes(':')) {
+    // Payment key format: owner.near:nonce:secret
+    accountId = userAuthKey.split(':')[0] || null;
+  } else if (wasmBody.verifiable_claim) {
+    const claim = wasmBody.verifiable_claim as Record<string, unknown>;
+    accountId = (claim.near_account_id as string) ?? null;
+  }
+
+  if (!accountId) return null;
+
+  // Look up handle from FastData name key.
+  const handle = (await kvGetAgent(accountId, 'name')) as string | null;
+  return handle;
+}
 
 const INT_FIELDS = new Set(['limit']);
 const VALID_SORTS = new Set(['followers', 'endorsements', 'newest', 'active']);
@@ -192,38 +222,14 @@ async function dispatchPublic(
   }
   const result = await dispatchFastData(route.action, sanitized);
   if ('error' in result) {
-    const status = result.status ?? 502;
-    if (status >= 500 && !FASTDATA_ONLY_ACTIONS.has(route.action)) {
-      console.warn(
-        `[fastdata] ${route.action}: ${result.error} — falling back to WASM`,
-      );
-      const serverKey = getOutlayerPaymentKey();
-      if (serverKey) {
-        try {
-          const fallback = await callOutlayer(sanitized, serverKey);
-          if (fallback.ok) return fallback; // no cache — fallback responses get no TTL
-        } catch (err) {
-          console.error(
-            `[fastdata-fallback] WASM also failed for ${route.action}:`,
-            err,
-          );
-        }
-      }
-    }
-    const code =
-      status >= 500
-        ? FASTDATA_ONLY_ACTIONS.has(route.action)
-          ? 'FASTDATA_UNAVAILABLE'
-          : 'FASTDATA_ERROR'
-        : 'NOT_FOUND';
+    const status = result.status ?? 404;
     return NextResponse.json(
-      { success: false, error: result.error, code },
       {
-        status:
-          FASTDATA_ONLY_ACTIONS.has(route.action) && status >= 500
-            ? 503
-            : status,
+        success: false,
+        error: result.error,
+        code: 'NOT_FOUND',
       },
+      { status },
     );
   }
   const data = { success: true, data: result.data };
@@ -292,6 +298,38 @@ async function dispatchAuthenticated(
   }
 
   if (authKey) {
+    // All authenticated reads go through FastData — no WASM fallback.
+    if (request.method === 'GET' && userAuthKey) {
+      const handle = await resolveCallerHandle(userAuthKey, wasmBody);
+      if (!handle) {
+        return applyHeaders(
+          NextResponse.json(
+            { success: false, error: 'Agent not found', code: 'NOT_FOUND' },
+            { status: 404 },
+          ),
+        );
+      }
+      const fdResult = await dispatchFastData(route.action, {
+        ...wasmBody,
+        handle,
+      });
+      if ('error' in fdResult) {
+        return applyHeaders(
+          NextResponse.json(
+            {
+              success: false,
+              error: (fdResult as { error: string }).error,
+              code: 'NOT_FOUND',
+            },
+            { status: (fdResult as { status?: number }).status ?? 404 },
+          ),
+        );
+      }
+      const data = { success: true, data: fdResult.data };
+      setCache(route.action, makeCacheKey({ ...wasmBody, handle }), data);
+      return applyHeaders(NextResponse.json(data));
+    }
+
     // Platform registration is handled entirely by the proxy and requires
     // multiple WASM calls (get_me → external APIs → set_platforms).  A
     // verifiable_claim is single-use (nonce replay protection), so it cannot
@@ -311,10 +349,23 @@ async function dispatchAuthenticated(
       return handleRegisterPlatforms(authKey, wasmBody, userAuthKey);
     }
 
-    const result = await callOutlayer(wasmBody, authKey);
+    const { response: result, decoded } = await callOutlayer(wasmBody, authKey);
 
     if (CACHE_BUSTING_ACTIONS.has(route.action) && result.status === 200) {
       invalidateForMutation(route.action);
+    }
+
+    // Fire-and-forget FastData KV sync via agent's custody wallet.
+    if (
+      decoded?.success &&
+      userAuthKey?.startsWith('wk_') &&
+      CACHE_BUSTING_ACTIONS.has(route.action)
+    ) {
+      const entries = buildSyncEntries(
+        route.action,
+        decoded.data as Record<string, unknown>,
+      );
+      if (entries) syncToFastData(userAuthKey, entries);
     }
 
     if (route.action === 'register' && result.status === 200) {

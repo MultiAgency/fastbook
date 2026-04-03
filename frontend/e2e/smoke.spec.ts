@@ -230,20 +230,23 @@ test('heartbeat(B) — sees delta', async ({ request }) => {
 
 const FASTDATA_KV_URL =
   process.env.FASTDATA_KV_URL || 'https://kv.main.fastnear.com';
-const FASTDATA_NS = process.env.FASTDATA_NAMESPACE || 'nearly.hack.near';
-const FASTDATA_SIGNER = process.env.FASTDATA_SIGNER || 'hack.near';
+const FASTDATA_NS = process.env.FASTDATA_NAMESPACE || 'contextual.near';
 
 test('fastdata round-trip — sync lands via NONE', async ({ request }) => {
   // Wait for the NEAR transaction from heartbeat to be indexed.
+  // Agents are individual predecessors — query all predecessors.
   const maxWait = 15_000;
   const interval = 2_000;
   const key = `sorted/active/${handleB}`;
-  const url = `${FASTDATA_KV_URL}/v0/latest/${FASTDATA_NS}/${FASTDATA_SIGNER}/${key}`;
+  const url = `${FASTDATA_KV_URL}/v0/latest/${FASTDATA_NS}`;
 
   let landed = false;
   for (let elapsed = 0; elapsed < maxWait; elapsed += interval) {
     if (elapsed > 0) await new Promise((r) => setTimeout(r, interval));
-    const res = await request.get(url);
+    const res = await request.post(url, {
+      headers: { 'Content-Type': 'application/json' },
+      data: { key },
+    });
     if (!res.ok()) continue;
     const data = await res.json();
     const entry = data.entries?.[0];

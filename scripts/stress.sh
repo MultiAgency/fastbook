@@ -6,8 +6,9 @@
 # All test agents are cleaned up at the end regardless of outcome.
 #
 # Usage:
-#   ./scripts/stress.sh              # Run all dimensions
-#   ./scripts/stress.sh --skip-cleanup  # Leave test agents (for debugging)
+#   ./scripts/stress.sh                  # Run all dimensions
+#   ./scripts/stress.sh --stop-on-fail   # Stop at first failure, generate report
+#   ./scripts/stress.sh --skip-cleanup   # Leave test agents (for debugging)
 
 set -euo pipefail
 
@@ -18,12 +19,13 @@ set -euo pipefail
 NEARLY_API="https://nearly.social/api/v1"
 OUTLAYER_API="https://api.outlayer.fastnear.com"
 FASTDATA_KV_URL="${FASTDATA_KV_URL:-https://kv.main.fastnear.com}"
-FASTDATA_NS="${FASTDATA_NS:-nearly.hack.near}"
-FASTDATA_SIGNER="${FASTDATA_SIGNER:-hack.near}"
+FASTDATA_NS="${FASTDATA_NS:-contextual.near}"
+# Agents are individual predecessors — no single signer for reads.
 CREDS_FILE="$HOME/.config/nearly/stress-credentials.json"
 REPORT_FILE="$(cd "$(dirname "$0")" && pwd)/stress-report.txt"
 TMP_DIR=$(mktemp -d)
 SKIP_CLEANUP=false
+STOP_ON_FAIL=false
 ADMIN_PK="${OUTLAYER_PAYMENT_KEY:-}"
 
 # Unique prefix per run to avoid handle collisions with orphaned agents
@@ -56,6 +58,7 @@ SCRIPT_START=$(date +%s)
 for arg in "$@"; do
   case "$arg" in
     --skip-cleanup) SKIP_CLEANUP=true ;;
+    --stop-on-fail) STOP_ON_FAIL=true ;;
     *) echo "Unknown arg: $arg"; exit 1 ;;
   esac
 done
@@ -75,6 +78,12 @@ check() {
   else
     printf '\033[31m[FAIL]\033[0m %s\n' "$desc"
     FAIL_COUNT=$((FAIL_COUNT + 1))
+    if $STOP_ON_FAIL; then
+      log "STOPPING: --stop-on-fail is set (failed: $desc)"
+      generate_report
+      # cleanup + rm runs via EXIT trap
+      exit 1
+    fi
   fi
 }
 
@@ -90,6 +99,7 @@ require_registered() {
   done
   if [[ ${#REGISTERED[@]} -lt $min ]]; then
     log "  SKIP: fewer than $min registered agents"
+    finding "FAILURE" "${dim_name}: need at least $min agents (have ${#REGISTERED[@]}) — cascade from earlier failure"
     check "false" "${dim_name}: need at least $min agents (have ${#REGISTERED[@]})"
     echo "SKIPPED: insufficient agents" > "$TMP_DIR/dims/${dim_name}.txt"
     return 1
@@ -459,40 +469,46 @@ dim1_registration() {
     else
       fail_count=$((fail_count + 1))
       log "  $handle: FAILED"
+      if $STOP_ON_FAIL; then break; fi
     fi
     sleep 2
   done
 
   batch1_end=$(date +%s)
 
-  # Wait for rate window to expire before batch 2
-  log "  Waiting for register rate window (5/60s per IP)..."
-  local wait_until=$((batch1_end + 55))
-  while [[ $(date +%s) -lt $wait_until ]]; do
-    local remaining=$((wait_until - $(date +%s)))
-    printf "\r  [%ds remaining]  " "$remaining"
-    sleep 5
-  done
-  echo ""
+  # Wait for rate window to expire before batch 2 (skip if stopping early)
+  if ! ($STOP_ON_FAIL && [[ $fail_count -gt 0 ]]); then
+    log "  Waiting for register rate window (5/60s per IP)..."
+    local wait_until=$((batch1_end + 55))
+    while [[ $(date +%s) -lt $wait_until ]]; do
+      local remaining=$((wait_until - $(date +%s)))
+      printf "\r  [%ds remaining]  " "$remaining"
+      sleep 5
+    done
+    echo ""
+  fi
 
   # Batch 2: agents 5-9
-  log "  Batch 2: registering ${AGENTS[5]} through ${AGENTS[9]}..."
-  for i in 5 6 7 8 9; do
-    local handle="${AGENTS[$i]}"
-    local t0
-    t0=$(now_ns)
-    if st_register "$handle"; then
-      local ms
-      ms=$(elapsed_ms "$t0")
-      record_latency "dim1" "$ms"
-      log "  $handle: registered (${ms}ms)"
-      success_count=$((success_count + 1))
-    else
-      fail_count=$((fail_count + 1))
-      log "  $handle: FAILED"
-    fi
-    sleep 2
-  done
+  if ! ($STOP_ON_FAIL && [[ $fail_count -gt 0 ]]); then
+    log "  Batch 2: registering ${AGENTS[5]} through ${AGENTS[9]}..."
+    for i in 5 6 7 8 9; do
+      local handle="${AGENTS[$i]}"
+      local t0
+      t0=$(now_ns)
+      if st_register "$handle"; then
+        local ms
+        ms=$(elapsed_ms "$t0")
+        record_latency "dim1" "$ms"
+        log "  $handle: registered (${ms}ms)"
+        success_count=$((success_count + 1))
+      else
+        fail_count=$((fail_count + 1))
+        log "  $handle: FAILED"
+        if $STOP_ON_FAIL; then break; fi
+      fi
+      sleep 2
+    done
+  fi
 
   # Verify all agents exist
   log "  Verifying registrations..."
@@ -596,6 +612,7 @@ dim2_social_density() {
     else
       failed_follows=$((failed_follows + expected_per_agent))
       finding "FAILURE" "Batch follow from $from returned unexpected: $batch_action"
+      if $STOP_ON_FAIL; then break; fi
     fi
     sleep 2
   done
@@ -793,6 +810,7 @@ dim4_endorsements() {
     else
       endorse_failed=$((endorse_failed + ${#registered[@]} - 1))
       finding "FAILURE" "Batch endorse from $from returned: $batch_action"
+      if $STOP_ON_FAIL; then break; fi
     fi
     sleep 2
   done
@@ -1225,18 +1243,19 @@ dim9_fastdata_reads() {
   local registered=("${REGISTERED[@]}")
   local reg_count=${#registered[@]}
 
-  local kv_base="${FASTDATA_KV_URL}/v0/latest/${FASTDATA_NS}/${FASTDATA_SIGNER}"
-  local kv_multi="${FASTDATA_KV_URL}/v0/multi"
+  local kv_base="${FASTDATA_KV_URL}/v0/latest/${FASTDATA_NS}"
 
   # --- 9a: Verify registered agents are readable from FastData KV ---
+  # Each agent is a distinct predecessor; query all predecessors.
   log "  9a: Checking agent records in FastData KV..."
   local found=0 missing=0
   for h in "${registered[@]}"; do
     local resp
-    resp=$(curl -s --max-time 10 "${kv_base}/agent/${h}")
+    resp=$(curl -s --max-time 10 -X POST -H "Content-Type: application/json" \
+      -d "{\"key\":\"handle/${h}\"}" "$kv_base")
     local has_entry
-    has_entry=$(echo "$resp" | jq -r '.entries[0].value.handle // empty' 2>/dev/null)
-    if [[ "$has_entry" == "$h" ]]; then
+    has_entry=$(echo "$resp" | jq -r '.entries[0].value // empty' 2>/dev/null)
+    if [[ -n "$has_entry" && "$has_entry" != "null" ]]; then
       found=$((found + 1))
     else
       missing=$((missing + 1))
@@ -1246,26 +1265,27 @@ dim9_fastdata_reads() {
   check "$( (( found > 0 )) && echo true || echo false)" \
     "dim9: at least 1 agent readable from FastData KV ($found/$reg_count found)"
 
-  # --- 9b: kvMulti batch read ---
-  log "  9b: Batch multi-key read..."
-  local multi_keys
-  multi_keys=$(printf '%s\n' "${registered[@]}" | head -20 | \
-    jq -R "\"${FASTDATA_NS}/${FASTDATA_SIGNER}/agent/\" + ." | jq -s '{keys: .}')
+  # --- 9b: Batch read via parallel kvGet (agents are individual predecessors) ---
+  log "  9b: Batch agent read..."
   local multi_start
   multi_start=$(now_ns)
-  local multi_resp
-  multi_resp=$(curl -s --max-time 15 -X POST -H "Content-Type: application/json" \
-    -d "$multi_keys" "$kv_multi")
+  local multi_count=0
+  local expected_multi
+  expected_multi=$(printf '%s\n' "${registered[@]}" | head -20 | wc -l | tr -d ' ')
+  for h in $(printf '%s\n' "${registered[@]}" | head -20); do
+    local resp
+    resp=$(curl -s --max-time 10 -X POST -H "Content-Type: application/json" \
+      -d "{\"key\":\"handle/${h}\"}" "$kv_base")
+    local has_entry
+    has_entry=$(echo "$resp" | jq -r '.entries[0].value.handle // empty' 2>/dev/null)
+    [[ "$has_entry" == "$h" ]] && multi_count=$((multi_count + 1))
+  done
   local multi_ms
   multi_ms=$(elapsed_ms "$multi_start")
   record_latency "dim9_multi" "$multi_ms"
 
-  local multi_count
-  multi_count=$(echo "$multi_resp" | jq '[.entries[]? | select(. != null)] | length' 2>/dev/null || echo 0)
-  local expected_multi
-  expected_multi=$(printf '%s\n' "${registered[@]}" | head -20 | wc -l | tr -d ' ')
   check "$( (( multi_count >= expected_multi / 2 )) && echo true || echo false)" \
-    "dim9: kvMulti returned $multi_count/$expected_multi entries (${multi_ms}ms)"
+    "dim9: batch read found $multi_count/$expected_multi entries (${multi_ms}ms)"
 
   # --- 9c: Eventual consistency after follow mutations ---
   # Depends on dim2 having created a follow edge between the first two agents.
@@ -1407,21 +1427,6 @@ generate_report() {
     done
     echo ""
 
-    # Recommendations
-    echo "RECOMMENDATIONS"
-    echo "---------------"
-    echo "  (Based on findings above — see individual findings for details)"
-    if [[ -f "$TMP_DIR/findings/all.txt" ]] && grep -q "INVARIANT" "$TMP_DIR/findings/all.txt" 2>/dev/null; then
-      echo "  - Investigate invariant violations — counts may drift from reality"
-    fi
-    if [[ -f "$TMP_DIR/findings/all.txt" ]] && grep -q "timeout\|502" "$TMP_DIR/findings/all.txt" 2>/dev/null; then
-      echo "  - Concurrent WASM operations cause upstream timeouts — agents should serialize mutations"
-      echo "  - Agents should verify state (GET) after any timeout before retrying"
-    fi
-    echo "  - Registration must be serialized (5 concurrent registrations = 5 upstream timeouts)"
-    echo "  - Deregister rate limit is per-account, not global — cleanup parallelizes well"
-    echo ""
-
     # Summary
     echo "SUMMARY"
     echo "-------"
@@ -1432,6 +1437,87 @@ generate_report() {
       echo "EXIT: FAIL ($FAIL_COUNT failures)"
     else
       echo "EXIT: PASS (all $PASS_COUNT tests passed)"
+    fi
+
+    # Investigation prompts for Claude Code
+    if [[ $FAIL_COUNT -gt 0 || -f "$TMP_DIR/findings/all.txt" ]]; then
+      echo ""
+      echo "═══════════════════════════════════════════"
+      echo "  INVESTIGATION PROMPTS (for Claude Code)"
+      echo "═══════════════════════════════════════════"
+      echo ""
+      echo "Run: cat scripts/stress-report.txt"
+      echo "Then paste the relevant prompt below into Claude Code."
+      echo ""
+
+      # Generate specific prompts based on findings
+      local prompt_num=0
+
+      # Registration failures
+      if [[ -f "$TMP_DIR/findings/all.txt" ]] && grep -q "registration\|Registration\|ALREADY_REGISTERED" "$TMP_DIR/findings/all.txt" 2>/dev/null; then
+        prompt_num=$((prompt_num + 1))
+        echo "--- PROMPT $prompt_num: Registration Issues ---"
+        echo "Read scripts/stress-report.txt. Registration failures were detected."
+        echo "Check: (1) Is the registration handler returning errors? curl -sv -X POST https://nearly.social/api/v1/agents/register with a test payload."
+        echo "(2) Check wasm/src/handlers/register.rs — is sync.flush() still removed?"
+        echo "(3) Check if OutLayer WASM is timing out: frontend/src/lib/outlayer-server.ts timeout values."
+        echo ""
+      fi
+
+      # Timeout / 502 errors
+      if [[ -f "$TMP_DIR/findings/all.txt" ]] && grep -qi "timeout\|502\|504\|524\|unreachable" "$TMP_DIR/findings/all.txt" 2>/dev/null; then
+        prompt_num=$((prompt_num + 1))
+        echo "--- PROMPT $prompt_num: Timeout / Upstream Errors ---"
+        echo "Read scripts/stress-report.txt. Timeouts or upstream errors were detected."
+        echo "Check: (1) Are WASM mutations timing out? Test: curl -s --max-time 15 -X POST https://nearly.social/api/v1/agents/me/heartbeat -H 'Authorization: Bearer \$KEY'"
+        echo "(2) Is the NEAR RPC reachable from OutLayer? If heartbeat times out, sync.flush() is blocking."
+        echo "(3) Check proxy timeout in frontend/src/lib/outlayer-server.ts (should be 30_000)."
+        echo "(4) Check WASM execution limit (should be max_execution_seconds: 30)."
+        echo ""
+      fi
+
+      # Count drift / invariant violations
+      if [[ -f "$TMP_DIR/findings/all.txt" ]] && grep -q "INVARIANT" "$TMP_DIR/findings/all.txt" 2>/dev/null; then
+        prompt_num=$((prompt_num + 1))
+        echo "--- PROMPT $prompt_num: Count Drift / Invariant Violations ---"
+        echo "Read scripts/stress-report.txt. Follower/following/endorsement counts don't match expected values."
+        echo "Check: (1) Are atomic counters (user_increment) in wasm/src/handlers/follow.rs correct?"
+        echo "(2) Run reconcile_all to repair counts, then re-check."
+        echo "(3) Check if concurrent batch_follow operations cause counter drift."
+        echo ""
+      fi
+
+      # FastData KV issues
+      if [[ -f "$TMP_DIR/findings/all.txt" ]] && grep -qi "FastData\|fastdata\|KV" "$TMP_DIR/findings/all.txt" 2>/dev/null; then
+        prompt_num=$((prompt_num + 1))
+        echo "--- PROMPT $prompt_num: FastData KV Read Issues ---"
+        echo "Read scripts/stress-report.txt. FastData KV reads returned missing or stale data."
+        echo "Check: (1) Has heartbeat sync landed? curl -s -X POST 'https://kv.main.fastnear.com/v0/latest/contextual.near' -H 'Content-Type: application/json' -d '{\"key\":\"meta/agent_count\"}'"
+        echo "(2) Is the NEAR RPC reachable? If not, sync.flush() in heartbeat can't populate FastData."
+        echo "(3) Is NONE mode working? Check if any data has ever landed in FastData after the DB reset."
+        echo "(4) Run reconcile_all to force a full FastData rebuild."
+        echo ""
+      fi
+
+      # Rate limiting issues
+      if [[ -f "$TMP_DIR/findings/all.txt" ]] && grep -qi "RATE_LIMITED\|rate.limit" "$TMP_DIR/findings/all.txt" 2>/dev/null; then
+        prompt_num=$((prompt_num + 1))
+        echo "--- PROMPT $prompt_num: Rate Limiting Issues ---"
+        echo "Read scripts/stress-report.txt. Unexpected rate limiting was detected."
+        echo "Check: (1) Rate limit constants in wasm/src/types.rs — are windows too tight for stress testing?"
+        echo "(2) Is the proxy-level rate limit (120/min/IP) being hit? Check frontend/src/app/api/v1/[...path]/route.ts."
+        echo "(3) Rate limits reset on cold start — was the server recently redeployed?"
+        echo ""
+      fi
+
+      # Generic: no specific findings matched
+      if [[ $prompt_num -eq 0 ]]; then
+        echo "--- PROMPT: General Investigation ---"
+        echo "Read scripts/stress-report.txt. $FAIL_COUNT test(s) failed."
+        echo "Check the FAILURES and INVARIANT VIOLATIONS sections above for specific details."
+        echo "Start by reproducing the first failure manually with curl."
+        echo ""
+      fi
     fi
   } | tee "$REPORT_FILE"
 }

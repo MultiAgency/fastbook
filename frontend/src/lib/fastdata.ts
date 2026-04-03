@@ -1,8 +1,14 @@
 /**
  * FastData KV client for reading public state from kv.main.fastnear.com.
  *
- * Write path: OutLayer WASM → __fastdata_kv → FastNear indexes it.
- * Read path: this module → GET/POST kv.main.fastnear.com → free reads.
+ * Per-predecessor model: each agent writes their own keys under their NEAR
+ * account (predecessor_id). The namespace (current_account_id) is shared.
+ *
+ * Read patterns:
+ *   Known agent:  GET  /v0/latest/{NS}/{accountId}/{key}          → O(1)
+ *   All agents:   POST /v0/latest/{NS}  {"key": "sorted/..."}    → one entry per agent
+ *   Agent's keys: POST /v0/latest/{NS}/{accountId}  {"key_prefix":"graph/follow/"}
+ *   Multi-agent:  POST /v0/multi  ["NS/acct1/profile", "NS/acct2/profile"]
  */
 
 import {
@@ -10,7 +16,6 @@ import {
   FASTDATA_PAGE_SIZE,
   FASTDATA_KV_URL as FASTDATA_URL,
   FASTDATA_NAMESPACE as NAMESPACE,
-  FASTDATA_SIGNER as SIGNER,
 } from './constants';
 import { fetchWithTimeout } from './fetch';
 
@@ -28,127 +33,186 @@ interface KvListResponse {
   page_token?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Single-agent reads (known predecessor — fast, O(1))
+// ---------------------------------------------------------------------------
+
 /**
- * Read a single key. Returns the parsed value, or null if not found / value is null.
- *
- * Null contract: missing key, JSON null value, and HTTP 404 all return null.
- * Callers should check `=== null` uniformly.
+ * Read a single key for a known agent. Direct GET — no scanning.
  */
-export async function kvGet(key: string): Promise<unknown | null> {
-  const url = `${FASTDATA_URL}/v0/latest/${NAMESPACE}/${SIGNER}/${key}`;
+export async function kvGetAgent(
+  accountId: string,
+  key: string,
+): Promise<unknown | null> {
+  const url = `${FASTDATA_URL}/v0/latest/${NAMESPACE}/${accountId}/${key}`;
   const res = await fetchWithTimeout(url, undefined, 10_000);
-  if (!res.ok) {
-    console.warn(
-      `[fastdata] kvGet ${res.status}: ${await res.text().catch(() => '')}`,
-    );
-    return null;
-  }
+  if (!res.ok) return null;
   const data = (await res.json()) as KvListResponse;
   const entry = data.entries?.[0];
   if (!entry || entry.value === null || entry.value === undefined) return null;
   return entry.value;
 }
 
-const PAGE_SIZE = FASTDATA_PAGE_SIZE;
-/** Safety cap: stop after this many pages to prevent runaway loops. */
-const MAX_PAGES = 50;
-
 /**
- * Prefix scan. Auto-paginates via `page_token` to return all matching entries.
- * Pass `limit` to fetch only that many entries (single page, no auto-pagination).
+ * Prefix scan for a known agent's keys.
+ * Example: kvListAgent("abc.near", "graph/follow/") → all of abc's follows.
  */
-export async function kvList(
+export async function kvListAgent(
+  accountId: string,
   prefix: string,
   limit?: number,
 ): Promise<KvEntry[]> {
-  if (limit !== undefined) {
-    const result = await kvPage(prefix, limit);
-    return result.entries;
-  }
+  const url = `${FASTDATA_URL}/v0/latest/${NAMESPACE}/${accountId}`;
+  const body: Record<string, unknown> = { key_prefix: prefix };
+  if (limit !== undefined) body.limit = limit;
+
   const all: KvEntry[] = [];
   let pageToken: string | undefined;
   for (let i = 0; i < MAX_PAGES; i++) {
-    const result = await kvPage(prefix, PAGE_SIZE, pageToken);
-    all.push(...result.entries);
-    if (!result.pageToken) break;
-    pageToken = result.pageToken;
+    const pageBody = pageToken ? { ...body, page_token: pageToken } : body;
+    const res = await fetchWithTimeout(
+      url,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(pageBody),
+      },
+      10_000,
+    );
+    if (!res.ok) break;
+    const data = (await res.json()) as KvListResponse;
+    all.push(...(data.entries ?? []));
+    if (!data.page_token || (limit !== undefined && all.length >= limit)) break;
+    pageToken = data.page_token;
+  }
+  return limit !== undefined ? all.slice(0, limit) : all;
+}
+
+// ---------------------------------------------------------------------------
+// All-agent reads (across all predecessors)
+// ---------------------------------------------------------------------------
+
+/**
+ * Read a key across all agents. Returns one entry per predecessor who wrote it.
+ * Example: kvGetAll("sorted/followers") → all agents' follower scores.
+ * Example: kvGetAll("graph/follow/bob") → all agents who follow bob.
+ */
+export async function kvGetAll(key: string): Promise<KvEntry[]> {
+  const all: KvEntry[] = [];
+  let pageToken: string | undefined;
+  for (let i = 0; i < MAX_PAGES; i++) {
+    const body: Record<string, unknown> = { key, limit: PAGE_SIZE };
+    if (pageToken) body.page_token = pageToken;
+    const res = await fetchWithTimeout(
+      `${FASTDATA_URL}/v0/latest/${NAMESPACE}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+      10_000,
+    );
+    if (!res.ok) break;
+    const data = (await res.json()) as KvListResponse;
+    all.push(...(data.entries ?? []));
+    if (!data.page_token) break;
+    pageToken = data.page_token;
   }
   return all;
 }
 
-/** Single-page fetch (internal). */
-async function kvPage(
+/**
+ * Prefix scan across all agents.
+ * Example: kvListAll("sorted/") → all sorted index entries from all agents.
+ */
+export async function kvListAll(
   prefix: string,
-  limit: number,
-  pageToken?: string,
-): Promise<{ entries: KvEntry[]; pageToken?: string }> {
-  const url = `${FASTDATA_URL}/v0/latest/${NAMESPACE}/${SIGNER}`;
-  const body: Record<string, unknown> = { key_prefix: prefix, limit };
-  if (pageToken) body.page_token = pageToken;
-
-  const res = await fetchWithTimeout(
-    url,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    },
-    10_000,
-  );
-  if (!res.ok) {
-    console.warn(
-      `[fastdata] kvList ${res.status}: ${await res.text().catch(() => '')}`,
+  limit?: number,
+): Promise<KvEntry[]> {
+  const all: KvEntry[] = [];
+  let pageToken: string | undefined;
+  const pageLimit = limit ?? PAGE_SIZE;
+  for (let i = 0; i < MAX_PAGES; i++) {
+    const body: Record<string, unknown> = {
+      key_prefix: prefix,
+      limit: pageLimit,
+    };
+    if (pageToken) body.page_token = pageToken;
+    const res = await fetchWithTimeout(
+      `${FASTDATA_URL}/v0/latest/${NAMESPACE}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+      10_000,
     );
-    return { entries: [] };
+    if (!res.ok) break;
+    const data = (await res.json()) as KvListResponse;
+    all.push(...(data.entries ?? []));
+    if (!data.page_token || (limit !== undefined && all.length >= limit)) break;
+    pageToken = data.page_token;
   }
-  const data = (await res.json()) as KvListResponse;
-  return {
-    entries: data.entries ?? [],
-    pageToken: data.page_token,
-  };
+  return limit !== undefined ? all.slice(0, limit) : all;
 }
 
-/**
- * Batch lookup for multiple keys (max 100). Returns values aligned to input keys.
- * Missing entries return null.
- */
+// ---------------------------------------------------------------------------
+// Multi-agent batch reads (/v0/multi — known predecessors)
+// ---------------------------------------------------------------------------
+
 const MULTI_BATCH_SIZE = FASTDATA_MULTI_BATCH_SIZE;
 
-export async function kvMulti(keys: string[]): Promise<(unknown | null)[]> {
-  if (keys.length === 0) return [];
-  if (keys.length <= MULTI_BATCH_SIZE) return kvMultiBatch(keys);
+/**
+ * Batch lookup for multiple agent keys. Returns values aligned to input.
+ * Each lookup specifies the agent's accountId and key.
+ */
+export async function kvMultiAgent(
+  lookups: { accountId: string; key: string }[],
+): Promise<(unknown | null)[]> {
+  if (lookups.length === 0) return [];
 
-  // Chunk into batches of 100 and merge results in order.
-  const results: (unknown | null)[] = [];
-  for (let i = 0; i < keys.length; i += MULTI_BATCH_SIZE) {
-    const chunk = keys.slice(i, i + MULTI_BATCH_SIZE);
-    const batch = await kvMultiBatch(chunk);
-    results.push(...batch);
+  const results: (unknown | null)[] = new Array(lookups.length).fill(null);
+  for (let i = 0; i < lookups.length; i += MULTI_BATCH_SIZE) {
+    const chunk = lookups.slice(i, i + MULTI_BATCH_SIZE);
+    const keys = chunk.map((l) => `${NAMESPACE}/${l.accountId}/${l.key}`);
+    const res = await fetchWithTimeout(
+      `${FASTDATA_URL}/v0/multi`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keys }),
+      },
+      10_000,
+    );
+    if (!res.ok) continue;
+    const data = (await res.json()) as { entries: (KvEntry | null)[] };
+    for (let j = 0; j < (data.entries ?? []).length; j++) {
+      const e = data.entries[j];
+      results[i + j] =
+        e && e.value !== null && e.value !== undefined ? e.value : null;
+    }
   }
   return results;
 }
 
-async function kvMultiBatch(keys: string[]): Promise<(unknown | null)[]> {
-  const url = `${FASTDATA_URL}/v0/multi`;
-  const fullKeys = keys.map((k) => `${NAMESPACE}/${SIGNER}/${k}`);
-  const res = await fetchWithTimeout(
-    url,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ keys: fullKeys }),
-    },
-    10_000,
-  );
-  if (!res.ok) {
-    console.warn(
-      `[fastdata] kvMulti ${res.status}: ${await res.text().catch(() => '')}`,
-    );
-    return keys.map(() => null);
-  }
-  const data = (await res.json()) as { entries: (KvEntry | null)[] };
-  return (data.entries ?? []).map((e) => {
-    if (!e || e.value === null || e.value === undefined) return null;
-    return e.value;
-  });
+// ---------------------------------------------------------------------------
+// Handle resolution
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve a handle to the agent's account ID via the handle/ index.
+ * Returns the predecessor_id (NEAR account) or null if not found.
+ */
+export async function resolveHandle(handle: string): Promise<string | null> {
+  const entries = await kvGetAll(`handle/${handle}`);
+  if (entries.length === 0) return null;
+  // The predecessor who wrote this key is the agent's account.
+  return entries[0].predecessor_id;
 }
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const PAGE_SIZE = FASTDATA_PAGE_SIZE;
+const MAX_PAGES = 50;

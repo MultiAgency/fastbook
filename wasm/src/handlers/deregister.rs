@@ -197,57 +197,9 @@ fn do_deregister(handle: &str, agent: &AgentRecord, account_for_aux: &str) -> Wa
     // Phase 3: Remove endorsements given by and received by this agent.
     remove_endorsements(handle, agent, &mut warnings);
 
-    // Sync to FastData KV BEFORE Phase 4 — delete_aux_data deletes the
-    // follower/following keys we need to read here.
-    {
-        let count = handles_from_prefix(keys::pub_agent_reg_prefix()).len() as u64;
-        let tag_counts: std::collections::HashMap<String, u32> =
-            get_json(keys::pub_tag_counts()).unwrap_or_default();
-        let mut sync = crate::fastdata::SyncBatch::new();
-        sync.null_agent(handle);
-        sync.tag_removals(&agent.tags, &[], handle);
-        sync.global_counts(count, &tag_counts);
-        for f in &handles_from_prefix(&keys::pub_follower_prefix(handle)) {
-            sync.push(
-                crate::fastdata::follower_key(handle, f),
-                serde_json::Value::Null,
-            );
-            sync.push(
-                crate::fastdata::edge_key(f, handle),
-                serde_json::Value::Null,
-            );
-            // Null the peer-side key so get_following for f doesn't include the dead handle.
-            sync.push(
-                crate::fastdata::following_key(f, handle),
-                serde_json::Value::Null,
-            );
-        }
-        for f in &handles_from_prefix(&keys::pub_following_prefix(handle)) {
-            sync.push(
-                crate::fastdata::following_key(handle, f),
-                serde_json::Value::Null,
-            );
-            sync.push(
-                crate::fastdata::edge_key(handle, f),
-                serde_json::Value::Null,
-            );
-            // Null the peer-side key so get_followers for f doesn't include the dead handle.
-            sync.push(
-                crate::fastdata::follower_key(f, handle),
-                serde_json::Value::Null,
-            );
-        }
-        let endorsable =
-            super::endorse::collect_endorsable(Some(&agent.tags), Some(&agent.capabilities));
-        let pairs: Vec<(&str, &str)> = endorsable
-            .iter()
-            .map(|(ns, val)| (ns.as_str(), val.as_str()))
-            .collect();
-        sync.null_endorsers(handle, &pairs);
-        if let Some(w) = sync.flush() {
-            warnings.push(w);
-        }
-    }
+    // FastData KV sync (null-writes for agent + sorted keys) is handled by
+    // the proxy layer (fastdata-sync.ts) using the agent's custody wallet.
+    // Edge/endorser cleanup in FastData KV is deferred to reconcile_all.
 
     // Phase 4: Delete auxiliary data and rate limit keys.
     delete_aux_data(handle, account_for_aux);
@@ -422,13 +374,6 @@ pub fn handle_migrate_account(req: &Request) -> Response {
     let _ = delete(&keys::near_account(&old_account));
 
     increment_rate_limit("migrate_account", &handle, MIGRATE_RATE_WINDOW_SECS);
-
-    // Sync to FastData KV: update agent record.
-    {
-        let mut sync = crate::fastdata::SyncBatch::new();
-        sync.agent(&agent);
-        sync.flush();
-    }
 
     ok_response(serde_json::json!({
         "action": "migrated",

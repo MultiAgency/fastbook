@@ -38,8 +38,8 @@ pub(crate) fn write_agent_record(agent: &AgentRecord) -> Result<(), AppError> {
 }
 
 /// Serialize an agent to a `serde_json::Value` and the corresponding byte
-/// representation.  Call once and reuse: pass bytes to OutLayer storage and
-/// the Value to FastData sync, avoiding double-serialization.
+/// representation.  Used by reconcile_all for bulk sync.
+#[allow(dead_code)]
 pub(crate) fn agent_to_value_and_bytes(
     agent: &AgentRecord,
 ) -> Result<(serde_json::Value, Vec<u8>), AppError> {

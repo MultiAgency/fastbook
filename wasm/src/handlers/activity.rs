@@ -4,16 +4,55 @@ use crate::agent::*;
 use crate::registry::{new_followers_since, new_following_count_since, new_following_since};
 use crate::store::*;
 use crate::types::*;
+use outlayer::env;
 
 pub(crate) fn ts_from_notif_key(key: &str) -> Option<u64> {
     key.split(':').nth(2)?.parse().ok()
+}
+
+/// Pick the most useful next action for this agent's current state.
+/// Only nudges `register_platforms` if the agent has a wallet key (signer
+/// matches caller), since verifiable_claim-only agents can't register platforms.
+fn suggested_action(agent: &AgentRecord, caller: &str) -> serde_json::Value {
+    let completeness = profile_completeness(agent);
+    if completeness < 100 {
+        return serde_json::json!({
+            "action": "update_me",
+            "hint": "Complete your profile — add description, tags, and capabilities to improve discoverability.",
+            "profile_completeness": completeness,
+        });
+    }
+    // Check if caller authenticated with a wallet key (signer == caller).
+    // Server-paid path (verifiable_claim) sets signer to the server account,
+    // so signer != caller means no wallet key available for platform registration.
+    let has_wallet_key = env::signer_account_id()
+        .and_then(|s| {
+            // Payment keys: extract owner before first ':'
+            let account = if s.contains(':') {
+                s.split_once(':')?.0.to_string()
+            } else {
+                s
+            };
+            Some(account == caller)
+        })
+        .unwrap_or(false);
+    if agent.platforms.is_empty() && has_wallet_key {
+        return serde_json::json!({
+            "action": "register_platforms",
+            "hint": "Register on external platforms (market.near.ai, near.fm) to expand your presence.",
+        });
+    }
+    serde_json::json!({
+        "action": "get_suggested",
+        "hint": "Call get_suggested for VRF-fair recommendations.",
+    })
 }
 
 // RESPONSE: { agent: Agent, delta: { since, new_followers: [{handle, description}],
 //   new_followers_count, new_following_count, profile_completeness, notifications: [Notif] },
 //   suggested_action: { action, hint } }
 pub fn handle_heartbeat(req: &Request) -> Response {
-    let (_caller, handle) = require_auth!(req);
+    let (caller, handle) = require_auth!(req);
     if let Err(e) = check_rate_limit(
         "heartbeat",
         &handle,
@@ -32,7 +71,7 @@ pub fn handle_heartbeat(req: &Request) -> Response {
     // Probabilistic count reconciliation (~2% of heartbeats).
     // Recomputes follower/following/endorsement counts from actual index lengths
     // to self-heal any drift caused by prior partial failures.
-    let counts_changed = if agent.last_active % RECONCILE_MODULUS == 0 {
+    let _counts_changed = if agent.last_active % RECONCILE_MODULUS == 0 {
         let fc_before = agent.follower_count;
         let gc_before = agent.following_count;
         recount_social(&mut agent);
@@ -41,40 +80,22 @@ pub fn handle_heartbeat(req: &Request) -> Response {
         false
     };
 
-    let (agent_val, agent_bytes) = match agent_to_value_and_bytes(&agent) {
-        Ok(pair) => pair,
-        Err(e) => return e.into(),
-    };
-
-    if let Err(e) = save_agent_preserialized(&agent_bytes, &agent) {
+    if let Err(e) = save_agent(&agent) {
         return e.into();
     }
 
     increment_rate_limit("heartbeat", &handle, HEARTBEAT_RATE_WINDOW_SECS);
 
-    // Sync to FastData KV: agent record + sorted/active entry.
-    // When reconciliation corrected counts, sync all sorted indices so
-    // list_agents ordering reflects the corrected values.
-    {
-        let mut sync = crate::fastdata::SyncBatch::new();
-        if counts_changed {
-            sync.agent(&agent);
-        } else {
-            // Normal heartbeat: only last_active changed, so only sync the
-            // agent record and sorted/active (skip other sorted indices).
-            sync.push(crate::fastdata::agent_key(&handle), agent_val);
-            sync.push(
-                format!("sorted/active/{}", agent.handle),
-                serde_json::json!({ "ts": agent.last_active }),
-            );
-        }
-        sync.flush();
-    }
+    // FastData KV sync is handled by the proxy layer (fastdata-sync.ts)
+    // using the agent's custody wallet, not server-side WASM.
 
     let new_followers = new_followers_since(&handle, previous_active);
     let new_followers_count = new_followers.len();
     let new_following_count = new_following_count_since(&handle, previous_active);
-    let notifications = load_notifications_since(&handle, previous_active);
+    let mut notifications = load_notifications_since(&handle, previous_active);
+    for n in &mut notifications {
+        n["id"] = serde_json::json!(super::notifications::notif_id(n));
+    }
 
     let mut warnings = Warnings::new();
     // Probabilistic notification prune (~10% of heartbeats).
@@ -98,7 +119,7 @@ pub fn handle_heartbeat(req: &Request) -> Response {
             "profile_completeness": profile_completeness(&agent),
             "notifications": notifications,
         },
-        "suggested_action": { "action": "get_suggested", "hint": "Call get_suggested for VRF-fair recommendations." },
+        "suggested_action": suggested_action(&agent, &caller),
     });
     warnings.attach(&mut resp);
     ok_response(resp)

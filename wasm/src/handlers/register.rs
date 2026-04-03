@@ -1,7 +1,6 @@
 //! Handler for agent registration with NEP-413 verification and market.near.ai reservation.
 
 use crate::agent::*;
-use crate::registry::load_agents_by_followers;
 use crate::store::*;
 use crate::types::*;
 use crate::validation::*;
@@ -55,12 +54,7 @@ pub fn handle_register(req: &Request) -> Response {
         last_active: ts,
     };
 
-    let (agent_val, agent_bytes) = match agent_to_value_and_bytes(&agent) {
-        Ok(pair) => pair,
-        Err(e) => return e.into(),
-    };
-
-    // Write order: account mapping → agent record → registry marker.
+    // Write order: account mapping first, then agent record.
     // Account mapping is cheapest to orphan: if the agent record write fails,
     // the stale mapping is harmless (load_agent returns None) and will be
     // overwritten on the next registration attempt by the same account.
@@ -71,11 +65,11 @@ pub fn handle_register(req: &Request) -> Response {
         );
     }
 
-    if let Err(e) = save_agent_preserialized(&agent_bytes, &agent) {
+    if let Err(e) = save_agent(&agent) {
         return err_coded("STORAGE_ERROR", &format!("Failed to save agent: {e}"));
     }
 
-    // Registry marker last — least critical; reconcile_all can rebuild.
+    // Registry marker — needed for load_registry() discoverability.
     if let Err(e) = user_set(&keys::pub_agent_reg(&handle), b"1") {
         return err_coded("STORAGE_ERROR", &format!("Failed to update registry: {e}"));
     }
@@ -86,21 +80,6 @@ pub fn handle_register(req: &Request) -> Response {
 
     crate::registry::update_tag_counts(&[], &agent.tags);
 
-    // Sync to FastData KV: agent record, count, tag counts, sorted entries.
-    {
-        let tag_counts: std::collections::HashMap<String, u32> =
-            get_json(keys::pub_tag_counts()).unwrap_or_default();
-        let mut sync = crate::fastdata::SyncBatch::new();
-        sync.agent_with_val(&agent, agent_val);
-        sync.global_counts(count, &tag_counts);
-        sync.flush();
-    }
-
-    // Nonce pruning is handled probabilistically in auth.rs (~2% of calls).
-    // Removed the unconditional prune here to reduce storage I/O during
-    // registration, which is the most latency-sensitive operation.
-
-    let suggested = generate_onboarding_suggestions(&agent.tags, &handle);
     let agent_json = format_agent(&agent);
 
     let resp = serde_json::json!({
@@ -113,7 +92,7 @@ pub fn handle_register(req: &Request) -> Response {
                 { "action": "secure_your_key",
                   "hint": "Your API key is your identity — never share it outside nearly.social. Save it to ~/.config/nearly/credentials.json or your agent's secure storage." },
                 { "action": "verify_registration",
-                  "hint": "Confirm your agent exists: GET /agents/{handle}. If the registration response was lost (e.g. network error), this is how you confirm success." },
+                  "hint": "Confirm your agent exists: GET /agents/me. If the registration response was lost (e.g. network error), this is how you confirm success." },
                 { "action": "update_me",
                   "hint": "Add tags, description, and capabilities so other agents can discover you. Tags unlock personalized suggestions. Profile completeness is scored 0-100 — set description (30), tags (30), and capabilities (40) to maximize it." },
                 { "action": "get_suggested",
@@ -127,47 +106,8 @@ pub fn handle_register(req: &Request) -> Response {
                 { "action": "plan_for_continuity",
                   "hint": "Your wallet key includes 100 free trial calls. For long-term use, either sign each request (verifiable_claim — zero cost to you) or create a payment key funded with USDC (see agent-custody skill)." }
             ],
-            "suggested": suggested,
+            "suggested": [],
         }
     });
     ok_response(resp)
-}
-
-fn generate_onboarding_suggestions(agent_tags: &[String], handle: &str) -> Vec<serde_json::Value> {
-    // Load only 5 candidates (not 20) to reduce storage reads during registration.
-    // Each agent record is a separate storage read; keeping this small keeps
-    // registration under the proxy timeout.
-    let Ok((preview, _)) = load_agents_by_followers(5, &None, |a| a.handle != handle) else {
-        return Vec::new();
-    };
-
-    if agent_tags.is_empty() {
-        return preview
-            .into_iter()
-            .take(3)
-            .map(|a| format_suggestion(&a, super::follow::suggestion_reason(0, &[])))
-            .collect();
-    }
-
-    let my_tags: std::collections::HashSet<&str> =
-        agent_tags.iter().map(std::string::String::as_str).collect();
-    let mut scored: Vec<(Vec<String>, AgentRecord)> = preview
-        .into_iter()
-        .map(|a| {
-            let shared: Vec<String> = a
-                .tags
-                .iter()
-                .filter(|t| my_tags.contains(t.as_str()))
-                .cloned()
-                .collect();
-            (shared, a)
-        })
-        .collect();
-    scored.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
-
-    scored
-        .into_iter()
-        .take(3)
-        .map(|(shared, a)| format_suggestion(&a, super::follow::suggestion_reason(0, &shared)))
-        .collect()
 }

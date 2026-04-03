@@ -31,6 +31,8 @@ export interface PlatformContext {
   capabilities?: Record<string, unknown>;
   /** Agent's OutLayer wallet key (wk_...), needed for platforms that require signing. */
   outlayer_api_key?: string;
+  /** NEP-413 verifiable claim proving NEAR account ownership. Stored as metadata by platforms that accept it. */
+  verifiable_claim?: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
@@ -90,7 +92,13 @@ export const PLATFORM_CONFIGS: readonly PlatformConfig[] = [
     authType: 'direct-post',
     registerUrl: `${MARKET_API_URL}/agents/register`,
     timeoutMs: 5_000,
-    bodyFields: ['handle', 'near_account_id', 'tags', 'capabilities'],
+    bodyFields: [
+      'handle',
+      'near_account_id',
+      'tags',
+      'capabilities',
+      'verifiable_claim',
+    ],
     credentialFields: {
       api_key: 'api_key',
       agent_id: 'agent_id',
@@ -348,6 +356,7 @@ function buildPlatformContext(
     capabilities?: Record<string, unknown>;
   },
   walletKey?: string,
+  claim?: Record<string, unknown>,
 ): PlatformContext {
   return {
     handle: agent.handle,
@@ -355,6 +364,7 @@ function buildPlatformContext(
     tags: agent.tags,
     capabilities: agent.capabilities,
     outlayer_api_key: walletKey?.startsWith('wk_') ? walletKey : undefined,
+    verifiable_claim: claim,
   };
 }
 
@@ -370,7 +380,7 @@ async function persistPlatformResults(
   if (succeeded.length > 0) {
     const adminKey = getOutlayerPaymentKey();
     if (adminKey) {
-      const updateResult = await callOutlayer(
+      const { response: updateResult } = await callOutlayer(
         { action: 'set_platforms', handle, platforms: merged },
         adminKey,
       );
@@ -396,7 +406,10 @@ export async function handleRegisterPlatforms(
   userAuthKey: string | undefined,
 ): Promise<NextResponse> {
   // 1. Load agent profile
-  const meResult = await callOutlayer({ action: 'get_me' }, authKey);
+  const { response: meResult } = await callOutlayer(
+    { action: 'get_me' },
+    authKey,
+  );
   if (meResult.status !== 200) {
     return NextResponse.json(
       {
@@ -454,7 +467,10 @@ export async function handleRegisterPlatforms(
   // first writer's newly-registered platforms (classic lost-update race).
   let bestAgent: Record<string, unknown> = agent;
   if (succeeded.length > 0 && userAuthKey) {
-    const freshResult = await callOutlayer({ action: 'get_me' }, authKey);
+    const { response: freshResult } = await callOutlayer(
+      { action: 'get_me' },
+      authKey,
+    );
     if (freshResult.status === 200) {
       const freshData: Record<string, unknown> = await freshResult.json();
       bestAgent = extractAgentFromJson(freshData).agent ?? agent;
@@ -496,6 +512,11 @@ export async function tryPlatformRegistrationsOnRegister(
   const rawAccountId = data?.near_account_id ?? agent.near_account_id;
   const nearAccountId = typeof rawAccountId === 'string' ? rawAccountId : '';
 
+  const claim =
+    typeof wasmBody.verifiable_claim === 'object' &&
+    wasmBody.verifiable_claim !== null
+      ? (wasmBody.verifiable_claim as Record<string, unknown>)
+      : undefined;
   const ctx = buildPlatformContext(
     {
       handle: agent.handle,
@@ -508,6 +529,7 @@ export async function tryPlatformRegistrationsOnRegister(
         : undefined,
     },
     userAuthKey,
+    claim,
   );
 
   const { platforms, warnings } = await tryPlatformRegistrations(ctx);

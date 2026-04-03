@@ -170,7 +170,9 @@ async function signMessage(
   }
 }
 
-async function resolveAccountId(walletKey: string): Promise<string | null> {
+export async function resolveAccountId(
+  walletKey: string,
+): Promise<string | null> {
   const cached = accountCache.get(walletKey);
   if (cached) return cached;
 
@@ -218,7 +220,7 @@ export async function mintClaimForWalletKey(
 const OUTLAYER_RESOURCE_LIMITS = {
   max_instructions: 2_000_000_000,
   max_memory_mb: 512,
-  max_execution_seconds: 120,
+  max_execution_seconds: 30,
 } as const;
 
 const STRUCTURED_FIELDS = new Set(['tags', 'capabilities', 'handles']);
@@ -254,10 +256,16 @@ function errJson(
   return NextResponse.json({ success: false, error, code }, { status });
 }
 
+export interface OutlayerResult {
+  response: NextResponse;
+  /** Decoded WASM output — null on upstream/decode errors. */
+  decoded: WasmResponse | null;
+}
+
 export async function callOutlayer(
   wasmBody: Record<string, unknown>,
   authKey: string,
-): Promise<NextResponse> {
+): Promise<OutlayerResult> {
   const url = `${OUTLAYER_API_URL}/call/${OUTLAYER_PROJECT_OWNER}/${OUTLAYER_PROJECT_NAME}`;
 
   const isWalletKey = authKey.startsWith('wk_');
@@ -280,30 +288,39 @@ export async function callOutlayer(
           resource_limits: OUTLAYER_RESOURCE_LIMITS,
         }),
       },
-      90_000,
+      30_000,
     );
   } catch {
-    return errJson('Upstream unreachable', 502);
+    return { response: errJson('Upstream unreachable', 502), decoded: null };
   }
 
   if (!response.ok) {
     if (response.status === 402) {
-      return errJson(
-        'OutLayer quota exhausted — top up the payment key balance',
-        503,
-      );
+      return {
+        response: errJson(
+          'OutLayer quota exhausted — top up the payment key balance',
+          503,
+        ),
+        decoded: null,
+      };
     }
-    return errJson(
-      `Upstream error: ${response.status}`,
-      response.status >= 400 && response.status < 500 ? response.status : 502,
-    );
+    return {
+      response: errJson(
+        `Upstream error: ${response.status}`,
+        response.status >= 400 && response.status < 500 ? response.status : 502,
+      ),
+      decoded: null,
+    };
   }
 
   let result: unknown;
   try {
     result = await response.json();
   } catch {
-    return errJson('Invalid JSON from OutLayer', 502);
+    return {
+      response: errJson('Invalid JSON from OutLayer', 502),
+      decoded: null,
+    };
   }
 
   if (
@@ -311,15 +328,24 @@ export async function callOutlayer(
     result !== null &&
     (result as Record<string, unknown>).status === 'failed'
   ) {
-    return errJson('WASM execution failed', 502);
+    return {
+      response: errJson('WASM execution failed', 502),
+      decoded: null,
+    };
   }
 
   try {
     const decoded = decodeOutlayerResponse(result);
-    return NextResponse.json(decoded, {
-      status: decoded.success ? 200 : wasmCodeToStatus(decoded.code),
-    });
+    return {
+      response: NextResponse.json(decoded, {
+        status: decoded.success ? 200 : wasmCodeToStatus(decoded.code),
+      }),
+      decoded,
+    };
   } catch {
-    return errJson('Failed to decode WASM output', 502);
+    return {
+      response: errJson('Failed to decode WASM output', 502),
+      decoded: null,
+    };
   }
 }

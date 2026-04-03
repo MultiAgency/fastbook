@@ -403,11 +403,9 @@ pub fn set_string(key: &str, value: &str) -> Result<()> {
 /// ```
 pub fn get_string(key: &str) -> Result<Option<String>> {
     match get(key)? {
-        Some(data) => {
-            String::from_utf8(data)
-                .map(Some)
-                .map_err(|e| StorageError(format!("Invalid UTF-8: {}", e)))
-        }
+        Some(data) => String::from_utf8(data)
+            .map(Some)
+            .map_err(|e| StorageError(format!("Invalid UTF-8: {}", e))),
         None => Ok(None),
     }
 }
@@ -456,11 +454,9 @@ pub fn set_json<T: serde::Serialize>(key: &str, value: &T) -> Result<()> {
 /// ```
 pub fn get_json<T: serde::de::DeserializeOwned>(key: &str) -> Result<Option<T>> {
     match get(key)? {
-        Some(data) => {
-            serde_json::from_slice(&data)
-                .map(Some)
-                .map_err(|e| StorageError(format!("JSON deserialization failed: {}", e)))
-        }
+        Some(data) => serde_json::from_slice(&data)
+            .map(Some)
+            .map_err(|e| StorageError(format!("JSON deserialization failed: {}", e))),
         None => Ok(None),
     }
 }
@@ -526,7 +522,11 @@ pub fn set_if_absent(key: &str, value: &[u8]) -> Result<bool> {
 ///     }
 /// }
 /// ```
-pub fn set_if_equals(key: &str, expected: &[u8], new_value: &[u8]) -> Result<(bool, Option<Vec<u8>>)> {
+pub fn set_if_equals(
+    key: &str,
+    expected: &[u8],
+    new_value: &[u8],
+) -> Result<(bool, Option<Vec<u8>>)> {
     let (success, current, error) = raw::set_if_equals(key, expected, new_value);
     if !error.is_empty() {
         return Err(StorageError(error));

@@ -85,12 +85,7 @@ pub fn handle_update_me(req: &Request) -> Response {
         super::endorse::EndorsementCascade::empty()
     };
 
-    let (agent_val, agent_bytes) = match agent_to_value_and_bytes(&agent) {
-        Ok(pair) => pair,
-        Err(e) => return e.into(),
-    };
-
-    if let Err(e) = save_agent_preserialized(&agent_bytes, &agent) {
+    if let Err(e) = save_agent(&agent) {
         return e.into();
     }
 
@@ -99,20 +94,6 @@ pub fn handle_update_me(req: &Request) -> Response {
     warnings.extend(cascade.cleanup_storage(&handle));
 
     crate::registry::update_tag_counts(&before.tags, &agent.tags);
-
-    // Sync to FastData KV.
-    {
-        let tag_counts: std::collections::HashMap<String, u32> =
-            get_json(keys::pub_tag_counts()).unwrap_or_default();
-        let mut sync = crate::fastdata::SyncBatch::new();
-        sync.agent_with_val(&agent, agent_val);
-        sync.tag_counts(&tag_counts);
-        sync.tag_removals(&before.tags, &agent.tags, &handle);
-        sync.null_endorsers(&handle, &cascade.removed_pairs());
-        if let Some(w) = sync.flush() {
-            warnings.push(w);
-        }
-    }
 
     let agent_json = format_agent(&agent);
     let mut resp = serde_json::json!({ "agent": agent_json, "profile_completeness": profile_completeness(&agent) });
@@ -155,11 +136,6 @@ pub fn handle_set_platforms(req: &Request) -> Response {
     if let Err(e) = save_agent(&agent) {
         return e.into();
     }
-
-    // Sync to FastData KV.
-    let mut sync = crate::fastdata::SyncBatch::new();
-    sync.agent(&agent);
-    sync.flush();
 
     ok_response(serde_json::json!({ "agent": format_agent(&agent) }))
 }

@@ -161,25 +161,6 @@ pub fn handle_batch_follow(req: &Request) -> Response {
         .map(|a| (a.following_count, a.follower_count))
         .unwrap_or((0, 0));
 
-    // Sync to FastData KV: all followed edges, updated agents, sorted entries.
-    if followed_count > 0 {
-        let mut sync = crate::fastdata::SyncBatch::new();
-        if let Some(a) = &caller_agent {
-            sync.agent(a);
-        }
-        for res in &results {
-            if res.get("action").and_then(|a| a.as_str()) == Some("followed") {
-                if let Some(th) = res.get("handle").and_then(|h| h.as_str()) {
-                    sync.edge_follow(&caller_handle, th, ts, None);
-                    if let Some(a) = updated_targets.get(th) {
-                        sync.agent(a);
-                    }
-                }
-            }
-        }
-        sync.flush();
-    }
-
     ok_response(serde_json::json!({
         "action": "batch_followed",
         "results": results,
@@ -191,6 +172,7 @@ pub fn handle_batch_follow(req: &Request) -> Response {
 // batch_endorse
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::cognitive_complexity)]
 pub fn handle_batch_endorse(req: &Request) -> Response {
     let (_caller, caller_handle) = require_auth!(req);
     let targets = match validated_targets(req) {
@@ -258,11 +240,14 @@ pub fn handle_batch_endorse(req: &Request) -> Response {
 
         // Resolve tags for this target (tags namespace wins, then capability fallback).
         let mut resolved: Vec<(String, String)> = Vec::new();
+        let mut skipped: Vec<serde_json::Value> = Vec::new();
         for tag in &endorse_tags {
             let val = tag.to_lowercase();
             if let Some((ns, v)) = val.split_once(':') {
                 if endorsable.contains(&(ns.to_string(), v.to_string())) {
                     resolved.push((ns.to_string(), v.to_string()));
+                } else {
+                    skipped.push(serde_json::json!({ "value": tag, "reason": "not_found" }));
                 }
             } else if endorsable.contains(&("tags".to_string(), val.clone())) {
                 resolved.push(("tags".to_string(), val));
@@ -275,20 +260,44 @@ pub fn handle_batch_endorse(req: &Request) -> Response {
                     .collect();
                 if caps_matches.len() == 1 {
                     resolved.push((caps_matches[0].to_string(), val));
+                } else if caps_matches.len() > 1 {
+                    skipped.push(serde_json::json!({ "value": tag, "reason": "ambiguous" }));
+                } else {
+                    skipped.push(serde_json::json!({ "value": tag, "reason": "not_found" }));
                 }
-                // Ambiguous or no match: silently skip (best-effort batch semantics).
             }
         }
         if let Some(caps) = req.capabilities.as_ref().filter(|c| !c.is_null()) {
             for (ns, val) in extract_capability_pairs(caps) {
                 if endorsable.contains(&(ns.clone(), val.clone())) {
                     resolved.push((ns, val));
+                } else {
+                    skipped.push(serde_json::json!({
+                        "value": format!("{ns}:{val}"), "reason": "not_found"
+                    }));
                 }
             }
         }
 
         if resolved.is_empty() {
-            results.push(batch_err(&target_handle, "no endorsable items match"));
+            let available: Vec<String> = endorsable
+                .iter()
+                .map(|(ns, v)| format!("{ns}:{v}"))
+                .collect();
+            let mut requested: Vec<String> =
+                endorse_tags.iter().map(|s| s.to_lowercase()).collect();
+            if let Some(caps) = req.capabilities.as_ref().filter(|c| !c.is_null()) {
+                for (ns, val) in extract_capability_pairs(caps) {
+                    requested.push(format!("{ns}:{val}"));
+                }
+            }
+            results.push(serde_json::json!({
+                "handle": target_handle,
+                "action": "error",
+                "error": "no endorsable items match",
+                "requested": requested,
+                "available": available,
+            }));
             continue;
         }
 
@@ -338,21 +347,15 @@ pub fn handle_batch_endorse(req: &Request) -> Response {
             updated_targets.insert(target_handle.clone(), (agent, endorsed.clone()));
         }
 
-        results.push(serde_json::json!({
+        let mut result = serde_json::json!({
             "handle": target_handle,
             "action": "endorsed",
             "endorsed": endorsed,
-        }));
-    }
-
-    // Sync to FastData KV: reuse already-loaded agents from the loop.
-    if endorsed_count > 0 {
-        let mut sync = crate::fastdata::SyncBatch::new();
-        for (th, (agent, changed)) in &updated_targets {
-            sync.agent(agent);
-            sync.endorsers(th, changed);
+        });
+        if !skipped.is_empty() {
+            result["skipped"] = serde_json::json!(skipped);
         }
-        sync.flush();
+        results.push(result);
     }
 
     ok_response(serde_json::json!({

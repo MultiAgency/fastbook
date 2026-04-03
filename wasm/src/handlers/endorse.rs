@@ -140,16 +140,8 @@ impl EndorsementCascade {
         agent.endorsements.prune_empty();
     }
 
-    /// Return the (ns, val) pairs being removed — used by fastdata sync.
-    pub fn removed_pairs(&self) -> Vec<(&str, &str)> {
-        self.removals
-            .iter()
-            .flat_map(|(ns, vals)| vals.iter().map(move |v| (ns.as_str(), v.as_str())))
-            .collect()
-    }
-
     pub fn cleanup_storage(&self, handle: &str) -> Vec<String> {
-        let mut warnings = Vec::new();
+        let warnings = Vec::new();
         for (ns, vals) in &self.removals {
             for val in vals {
                 let endorser_handles =
@@ -158,11 +150,7 @@ impl EndorsementCascade {
                     // Remove individual endorsement_by key
                     user_delete_key(&keys::pub_endorsement_by(endorser, handle, ns, val));
                     // Delete the endorsement record
-                    if user_set(&keys::endorsement(handle, ns, val, endorser), &[]).is_err() {
-                        warnings.push(format!(
-                            "cleanup: failed to delete endorsement record {endorser}->{ns}:{val}"
-                        ));
-                    }
+                    user_delete_key(&keys::endorsement(handle, ns, val, endorser));
                     // Remove the endorser key
                     user_delete_key(&keys::pub_endorser(handle, ns, val, endorser));
                     // If no endorsements remain from this endorser to this target,
@@ -326,16 +314,6 @@ pub fn handle_endorse(req: &Request) -> Response {
         );
     }
 
-    // Sync to FastData KV.
-    {
-        let mut sync = crate::fastdata::SyncBatch::new();
-        sync.agent(&agent);
-        sync.endorsers(&target_handle, &endorsed);
-        if let Some(w) = sync.flush() {
-            warnings.push(w);
-        }
-    }
-
     let mut resp = serde_json::json!({
         "action": "endorsed",
         "handle": target_handle,
@@ -382,8 +360,8 @@ pub fn handle_unendorse(req: &Request) -> Response {
             return err_coded("STORAGE_ERROR", "Storage operation failed");
         }
         for (ns, val, ekey) in &to_delete {
-            // Clear endorsement record
-            let _ = user_set(ekey, &[]);
+            // Delete endorsement record
+            user_delete_key(ekey);
             // Remove individual endorsement_by key
             user_delete_key(&keys::pub_endorsement_by(
                 &caller_handle,
@@ -419,16 +397,6 @@ pub fn handle_unendorse(req: &Request) -> Response {
                 Some(serde_json::json!(removed)),
             ),
         );
-    }
-
-    // Sync to FastData KV.
-    if !removed.is_empty() {
-        let mut sync = crate::fastdata::SyncBatch::new();
-        sync.agent(&agent);
-        sync.endorsers(&target_handle, &removed);
-        if let Some(w) = sync.flush() {
-            warnings.push(w);
-        }
     }
 
     let mut resp = serde_json::json!({

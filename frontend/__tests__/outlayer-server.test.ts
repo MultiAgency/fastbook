@@ -98,7 +98,10 @@ describe('callOutlayer', () => {
       json: () => Promise.resolve({ status: 'ok', output: wasmResp }),
     } as unknown as Response);
 
-    const res = await callOutlayer({ action: 'get_me' }, 'wk_test');
+    const { response: res } = await callOutlayer(
+      { action: 'get_me' },
+      'wk_test',
+    );
     expect(res.status).toBe(expectedStatus);
     const body = await res.json();
     expect(body.success).toBe(false);
@@ -111,7 +114,10 @@ describe('callOutlayer', () => {
       json: () => Promise.resolve({ status: 'ok', output: wasmResp }),
     } as unknown as Response);
 
-    const res = await callOutlayer({ action: 'get_me' }, 'wk_test');
+    const { response: res } = await callOutlayer(
+      { action: 'get_me' },
+      'wk_test',
+    );
     const body = await res.json();
     expect(body.success).toBe(true);
     expect(body.data.handle).toBe('bot');
@@ -121,7 +127,10 @@ describe('callOutlayer', () => {
   it('returns 502 on upstream unreachable', async () => {
     mockFetch.mockRejectedValue(new Error('fetch failed'));
 
-    const res = await callOutlayer({ action: 'get_me' }, 'wk_test');
+    const { response: res } = await callOutlayer(
+      { action: 'get_me' },
+      'wk_test',
+    );
     expect(res.status).toBe(502);
     const body = await res.json();
     expect(body.error).toContain('unreachable');
@@ -133,7 +142,10 @@ describe('callOutlayer', () => {
       status: 503,
     } as Response);
 
-    const res = await callOutlayer({ action: 'get_me' }, 'wk_test');
+    const { response: res } = await callOutlayer(
+      { action: 'get_me' },
+      'wk_test',
+    );
     expect(res.status).toBe(502);
     const body = await res.json();
     expect(body.error).toContain('503');
@@ -145,7 +157,10 @@ describe('callOutlayer', () => {
       status: 429,
     } as Response);
 
-    const res = await callOutlayer({ action: 'get_me' }, 'wk_test');
+    const { response: res } = await callOutlayer(
+      { action: 'get_me' },
+      'wk_test',
+    );
     expect(res.status).toBe(429);
   });
 
@@ -155,7 +170,10 @@ describe('callOutlayer', () => {
       json: () => Promise.resolve({ status: 'failed', error: 'panic in wasm' }),
     } as unknown as Response);
 
-    const res = await callOutlayer({ action: 'get_me' }, 'wk_test');
+    const { response: res } = await callOutlayer(
+      { action: 'get_me' },
+      'wk_test',
+    );
     expect(res.status).toBe(502);
     const body = await res.json();
     expect(body.error).toBe('WASM execution failed');
@@ -168,7 +186,10 @@ describe('callOutlayer', () => {
       json: () => Promise.reject(new SyntaxError('Unexpected token')),
     } as unknown as Response);
 
-    const res = await callOutlayer({ action: 'get_me' }, 'wk_test');
+    const { response: res } = await callOutlayer(
+      { action: 'get_me' },
+      'wk_test',
+    );
     expect(res.status).toBe(502);
     const body = await res.json();
     expect(body.error).toBe('Invalid JSON from OutLayer');
@@ -181,7 +202,10 @@ describe('callOutlayer', () => {
         Promise.resolve({ status: 'ok', output: 'not-valid-base64!!!' }),
     } as unknown as Response);
 
-    const res = await callOutlayer({ action: 'get_me' }, 'wk_test');
+    const { response: res } = await callOutlayer(
+      { action: 'get_me' },
+      'wk_test',
+    );
     expect(res.status).toBe(502);
     const body = await res.json();
     expect(body.error).toContain('decode');

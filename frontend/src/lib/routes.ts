@@ -154,22 +154,6 @@ export const PUBLIC_ACTIONS = new Set([
   'check_handle',
   'health',
 ]);
-
-/** Public actions served exclusively by FastData KV with no WASM fallback.
- *  If FastData is unavailable, these return 503 rather than attempting WASM. */
-export const FASTDATA_ONLY_ACTIONS = new Set([
-  'list_agents',
-  'get_profile',
-  'get_followers',
-  'get_following',
-  'get_edges',
-  'get_endorsers',
-  'filter_endorsers',
-  'list_tags',
-  'check_handle',
-  'health',
-]);
-
 /** Mutating actions that invalidate the public response cache. */
 export const CACHE_BUSTING_ACTIONS = new Set([
   'register',

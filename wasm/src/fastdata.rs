@@ -143,45 +143,6 @@ pub(crate) fn tag_sorted_entries(agent: &AgentRecord) -> Vec<(String, serde_json
         .collect()
 }
 
-/// Null-out stale tag-sorted entries when tags change (old tags removed).
-pub(crate) fn tag_removal_entries(
-    old_tags: &[String],
-    new_tags: &[String],
-    handle: &str,
-) -> Vec<(String, serde_json::Value)> {
-    let new_set: std::collections::HashSet<&str> = new_tags.iter().map(String::as_str).collect();
-    old_tags
-        .iter()
-        .filter(|t| !new_set.contains(t.as_str()))
-        .map(|tag| {
-            (
-                format!("sorted/followers/tag:{tag}/{handle}"),
-                serde_json::Value::Null,
-            )
-        })
-        .collect()
-}
-
-/// Build FastData entries for changed endorser indices.
-pub(crate) fn endorser_index_entries(
-    target_handle: &str,
-    changed: &std::collections::HashMap<String, Vec<String>>,
-) -> Vec<(String, serde_json::Value)> {
-    let mut entries = Vec::new();
-    for (ns, vals) in changed {
-        for v in vals {
-            let ek = endorsers_key(target_handle, ns, v);
-            let endorsers = crate::store::handles_from_prefix(&crate::keys::pub_endorser_prefix(
-                target_handle,
-                ns,
-                v,
-            ));
-            entries.push((ek, serde_json::json!(endorsers)));
-        }
-    }
-    entries
-}
-
 /// Max keys per `__fastdata_kv` call (FastData KV limit).
 const MAX_KEYS_PER_CALL: usize = 256;
 
@@ -227,74 +188,12 @@ impl SyncBatch {
         self.0.extend(agent_entries(agent));
     }
 
-    /// Add agent profile from a pre-serialized Value + sorted index entries.
-    /// Avoids re-serialization when the caller already has the Value.
-    pub fn agent_with_val(&mut self, agent: &AgentRecord, val: serde_json::Value) {
-        self.0.push((agent_key(&agent.handle), val));
-        self.0.extend(sorted_entry_pairs(agent));
-        self.0.extend(tag_sorted_entries(agent));
-    }
-
-    /// Write follow edge + follower + following keys with timestamp and optional reason.
-    pub fn edge_follow(&mut self, caller: &str, target: &str, ts: u64, reason: Option<&str>) {
-        let mut v = serde_json::json!({ "ts": ts });
-        if let Some(r) = reason {
-            v["reason"] = serde_json::json!(r);
-        }
-        self.0.push((edge_key(caller, target), v.clone()));
-        self.0.push((follower_key(target, caller), v.clone()));
-        self.0.push((following_key(caller, target), v));
-    }
-
-    /// Null-out follow edge + follower + following keys.
-    pub fn edge_unfollow(&mut self, caller: &str, target: &str) {
-        self.0
-            .push((edge_key(caller, target), serde_json::Value::Null));
-        self.0
-            .push((follower_key(target, caller), serde_json::Value::Null));
-        self.0
-            .push((following_key(caller, target), serde_json::Value::Null));
-    }
-
-    /// Add endorser index entries for changed endorsement items.
-    pub fn endorsers(&mut self, target: &str, changed: &HashMap<String, Vec<String>>) {
-        self.0.extend(endorser_index_entries(target, changed));
-    }
-
     /// Add global meta: agent count + tag counts.
     pub fn global_counts(&mut self, count: u64, tag_counts: &HashMap<String, u32>) {
         self.0
             .push(("meta/agent_count".into(), serde_json::json!(count)));
         self.0
             .push(("tag_counts".into(), serde_json::json!(tag_counts)));
-    }
-
-    /// Add tag counts only.
-    pub fn tag_counts(&mut self, counts: &HashMap<String, u32>) {
-        self.0
-            .push(("tag_counts".into(), serde_json::json!(counts)));
-    }
-
-    /// Null-out stale tag-sorted entries when tags change.
-    pub fn tag_removals(&mut self, old: &[String], new: &[String], handle: &str) {
-        self.0.extend(tag_removal_entries(old, new, handle));
-    }
-
-    /// Null-out agent key + all 4 sorted dimension keys.
-    pub fn null_agent(&mut self, handle: &str) {
-        self.0.push((agent_key(handle), serde_json::Value::Null));
-        for dim in &["followers", "endorsements", "newest", "active"] {
-            self.0
-                .push((format!("sorted/{dim}/{handle}"), serde_json::Value::Null));
-        }
-    }
-
-    /// Null-out endorser index entries for the given (ns, value) pairs.
-    pub fn null_endorsers(&mut self, handle: &str, pairs: &[(&str, &str)]) {
-        for &(ns, val) in pairs {
-            self.0
-                .push((endorsers_key(handle, ns, val), serde_json::Value::Null));
-        }
     }
 
     /// Add a raw key-value entry.

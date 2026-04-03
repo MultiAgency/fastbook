@@ -9,21 +9,26 @@ use outlayer::env;
 /// Nonce GC fires when `nonce_byte % GC_SAMPLE_DIVISOR < 1`, i.e. ~2% of calls.
 const GC_SAMPLE_DIVISOR: u8 = 50;
 
-/// Verify that the caller is the configured admin account.
+/// Project owner from outlayer.toml — used as the default admin account
+/// when `OUTLAYER_ADMIN_ACCOUNT` env var is not set in the TEE.
+const PROJECT_OWNER: &str = "hack.near";
+
+/// Verify that the caller is the admin account.
 ///
-/// Requires `OUTLAYER_ADMIN_ACCOUNT` env var (set via .env or secrets).
-/// Hard-fails if the env var is missing or empty — no fallback, so a
-/// misconfigured deployment cannot silently grant admin access.
+/// Checks `OUTLAYER_ADMIN_ACCOUNT` env var first (allows override via
+/// OutLayer secrets), then falls back to the compile-time project owner.
 pub(crate) fn require_admin(caller: &str) -> Result<(), Response> {
-    let admin = std::env::var("OUTLAYER_ADMIN_ACCOUNT")
+    let env_admin = std::env::var("OUTLAYER_ADMIN_ACCOUNT")
         .ok()
         .filter(|s| !s.is_empty());
-    match admin {
-        Some(a) if caller == a => Ok(()),
-        _ => Err(err_coded(
+    let admin = env_admin.as_deref().unwrap_or(PROJECT_OWNER);
+    if caller == admin {
+        Ok(())
+    } else {
+        Err(err_coded(
             "AUTH_FAILED",
             "Unauthorized: admin access required",
-        )),
+        ))
     }
 }
 

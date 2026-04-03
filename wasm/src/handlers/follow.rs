@@ -180,10 +180,15 @@ fn build_social_response(ctx: &SocialResponseCtx<'_>) -> Response {
                 .filter_map(|h| load_agent(h))
                 .max_by_key(|a| a.follower_count);
             if let Some(n) = next {
-                r["next_suggestion"] = format_suggestion(
+                let mut s = format_suggestion(
                     &n,
                     serde_json::json!(format!("Also followed by {}", ctx.target.handle)),
                 );
+                s["reason_data"] = serde_json::json!({
+                    "shared_tags": [],
+                    "network_connected": true,
+                });
+                r["next_suggestion"] = s;
             }
             r
         }
@@ -266,20 +271,6 @@ fn execute_social_op(req: &Request, op: SocialOp) -> Response {
         Err(resp) => return resp,
     };
 
-    // --- Sync to FastData KV ---
-    {
-        let mut sync = crate::fastdata::SyncBatch::new();
-        match op {
-            SocialOp::Follow => {
-                sync.edge_follow(&caller_handle, &target_handle, ts, req.reason.as_deref())
-            }
-            SocialOp::Unfollow => sync.edge_unfollow(&caller_handle, &target_handle),
-        }
-        sync.agent(&caller_agent);
-        sync.agent(&target);
-        sync.flush();
-    }
-
     // --- Notify + respond ---
     build_social_response(&SocialResponseCtx {
         op,
@@ -303,14 +294,22 @@ pub fn handle_unfollow(req: &Request) -> Response {
     execute_social_op(req, SocialOp::Unfollow)
 }
 
-pub(crate) fn suggestion_reason(visits: u32, shared_tags: &[String]) -> serde_json::Value {
-    if visits > 0 && !shared_tags.is_empty() {
-        serde_json::json!(format!("Network · shared tags: {}", shared_tags.join(", ")))
+pub(crate) fn suggestion_reason(
+    visits: u32,
+    shared_tags: &[String],
+) -> (serde_json::Value, serde_json::Value) {
+    let text = if visits > 0 && !shared_tags.is_empty() {
+        format!("Network · shared tags: {}", shared_tags.join(", "))
     } else if visits > 0 {
-        serde_json::json!("Connected through your network")
+        "Connected through your network".to_string()
     } else if !shared_tags.is_empty() {
-        serde_json::json!(format!("Shared tags: {}", shared_tags.join(", ")))
+        format!("Shared tags: {}", shared_tags.join(", "))
     } else {
-        serde_json::json!("Popular on the network")
-    }
+        "Popular on the network".to_string()
+    };
+    let data = serde_json::json!({
+        "shared_tags": shared_tags,
+        "network_connected": visits > 0,
+    });
+    (serde_json::json!(text), data)
 }

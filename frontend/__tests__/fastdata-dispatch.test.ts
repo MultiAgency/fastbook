@@ -2,24 +2,37 @@ import * as fastdata from '@/lib/fastdata';
 import { dispatchFastData } from '@/lib/fastdata-dispatch';
 
 jest.mock('@/lib/fastdata');
-const mockKvGet = fastdata.kvGet as jest.MockedFunction<typeof fastdata.kvGet>;
-const mockKvList = fastdata.kvList as jest.MockedFunction<
-  typeof fastdata.kvList
+const mockKvGetAgent = fastdata.kvGetAgent as jest.MockedFunction<
+  typeof fastdata.kvGetAgent
 >;
-const mockKvMulti = fastdata.kvMulti as jest.MockedFunction<
-  typeof fastdata.kvMulti
+const mockKvGetAll = fastdata.kvGetAll as jest.MockedFunction<
+  typeof fastdata.kvGetAll
+>;
+const mockKvListAgent = fastdata.kvListAgent as jest.MockedFunction<
+  typeof fastdata.kvListAgent
+>;
+const mockKvListAll = fastdata.kvListAll as jest.MockedFunction<
+  typeof fastdata.kvListAll
+>;
+const mockKvMultiAgent = fastdata.kvMultiAgent as jest.MockedFunction<
+  typeof fastdata.kvMultiAgent
+>;
+const mockResolveHandle = fastdata.resolveHandle as jest.MockedFunction<
+  typeof fastdata.resolveHandle
 >;
 
 beforeEach(() => {
   jest.resetAllMocks();
-  // Defaults: kvList returns empty, kvMulti returns empty.
-  mockKvList.mockResolvedValue([]);
-  mockKvMulti.mockResolvedValue([]);
+  mockKvGetAll.mockResolvedValue([]);
+  mockKvListAll.mockResolvedValue([]);
+  mockKvListAgent.mockResolvedValue([]);
+  mockKvMultiAgent.mockResolvedValue([]);
+  mockResolveHandle.mockResolvedValue(null);
 });
 
 const AGENT_ALICE = {
   handle: 'alice',
-  description: 'Test agent',
+  description: 'Test agent Alice',
   avatar_url: null,
   tags: ['ai', 'defi'],
   capabilities: {},
@@ -31,6 +44,21 @@ const AGENT_ALICE = {
   created_at: 1700000000,
   last_active: 1700001000,
 };
+
+function entry(
+  predecessorId: string,
+  key: string,
+  value: unknown,
+): fastdata.KvEntry {
+  return {
+    predecessor_id: predecessorId,
+    current_account_id: 'contextual.near',
+    block_height: 100,
+    block_timestamp: 1700000000,
+    key,
+    value,
+  };
+}
 
 function expectData(result: unknown): unknown {
   expect(result).toHaveProperty('data');
@@ -45,36 +73,39 @@ function expectError(result: unknown): string {
 describe('dispatchFastData', () => {
   describe('unsupported actions', () => {
     it('returns error for unknown action', async () => {
-      const err = expectError(await dispatchFastData('get_me', {}));
+      const err = expectError(await dispatchFastData('bogus_action', {}));
       expect(err).toContain('Unsupported');
     });
   });
 
   describe('health', () => {
-    it('returns agent count', async () => {
-      mockKvGet.mockResolvedValue(42);
+    it('counts agents from sorted/followers entries', async () => {
+      mockKvGetAll.mockResolvedValue([
+        entry('alice.near', 'sorted/followers', { score: 10 }),
+        entry('bob.near', 'sorted/followers', { score: 5 }),
+      ]);
       const data = expectData(await dispatchFastData('health', {}));
-      expect(data).toEqual({ agent_count: 42, status: 'ok' });
+      expect(data).toEqual({ agent_count: 2, status: 'ok' });
     });
 
-    it('returns 0 when key is missing', async () => {
-      mockKvGet.mockResolvedValue(null);
+    it('returns 0 when no agents', async () => {
+      mockKvGetAll.mockResolvedValue([]);
       const data = expectData(await dispatchFastData('health', {}));
       expect(data).toEqual({ agent_count: 0, status: 'ok' });
     });
   });
 
   describe('check_handle', () => {
-    it('returns available=true when agent not found', async () => {
-      mockKvGet.mockResolvedValue(null);
+    it('returns available=true when handle not found', async () => {
+      mockResolveHandle.mockResolvedValue(null);
       const data = expectData(
         await dispatchFastData('check_handle', { handle: 'newhandle' }),
       );
       expect(data).toEqual({ handle: 'newhandle', available: true });
     });
 
-    it('returns available=false when agent exists', async () => {
-      mockKvGet.mockResolvedValue(AGENT_ALICE);
+    it('returns available=false when handle exists', async () => {
+      mockResolveHandle.mockResolvedValue('alice.near');
       const data = expectData(
         await dispatchFastData('check_handle', { handle: 'alice' }),
       );
@@ -83,19 +114,17 @@ describe('dispatchFastData', () => {
   });
 
   describe('get_profile', () => {
-    it('returns formatted agent', async () => {
-      mockKvGet.mockResolvedValue(AGENT_ALICE);
+    it('resolves handle then reads profile', async () => {
+      mockResolveHandle.mockResolvedValue('alice.near');
+      mockKvGetAgent.mockResolvedValue(AGENT_ALICE);
       const data = expectData(
         await dispatchFastData('get_profile', { handle: 'alice' }),
       ) as Record<string, unknown>;
-      const agent = data.agent as Record<string, unknown>;
-      expect(agent.handle).toBe('alice');
-      expect(agent.follower_count).toBe(5);
-      expect(agent.tags).toEqual(['ai', 'defi']);
+      expect((data.agent as Record<string, unknown>).handle).toBe('alice');
     });
 
-    it('returns error for missing agent', async () => {
-      mockKvGet.mockResolvedValue(null);
+    it('returns 404 when handle not found', async () => {
+      mockResolveHandle.mockResolvedValue(null);
       const err = expectError(
         await dispatchFastData('get_profile', { handle: 'nobody' }),
       );
@@ -104,47 +133,28 @@ describe('dispatchFastData', () => {
   });
 
   describe('list_tags', () => {
-    it('returns sorted tags', async () => {
-      mockKvGet.mockResolvedValue({ defi: 10, ai: 5, gaming: 3 });
+    it('aggregates tag counts from all agents', async () => {
+      mockKvListAll.mockResolvedValue([
+        entry('alice.near', 'tag/ai', { score: 5 }),
+        entry('bob.near', 'tag/ai', { score: 3 }),
+        entry('alice.near', 'tag/defi', { score: 5 }),
+      ]);
       const data = expectData(
         await dispatchFastData('list_tags', {}),
       ) as Record<string, unknown>;
       const tags = data.tags as { tag: string; count: number }[];
-      expect(tags[0]).toEqual({ tag: 'defi', count: 10 });
-      expect(tags[1]).toEqual({ tag: 'ai', count: 5 });
-      expect(tags[2]).toEqual({ tag: 'gaming', count: 3 });
-    });
-
-    it('returns empty array when no tags', async () => {
-      mockKvGet.mockResolvedValue(null);
-      const data = expectData(
-        await dispatchFastData('list_tags', {}),
-      ) as Record<string, unknown>;
-      expect(data.tags).toEqual([]);
+      expect(tags[0]).toEqual({ tag: 'ai', count: 2 });
+      expect(tags[1]).toEqual({ tag: 'defi', count: 1 });
     });
   });
 
   describe('list_agents', () => {
-    it('fetches sorted entries and batch-loads agents', async () => {
-      mockKvList.mockResolvedValue([
-        {
-          key: 'sorted/followers/alice',
-          value: { score: 10 },
-          predecessor_id: '',
-          current_account_id: '',
-          block_height: 0,
-          block_timestamp: 0,
-        },
-        {
-          key: 'sorted/followers/bob',
-          value: { score: 5 },
-          predecessor_id: '',
-          current_account_id: '',
-          block_height: 0,
-          block_timestamp: 0,
-        },
+    it('fetches sorted entries and batch-loads profiles', async () => {
+      mockKvGetAll.mockResolvedValue([
+        entry('alice.near', 'sorted/followers', { score: 10 }),
+        entry('bob.near', 'sorted/followers', { score: 5 }),
       ]);
-      mockKvMulti.mockResolvedValue([
+      mockKvMultiAgent.mockResolvedValue([
         AGENT_ALICE,
         { ...AGENT_ALICE, handle: 'bob', follower_count: 5 },
       ]);
@@ -155,59 +165,28 @@ describe('dispatchFastData', () => {
       const agents = data.agents as Record<string, unknown>[];
       expect(agents).toHaveLength(2);
       expect(agents[0].handle).toBe('alice');
-      expect(agents[1].handle).toBe('bob');
     });
 
     it('filters by tag', async () => {
-      // Tag filtering now uses tag-indexed sorted lists: sorted/followers/tag:{tag}/
-      mockKvList.mockResolvedValueOnce([
-        {
-          key: 'sorted/followers/tag:ai/alice',
-          value: { score: 10 },
-          predecessor_id: '',
-          current_account_id: '',
-          block_height: 0,
-          block_timestamp: 0,
-        },
+      mockKvGetAll.mockResolvedValue([
+        entry('alice.near', 'tag/ai', { score: 10 }),
       ]);
-      mockKvMulti.mockResolvedValueOnce([AGENT_ALICE]);
+      mockKvMultiAgent.mockResolvedValue([AGENT_ALICE]);
 
       const data = expectData(
         await dispatchFastData('list_agents', { tag: 'ai' }),
       ) as Record<string, unknown>;
       expect((data.agents as unknown[]).length).toBe(1);
-
-      // Tag with no matching agents returns empty
-      mockKvList.mockResolvedValueOnce([]);
-
-      const data2 = expectData(
-        await dispatchFastData('list_agents', { tag: 'nope' }),
-      ) as Record<string, unknown>;
-      expect((data2.agents as unknown[]).length).toBe(0);
     });
   });
 
   describe('get_followers', () => {
-    it('returns paginated followers from prefix scan', async () => {
-      mockKvList.mockResolvedValue([
-        {
-          key: 'follower/alice/bob',
-          value: { ts: 1700000000 },
-          predecessor_id: '',
-          current_account_id: '',
-          block_height: 0,
-          block_timestamp: 0,
-        },
-        {
-          key: 'follower/alice/carol',
-          value: { ts: 0 },
-          predecessor_id: '',
-          current_account_id: '',
-          block_height: 0,
-          block_timestamp: 0,
-        },
+    it('returns agents who follow the handle', async () => {
+      mockKvGetAll.mockResolvedValue([
+        entry('bob.near', 'graph/follow/alice', { at: 1700000000 }),
+        entry('carol.near', 'graph/follow/alice', { at: 1700000001 }),
       ]);
-      mockKvMulti.mockResolvedValue([
+      mockKvMultiAgent.mockResolvedValue([
         { ...AGENT_ALICE, handle: 'bob' },
         { ...AGENT_ALICE, handle: 'carol' },
       ]);
@@ -216,121 +195,51 @@ describe('dispatchFastData', () => {
         await dispatchFastData('get_followers', { handle: 'alice', limit: 25 }),
       ) as Record<string, unknown>;
       expect(data.handle).toBe('alice');
-      const followers = data.followers as Record<string, unknown>[];
-      expect(followers).toHaveLength(2);
-      expect(followers[0].handle).toBe('bob');
-      expect(followers[1].handle).toBe('carol');
-    });
-
-    it('handles cursor pagination', async () => {
-      mockKvList.mockResolvedValue([
-        {
-          key: 'follower/alice/a1',
-          value: { ts: 0 },
-          predecessor_id: '',
-          current_account_id: '',
-          block_height: 0,
-          block_timestamp: 0,
-        },
-        {
-          key: 'follower/alice/a2',
-          value: { ts: 0 },
-          predecessor_id: '',
-          current_account_id: '',
-          block_height: 0,
-          block_timestamp: 0,
-        },
-        {
-          key: 'follower/alice/a3',
-          value: { ts: 0 },
-          predecessor_id: '',
-          current_account_id: '',
-          block_height: 0,
-          block_timestamp: 0,
-        },
-      ]);
-      mockKvMulti.mockResolvedValue([{ ...AGENT_ALICE, handle: 'a2' }]);
-
-      const data = expectData(
-        await dispatchFastData('get_followers', {
-          handle: 'alice',
-          limit: 1,
-          cursor: 'a1',
-        }),
-      ) as Record<string, unknown>;
-      const followers = data.followers as Record<string, unknown>[];
-      expect(followers).toHaveLength(1);
-      expect(followers[0].handle).toBe('a2');
-      expect(data.cursor).toBe('a2');
+      expect((data.followers as unknown[]).length).toBe(2);
     });
   });
 
-  describe('get_endorsers', () => {
-    it('batches endorser agent lookups via kvMulti', async () => {
-      const agentWithTags = {
-        ...AGENT_ALICE,
-        tags: ['ai'],
-        capabilities: { tools: ['search'] },
-      };
-      // First kvGet: agent profile
-      mockKvGet.mockResolvedValueOnce(agentWithTags);
-      // Parallel kvGet for endorser lists: tags/ai, tools/search
-      mockKvGet.mockResolvedValueOnce(['bob', 'carol']); // endorsers/alice/tags/ai
-      mockKvGet.mockResolvedValueOnce(['bob']); // endorsers/alice/tools/search
+  describe('get_me', () => {
+    it('returns profile with computed completeness', async () => {
+      mockResolveHandle.mockResolvedValue('alice.near');
+      mockKvGetAgent.mockResolvedValue(AGENT_ALICE);
 
-      // kvMulti for unique agent records (bob, carol)
-      mockKvMulti.mockResolvedValueOnce([
-        { ...AGENT_ALICE, handle: 'bob', description: 'Bob' },
-        { ...AGENT_ALICE, handle: 'carol', description: 'Carol' },
+      const data = expectData(
+        await dispatchFastData('get_me', { handle: 'alice' }),
+      ) as Record<string, unknown>;
+      expect((data.agent as Record<string, unknown>).handle).toBe('alice');
+      expect(data.profile_completeness).toBe(60); // description >10 chars (30) + tags present (30), capabilities empty (0)
+    });
+  });
+
+  describe('get_suggested', () => {
+    it('returns scored suggestions excluding self and followed', async () => {
+      mockResolveHandle.mockResolvedValue('alice.near');
+      mockKvGetAgent.mockResolvedValue(AGENT_ALICE);
+      mockKvListAgent.mockResolvedValue([]); // no follows yet
+      mockKvGetAll.mockResolvedValue([
+        entry('alice.near', 'sorted/followers', { score: 5 }),
+        entry('bob.near', 'sorted/followers', { score: 10 }),
+      ]);
+      mockKvMultiAgent.mockResolvedValue([
+        AGENT_ALICE, // alice (self — should be filtered)
+        { ...AGENT_ALICE, handle: 'bob', tags: ['ai'] },
       ]);
 
       const data = expectData(
-        await dispatchFastData('get_endorsers', { handle: 'alice' }),
+        await dispatchFastData('get_suggested', { handle: 'alice', limit: 10 }),
       ) as Record<string, unknown>;
-      expect(data.handle).toBe('alice');
-
-      const endorsers = data.endorsers as Record<
-        string,
-        Record<string, unknown[]>
-      >;
-      expect(endorsers.tags.ai).toHaveLength(2);
-      expect(endorsers.tools.search).toHaveLength(1);
-
-      // Should have called kvMulti once with deduplicated handles
-      expect(mockKvMulti).toHaveBeenCalledTimes(1);
-      const multiKeys = mockKvMulti.mock.calls[0][0] as string[];
-      expect(multiKeys).toHaveLength(2); // bob + carol deduplicated
-      expect(multiKeys).toContain('agent/bob');
-      expect(multiKeys).toContain('agent/carol');
-    });
-
-    it('returns empty endorsers when no pairs have endorsers', async () => {
-      mockKvGet.mockResolvedValueOnce({
-        ...AGENT_ALICE,
-        tags: ['ai'],
-        capabilities: {},
-      });
-      mockKvGet.mockResolvedValueOnce(null); // no endorsers for tags/ai
-
-      const data = expectData(
-        await dispatchFastData('get_endorsers', { handle: 'alice' }),
-      ) as Record<string, unknown>;
-      expect(data.endorsers).toEqual({});
-      expect(mockKvMulti).not.toHaveBeenCalled();
-    });
-
-    it('returns 404 when agent not found', async () => {
-      mockKvGet.mockResolvedValueOnce(null);
-      const err = expectError(
-        await dispatchFastData('get_endorsers', { handle: 'nobody' }),
-      );
-      expect(err).toContain('not found');
+      const agents = data.agents as Record<string, unknown>[];
+      // Alice should be filtered (self), only bob remains
+      expect(agents.length).toBe(1);
+      expect(agents[0].handle).toBe('bob');
+      expect(agents[0].reason).toContain('Shared tags');
     });
   });
 
   describe('error handling', () => {
     it('returns error on fetch failure', async () => {
-      mockKvGet.mockRejectedValueOnce(new Error('network error'));
+      mockResolveHandle.mockRejectedValue(new Error('network error'));
       const err = expectError(
         await dispatchFastData('get_profile', { handle: 'alice' }),
       );

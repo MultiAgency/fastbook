@@ -11,11 +11,23 @@ jest.mock('@/lib/outlayer-server', () => ({
   sanitizePublic: jest.requireActual('@/lib/outlayer-server').sanitizePublic,
   callOutlayer: (...args: unknown[]) => mockCallOutlayer(...args),
   mintClaimForWalletKey: jest.fn().mockResolvedValue(null),
+  resolveAccountId: jest.fn().mockResolvedValue('test.near'),
 }));
 
 const mockDispatchFastData = jest.fn();
 jest.mock('@/lib/fastdata-dispatch', () => ({
   dispatchFastData: (...args: unknown[]) => mockDispatchFastData(...args),
+}));
+
+jest.mock('@/lib/fastdata-sync', () => ({
+  buildSyncEntries: jest.fn().mockReturnValue(null),
+  syncToFastData: jest.fn(),
+}));
+
+const mockKvGetAgent = jest.fn().mockResolvedValue(null);
+jest.mock('@/lib/fastdata', () => ({
+  kvGetAgent: (...args: unknown[]) => mockKvGetAgent(...args),
+  resolveHandle: jest.fn().mockResolvedValue(null),
 }));
 
 jest.mock('@/lib/cache', () => ({
@@ -62,10 +74,16 @@ async function json(res: NextResponse) {
 beforeEach(() => {
   jest.clearAllMocks();
   jest.spyOn(console, 'warn');
-  mockCallOutlayer.mockResolvedValue(
-    NextResponse.json({ success: true, data: {} }),
-  );
+  mockCallOutlayer.mockResolvedValue({
+    response: NextResponse.json({ success: true, data: {} }),
+    decoded: { success: true, data: {} },
+  });
   mockDispatchFastData.mockResolvedValue({ data: {} });
+  // Authenticated GETs resolve caller handle via kvGetAgent(accountId, 'name').
+  // resolveAccountId is mocked via mintClaimForWalletKey returning null,
+  // so the wk_ → accountId path uses the sign-message mock.
+  // For tests that use wk_ keys, mock kvGetAgent to return a handle.
+  mockKvGetAgent.mockResolvedValue('test_agent');
 });
 
 afterEach(() => {
@@ -178,13 +196,14 @@ describe('route resolution', () => {
     };
     const isPublic = PUBLIC_ACTIONS.has(expectedAction);
     if (!isPublic) {
-      headers['x-payment-key'] = 'pk_user';
+      headers['x-payment-key'] = 'test.near:1:secret';
     }
 
     const [req, params] = makeRequest(method, path, undefined, headers);
     await handler(req, params);
 
-    if (isPublic) {
+    if (isPublic || method === 'GET') {
+      // Public reads and authenticated GETs both go through FastData.
       expect(mockDispatchFastData).toHaveBeenCalledTimes(1);
       expect(mockDispatchFastData.mock.calls[0][0]).toBe(expectedAction);
     } else {
@@ -221,8 +240,8 @@ describe('query params', () => {
     );
     await GET(req, params);
 
-    const wasmBody = mockCallOutlayer.mock.calls[0][0];
-    expect(wasmBody.since).toBe('1700000000');
+    const fdBody = mockDispatchFastData.mock.calls[0][1];
+    expect(fdBody.since).toBe('1700000000');
   });
 
   it('passes string params through', async () => {
@@ -320,24 +339,25 @@ describe('auth dispatch', () => {
     expect(mockCallOutlayer).not.toHaveBeenCalled();
   });
 
-  it('x-payment-key header forwards for authenticated actions', async () => {
+  it('x-payment-key header dispatches authenticated GET to FastData', async () => {
     const [req, params] = makeRequest('GET', 'agents/me', undefined, {
       'x-payment-key': 'owner.near:1:secret',
     });
     await GET(req, params);
 
-    const authKey = mockCallOutlayer.mock.calls[0][1];
-    expect(authKey).toBe('owner.near:1:secret');
+    // Authenticated GETs go through FastData, not WASM.
+    expect(mockDispatchFastData).toHaveBeenCalledTimes(1);
+    expect(mockCallOutlayer).not.toHaveBeenCalled();
   });
 
-  it('Authorization: Bearer wk_ forwards wallet key for authenticated actions', async () => {
+  it('Authorization: Bearer wk_ dispatches authenticated GET to FastData', async () => {
     const [req, params] = makeRequest('GET', 'agents/me', undefined, {
       authorization: 'Bearer wk_test1234abcdef',
     });
     await GET(req, params);
 
-    const authKey = mockCallOutlayer.mock.calls[0][1];
-    expect(authKey).toBe('wk_test1234abcdef');
+    expect(mockDispatchFastData).toHaveBeenCalledTimes(1);
+    expect(mockCallOutlayer).not.toHaveBeenCalled();
   });
 
   it('x-payment-key takes precedence over Authorization: Bearer', async () => {
@@ -347,8 +367,8 @@ describe('auth dispatch', () => {
     });
     await GET(req, params);
 
-    const authKey = mockCallOutlayer.mock.calls[0][1];
-    expect(authKey).toBe('owner.near:1:secret');
+    expect(mockDispatchFastData).toHaveBeenCalledTimes(1);
+    expect(mockCallOutlayer).not.toHaveBeenCalled();
   });
 
   it('ignores non-wk_ bearer tokens', async () => {
@@ -500,14 +520,16 @@ describe('platform auto-registration on register (background)', () => {
 
   beforeEach(() => {
     marketFetch = setupFetchMock();
-    mockCallOutlayer.mockImplementation(() =>
-      Promise.resolve(
-        NextResponse.json({
-          success: true,
-          data: { agent: { handle: 'my_bot' }, near_account_id: 'abc.near' },
-        }),
-      ),
-    );
+    mockCallOutlayer.mockImplementation(() => {
+      const decoded = {
+        success: true,
+        data: { agent: { handle: 'my_bot' }, near_account_id: 'abc.near' },
+      };
+      return Promise.resolve({
+        response: NextResponse.json(decoded),
+        decoded,
+      });
+    });
   });
 
   afterEach(() => marketFetch.restore());
