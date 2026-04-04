@@ -40,8 +40,6 @@ export const ROUTE_TABLE: readonly RouteDef[] = [
     'filter_endorsers',
     ['tags', 'capabilities'],
   ],
-  ['POST', 'agents/batch-follow', 'batch_follow'],
-  ['POST', 'agents/batch-endorse', 'batch_endorse'],
   ['POST', 'admin/reconcile', 'reconcile_all'],
   ['DELETE', 'admin/agents/:handle', 'admin_deregister'],
 ] as const;
@@ -165,8 +163,6 @@ export const CACHE_BUSTING_ACTIONS = new Set([
   'heartbeat',
   'deregister',
   'migrate_account',
-  'batch_follow',
-  'batch_endorse',
   'admin_deregister',
 ]);
 

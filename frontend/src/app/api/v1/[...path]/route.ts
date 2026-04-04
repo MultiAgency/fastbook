@@ -10,6 +10,10 @@ import { kvGetAgent } from '@/lib/fastdata';
 import { dispatchFastData } from '@/lib/fastdata-dispatch';
 import { buildSyncEntries, syncToFastData } from '@/lib/fastdata-sync';
 import {
+  dispatchDirectWrite,
+  handleDirectAdminDeregister,
+} from '@/lib/fastdata-write';
+import {
   callOutlayer,
   getOutlayerPaymentKey,
   mintClaimForWalletKey,
@@ -62,6 +66,16 @@ const VALID_SORTS = new Set(['followers', 'endorsements', 'newest', 'active']);
 const VALID_DIRECTIONS = new Set(['incoming', 'outgoing', 'both']);
 const CURSOR_RE = /^[a-z0-9_]{1,32}$|^\d{1,20}$/;
 const MAX_BODY_BYTES = LIMITS.MAX_BODY_BYTES;
+
+const DIRECT_WRITE_ACTIONS = new Set([
+  'follow',
+  'unfollow',
+  'endorse',
+  'unendorse',
+  'update_me',
+  'heartbeat',
+  'deregister',
+]);
 
 const CORS_HEADERS: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
@@ -243,6 +257,118 @@ async function dispatchAuthenticated(
   wasmBody: Record<string, unknown>,
   userAuthKey: string | undefined,
 ): Promise<NextResponse> {
+  // Direct write path for wk_ keys — bypasses WASM and auto-sign entirely.
+  if (
+    userAuthKey?.startsWith('wk_') &&
+    DIRECT_WRITE_ACTIONS.has(route.action)
+  ) {
+    const result = await dispatchDirectWrite(
+      route.action,
+      wasmBody,
+      userAuthKey,
+      resolveAccountId,
+    );
+
+    if (result.success) {
+      invalidateForMutation(route.action);
+      return NextResponse.json({ success: true, data: result.data });
+    }
+
+    const errBody: Record<string, unknown> = {
+      success: false,
+      error: result.error,
+      code: result.code,
+    };
+    if (result.retryAfter) errBody.retry_after = result.retryAfter;
+    return NextResponse.json(errBody, { status: result.status });
+  }
+
+  // Admin actions — require wk_ key from an admin account.
+  if (route.action === 'reconcile_all' || route.action === 'admin_deregister') {
+    if (!userAuthKey?.startsWith('wk_')) {
+      return applyHeaders(
+        NextResponse.json(
+          {
+            success: false,
+            error:
+              'Admin actions require a wallet key (Authorization: Bearer wk_...)',
+            code: 'AUTH_REQUIRED',
+          },
+          { status: 401 },
+        ),
+      );
+    }
+    const adminAccountId = await resolveAccountId(userAuthKey);
+    if (!adminAccountId) {
+      return applyHeaders(
+        NextResponse.json(
+          {
+            success: false,
+            error: 'Could not resolve admin account',
+            code: 'AUTH_FAILED',
+          },
+          { status: 401 },
+        ),
+      );
+    }
+    const expectedAdmin = process.env.OUTLAYER_ADMIN_ACCOUNT || 'hack.near';
+    if (adminAccountId !== expectedAdmin) {
+      return applyHeaders(
+        NextResponse.json(
+          {
+            success: false,
+            error: 'Unauthorized: admin access required',
+            code: 'AUTH_FAILED',
+          },
+          { status: 401 },
+        ),
+      );
+    }
+
+    if (route.action === 'reconcile_all') {
+      const result = await dispatchFastData('reconcile_all', wasmBody);
+      if ('error' in result) {
+        return applyHeaders(
+          NextResponse.json(
+            { success: false, error: result.error, code: 'INTERNAL_ERROR' },
+            { status: (result as { status?: number }).status ?? 500 },
+          ),
+        );
+      }
+      return applyHeaders(
+        NextResponse.json({ success: true, data: result.data }),
+      );
+    }
+
+    // admin_deregister
+    const targetHandle = (wasmBody.handle as string)?.toLowerCase();
+    if (!targetHandle) {
+      return applyHeaders(
+        NextResponse.json(
+          {
+            success: false,
+            error: 'Handle is required',
+            code: 'VALIDATION_ERROR',
+          },
+          { status: 400 },
+        ),
+      );
+    }
+    const result = await handleDirectAdminDeregister(userAuthKey, targetHandle);
+    if (result.success) {
+      invalidateForMutation('admin_deregister');
+      return applyHeaders(
+        NextResponse.json({ success: true, data: result.data }),
+      );
+    }
+    const errBody: Record<string, unknown> = {
+      success: false,
+      error: result.error,
+      code: result.code,
+    };
+    return applyHeaders(NextResponse.json(errBody, { status: result.status }));
+  }
+
   let authKey = userAuthKey;
 
   // Auto-sign for trial wallet keys: when a wk_ key is provided without a

@@ -24,6 +24,11 @@ jest.mock('@/lib/fastdata-sync', () => ({
   syncToFastData: jest.fn(),
 }));
 
+const mockDispatchDirectWrite = jest.fn();
+jest.mock('@/lib/fastdata-write', () => ({
+  dispatchDirectWrite: (...args: unknown[]) => mockDispatchDirectWrite(...args),
+}));
+
 const mockKvGetAgent = jest.fn().mockResolvedValue(null);
 jest.mock('@/lib/fastdata', () => ({
   kvGetAgent: (...args: unknown[]) => mockKvGetAgent(...args),
@@ -79,6 +84,7 @@ beforeEach(() => {
     decoded: { success: true, data: {} },
   });
   mockDispatchFastData.mockResolvedValue({ data: {} });
+  mockDispatchDirectWrite.mockResolvedValue({ success: true, data: {} });
   // Authenticated GETs resolve caller handle via kvGetAgent(accountId, 'name').
   // resolveAccountId is mocked via mintClaimForWalletKey returning null,
   // so the wk_ → accountId path uses the sign-message mock.
@@ -616,5 +622,110 @@ describe('cache invalidation', () => {
 
     expect(invalidateForMutation).toHaveBeenCalledWith('follow');
     expect(clearByAction).not.toHaveBeenCalled();
+  });
+});
+
+describe('direct write dispatch for wk_ keys', () => {
+  it.each([
+    ['POST', 'agents/alice/follow', 'follow'],
+    ['DELETE', 'agents/alice/follow', 'unfollow'],
+    ['POST', 'agents/alice/endorse', 'endorse'],
+    ['DELETE', 'agents/alice/endorse', 'unendorse'],
+    ['PATCH', 'agents/me', 'update_me'],
+    ['POST', 'agents/me/heartbeat', 'heartbeat'],
+    ['DELETE', 'agents/me', 'deregister'],
+  ] as const)('%s %s with wk_ key dispatches to dispatchDirectWrite', async (method, path, expectedAction) => {
+    const handlers: Record<string, typeof GET> = { GET, POST, PATCH, DELETE };
+    const handler = handlers[method]!;
+    const [req, params] = makeRequest(
+      method,
+      path,
+      {},
+      {
+        authorization: 'Bearer wk_test_key',
+      },
+    );
+    await handler(req, params);
+
+    expect(mockDispatchDirectWrite).toHaveBeenCalledTimes(1);
+    expect(mockDispatchDirectWrite.mock.calls[0][0]).toBe(expectedAction);
+    expect(mockCallOutlayer).not.toHaveBeenCalled();
+  });
+
+  it('payment key still goes through callOutlayer for follow', async () => {
+    const [req, params] = makeRequest(
+      'POST',
+      'agents/alice/follow',
+      {},
+      { 'x-payment-key': 'owner.near:1:secret' },
+    );
+    await POST(req, params);
+
+    expect(mockCallOutlayer).toHaveBeenCalledTimes(1);
+    expect(mockDispatchDirectWrite).not.toHaveBeenCalled();
+  });
+
+  it('verifiable_claim still goes through callOutlayer', async () => {
+    const claim = {
+      near_account_id: 'alice.near',
+      public_key: 'ed25519:abc',
+      signature: 'ed25519:sig',
+      nonce: 'bm9uY2U=',
+      message: '{"action":"heartbeat"}',
+      recipient: 'social',
+    };
+    const [req, params] = makeRequest('POST', 'agents/me/heartbeat', {
+      verifiable_claim: claim,
+    });
+    await POST(req, params);
+
+    expect(mockCallOutlayer).toHaveBeenCalledTimes(1);
+    expect(mockDispatchDirectWrite).not.toHaveBeenCalled();
+  });
+
+  it('direct write error returns proper HTTP status', async () => {
+    mockDispatchDirectWrite.mockResolvedValueOnce({
+      success: false,
+      error: 'Rate limit exceeded',
+      code: 'RATE_LIMITED',
+      status: 429,
+      retryAfter: 60,
+    });
+    const [req, params] = makeRequest(
+      'POST',
+      'agents/alice/follow',
+      {},
+      { authorization: 'Bearer wk_test_key' },
+    );
+    const res = await POST(req, params);
+    expect(res.status).toBe(429);
+    const body = await json(res);
+    expect(body.retry_after).toBe(60);
+  });
+
+  it('invalidates cache on successful direct write', async () => {
+    const { invalidateForMutation } = jest.requireMock('@/lib/cache');
+    const [req, params] = makeRequest(
+      'POST',
+      'agents/alice/follow',
+      {},
+      { authorization: 'Bearer wk_test_key' },
+    );
+    await POST(req, params);
+
+    expect(invalidateForMutation).toHaveBeenCalledWith('follow');
+  });
+
+  it('register still goes through callOutlayer with wk_ key', async () => {
+    const [req, params] = makeRequest(
+      'POST',
+      'agents/register',
+      { handle: 'my_bot' },
+      { authorization: 'Bearer wk_test_key' },
+    );
+    await POST(req, params);
+
+    expect(mockCallOutlayer).toHaveBeenCalledTimes(1);
+    expect(mockDispatchDirectWrite).not.toHaveBeenCalled();
   });
 });

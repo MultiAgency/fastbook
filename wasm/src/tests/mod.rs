@@ -43,10 +43,7 @@ fn test_request(action: Action) -> Request {
         direction: None,
         tag: None,
         include_history: None,
-        reason: None,
         platforms: None,
-        new_account_id: None,
-        targets: None,
     }
 }
 
@@ -84,43 +81,13 @@ impl RequestBuilder {
         self.req.avatar_url = Some(None);
         self
     }
-    fn reason(mut self, r: &str) -> Self {
-        self.req.reason = Some(r.into());
-        self
-    }
-    fn limit(mut self, l: u32) -> Self {
-        self.req.limit = Some(l);
-        self
-    }
     fn platforms(mut self, p: Vec<String>) -> Self {
         self.req.platforms = Some(p);
-        self
-    }
-    fn new_account_id(mut self, id: &str) -> Self {
-        self.req.new_account_id = Some(id.into());
-        self
-    }
-    fn targets(mut self, t: Vec<String>) -> Self {
-        self.req.targets = Some(t);
-        self
-    }
-    fn claim(mut self, c: Nep413Auth) -> Self {
-        self.req.verifiable_claim = Some(c);
         self
     }
     fn build(self) -> Request {
         self.req
     }
-}
-
-/// Build a signed verifiable_claim for use in tests.
-/// Uses system time so it works with `setup_integration` (no NEAR_BLOCK_TIMESTAMP).
-fn make_claim(account_id: &str, action: &str) -> Nep413Auth {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
-    nep413::tests::make_auth(account_id, action, now_ms)
 }
 
 fn quick_register(account: &str, handle: &str) {
@@ -151,28 +118,7 @@ fn teardown_nep413() {
     unsafe { std::env::remove_var("NEAR_BLOCK_TIMESTAMP") };
 }
 
-fn register_endorsable_agent(account: &str, handle: &str, tags: &[&str], skills: &[&str]) {
-    set_signer(account);
-    let mut builder = RequestBuilder::new(Action::Register)
-        .handle(handle)
-        .tags(tags);
-    if !skills.is_empty() {
-        builder = builder.capabilities(serde_json::json!({ "skills": skills }));
-    }
-    let resp = handle_register(&builder.build());
-    assert!(resp.success, "register {handle} failed: {:?}", resp.error);
-}
-
-mod activity;
 mod auth;
-mod contract;
-mod deregister;
-mod endorsements;
 mod graph;
-mod listings;
-mod notifications;
 mod registration;
-mod social;
-mod storage;
-mod suggestions;
 mod validation;

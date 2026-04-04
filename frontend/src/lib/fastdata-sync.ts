@@ -34,7 +34,7 @@ function endorsementTotal(
 }
 
 /** Build per-agent entries (mirrors wasm/src/fastdata.rs key structure). */
-function agentEntries(agent: Agent): Record<string, unknown> {
+export function agentEntries(agent: Agent): Record<string, unknown> {
   const entries: Record<string, unknown> = {
     profile: agent,
     name: agent.handle,
@@ -61,6 +61,56 @@ function nullAgentEntries(handle: string): Record<string, unknown> {
     'sorted/newest': null,
     'sorted/active': null,
   };
+}
+
+/**
+ * Walk nested capabilities JSON and extract (namespace, value) pairs.
+ * Mirrors wasm/src/validation.rs extract_capability_pairs.
+ */
+export function extractCapabilityPairs(caps: unknown): [string, string][] {
+  const pairs: [string, string][] = [];
+  function walk(val: unknown, prefix: string, depth: number) {
+    if (depth > 4) return;
+    if (typeof val === 'string' && prefix) {
+      pairs.push([prefix, val.toLowerCase()]);
+    } else if (Array.isArray(val)) {
+      for (const item of val) {
+        if (typeof item === 'string') pairs.push([prefix, item.toLowerCase()]);
+      }
+    } else if (val && typeof val === 'object') {
+      for (const [key, child] of Object.entries(val)) {
+        walk(child, prefix ? `${prefix}.${key}` : key, depth + 1);
+      }
+    }
+  }
+  if (caps) walk(caps, '', 0);
+  return pairs;
+}
+
+/**
+ * Collect all endorsable (ns:value) strings from an agent's tags and capabilities.
+ * Mirrors wasm/src/handlers/endorse.rs collect_endorsable.
+ */
+export function collectEndorsable(agent: Agent): Set<string> {
+  const set = new Set<string>();
+  for (const tag of agent.tags ?? []) set.add(`tags:${tag.toLowerCase()}`);
+  for (const [ns, val] of extractCapabilityPairs(agent.capabilities))
+    set.add(`${ns}:${val}`);
+  return set;
+}
+
+/** Compute profile completeness from agent data (matches wasm/src/agent.rs). */
+export function profileCompleteness(agent: Agent): number {
+  let score = 0;
+  if (agent.description && agent.description.length > 10) score += 30;
+  if (agent.tags && agent.tags.length > 0) score += 30;
+  if (
+    agent.capabilities &&
+    typeof agent.capabilities === 'object' &&
+    Object.keys(agent.capabilities).length > 0
+  )
+    score += 40;
+  return score;
 }
 
 /**

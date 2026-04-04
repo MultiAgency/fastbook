@@ -198,12 +198,6 @@ pub(crate) mod tests {
         (auth, now_ms)
     }
 
-    /// Build a signed NEP-413 claim for an arbitrary account and action.
-    pub fn make_auth(account_id: &str, action: &str, now_ms: u64) -> Nep413Auth {
-        let (auth, _) = sign_auth_with_action(account_id, "nearly.social", action, now_ms);
-        auth
-    }
-
     fn sign_auth(account_id: &str, domain: &str, now_ms: u64) -> (Nep413Auth, SigningKey) {
         sign_auth_with_action(account_id, domain, "register", now_ms)
     }

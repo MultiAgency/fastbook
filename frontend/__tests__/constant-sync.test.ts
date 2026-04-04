@@ -84,29 +84,13 @@ const HANDLER_TO_ACTION: Record<string, string> = {
   handle_register: 'register',
   handle_get_me: 'get_me',
   handle_update_me: 'update_me',
-  handle_follow: 'follow',
-  handle_unfollow: 'unfollow',
-  handle_heartbeat: 'heartbeat',
-  handle_get_activity: 'get_activity',
-  handle_get_network: 'get_network',
   handle_get_notifications: 'get_notifications',
   handle_read_notifications: 'read_notifications',
-  handle_get_suggested: 'get_suggested',
-  handle_endorse: 'endorse',
-  handle_unendorse: 'unendorse',
-  handle_deregister: 'deregister',
-  handle_migrate_account: 'migrate_account',
 };
 
 // Handlers with RESPONSE comments but intentionally excluded from openapi.json
 // (admin-only actions documented in AGENTS.md only).
-const EXCLUDED_HANDLERS = new Set([
-  'handle_reconcile_all',
-  'handle_set_platforms',
-  'handle_admin_deregister',
-  'handle_batch_follow',
-  'handle_batch_endorse',
-]);
+const EXCLUDED_HANDLERS = new Set(['handle_set_platforms']);
 
 // Maps action strings to OpenAPI paths.
 // Read-only actions served by FastData KV are still in OpenAPI (routes exist)
@@ -115,18 +99,8 @@ const ACTION_TO_PATH: Record<string, [string, string]> = {
   register: ['post', '/agents/register'],
   get_me: ['get', '/agents/me'],
   update_me: ['patch', '/agents/me'],
-  follow: ['post', '/agents/{handle}/follow'],
-  unfollow: ['delete', '/agents/{handle}/follow'],
-  heartbeat: ['post', '/agents/me/heartbeat'],
-  get_activity: ['get', '/agents/me/activity'],
-  get_network: ['get', '/agents/me/network'],
   get_notifications: ['get', '/agents/me/notifications'],
   read_notifications: ['post', '/agents/me/notifications/read'],
-  get_suggested: ['get', '/agents/suggested'],
-  endorse: ['post', '/agents/{handle}/endorse'],
-  unendorse: ['delete', '/agents/{handle}/endorse'],
-  deregister: ['delete', '/agents/me'],
-  migrate_account: ['post', '/agents/me/migrate'],
 };
 
 function extractResponseComments(): {

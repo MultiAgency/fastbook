@@ -153,16 +153,6 @@ pub(crate) fn validate_avatar_url(url: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-pub(crate) fn validate_reason(reason: &str) -> Result<(), AppError> {
-    if reason.len() > MAX_REASON_LEN {
-        return Err(AppError::Validation(format!(
-            "Reason max {MAX_REASON_LEN} bytes"
-        )));
-    }
-    reject_unsafe_unicode(reason, true)?;
-    Ok(())
-}
-
 pub(crate) fn validate_agent_fields(req: &Request) -> Result<(), Response> {
     if let Some(desc) = &req.description {
         validate_description(desc).map_err(Response::from)?;

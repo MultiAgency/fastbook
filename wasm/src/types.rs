@@ -52,9 +52,6 @@ pub(crate) enum Action {
     SetPlatforms,
     ReconcileAll,
     AdminDeregister,
-    BatchFollow,
-    BatchEndorse,
-    SmokeTestStorage,
 }
 
 impl Action {
@@ -78,9 +75,6 @@ impl Action {
             Self::SetPlatforms => "set_platforms",
             Self::ReconcileAll => "reconcile_all",
             Self::AdminDeregister => "admin_deregister",
-            Self::BatchFollow => "batch_follow",
-            Self::BatchEndorse => "batch_endorse",
-            Self::SmokeTestStorage => "smoke_test_storage",
         }
     }
 }
@@ -107,8 +101,6 @@ pub(crate) struct Request {
     pub limit: Option<u32>,
     #[serde(default, alias = "since")]
     pub cursor: Option<String>,
-    #[serde(default)]
-    pub reason: Option<String>,
     #[allow(dead_code)] // Deserialized for FastData-dispatched list_agents tag filter; not read in WASM.
     #[serde(default)]
     pub tag: Option<String>,
@@ -120,10 +112,6 @@ pub(crate) struct Request {
     pub include_history: Option<bool>,
     #[serde(default)]
     pub platforms: Option<Vec<String>>,
-    #[serde(default)]
-    pub new_account_id: Option<String>,
-    #[serde(default)]
-    pub targets: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Default)]
@@ -150,24 +138,6 @@ pub(crate) struct Endorsements(HashMap<String, HashMap<String, i64>>);
 impl Endorsements {
     pub fn new() -> Self {
         Self(HashMap::new())
-    }
-
-    pub fn increment(&mut self, ns: &str, val: &str) {
-        let count = self
-            .0
-            .entry(ns.to_string())
-            .or_default()
-            .entry(val.to_string())
-            .or_insert(0);
-        *count = count.saturating_add(1);
-    }
-
-    pub fn decrement(&mut self, ns: &str, val: &str) {
-        if let Some(ns_map) = self.0.get_mut(ns) {
-            if let Some(c) = ns_map.get_mut(val) {
-                *c = (*c - 1).max(0); // clamp to 0: heals negative drift from partial failures
-            }
-        }
     }
 
     pub fn clear_values(&mut self, ns: &str, values: &[String]) {
@@ -206,14 +176,12 @@ impl Endorsements {
             .collect()
     }
 
+    #[allow(dead_code)] // Used by agent.rs reconciliation path (callers currently dead during migration).
     pub fn get(&self, ns: &str) -> Option<&HashMap<String, i64>> {
         self.0.get(ns)
     }
 
-    pub fn count(&self, ns: &str, val: &str) -> i64 {
-        self.get(ns).and_then(|m| m.get(val).copied()).unwrap_or(0)
-    }
-
+    #[allow(dead_code)]
     pub fn set_count(&mut self, ns: &str, val: &str, count: i64) {
         *self
             .0
@@ -223,11 +191,13 @@ impl Endorsements {
             .or_insert(0) = count;
     }
 
+    #[allow(dead_code)]
     pub fn total_count(&self) -> i64 {
         self.0.values().flat_map(|ns| ns.values()).sum()
     }
 
     /// Structural equality of positive counts (ignores zero/negative entries).
+    #[allow(dead_code)]
     pub fn eq_counts(&self, other: &Self) -> bool {
         self.positive_only() == other.positive_only()
     }
@@ -282,64 +252,33 @@ pub(crate) const MAX_TAGS: usize = 10;
 pub(crate) const MAX_TAG_LEN: usize = 30;
 pub(crate) const MAX_AVATAR_URL_LEN: usize = 512;
 pub(crate) const MAX_CAPABILITIES_LEN: usize = 4096;
-pub(crate) const MAX_REASON_LEN: usize = 280;
 pub(crate) const MAX_LIMIT: u32 = 100;
-pub(crate) const MAX_SUGGESTION_LIMIT: u32 = 50;
-pub(crate) const FOLLOW_SUGGESTION_SAMPLE: usize = 10;
 pub(crate) const NONCE_TTL_SECS: u64 = 600;
-pub(crate) const SECS_PER_DAY: u64 = 86_400;
 
-pub(crate) const FOLLOW_RATE_LIMIT: u32 = 10;
-pub(crate) const FOLLOW_RATE_WINDOW_SECS: u64 = 60;
-pub(crate) const ENDORSE_RATE_LIMIT: u32 = 20;
-pub(crate) const ENDORSE_RATE_WINDOW_SECS: u64 = 60;
-pub(crate) const UPDATE_RATE_LIMIT: u32 = 10;
-pub(crate) const UPDATE_RATE_WINDOW_SECS: u64 = 60;
-pub(crate) const HEARTBEAT_RATE_LIMIT: u32 = 5;
-pub(crate) const HEARTBEAT_RATE_WINDOW_SECS: u64 = 60;
-pub(crate) const SUGGEST_RATE_LIMIT: u32 = 10;
-pub(crate) const SUGGEST_RATE_WINDOW_SECS: u64 = 60;
-pub(crate) const MIGRATE_RATE_LIMIT: u32 = 3;
-pub(crate) const MIGRATE_RATE_WINDOW_SECS: u64 = 60;
+// These constants are dead in Rust but parsed by the frontend constant-sync test
+// (frontend/__tests__/constant-sync.test.ts) via regex as a cross-language source of truth.
+#[allow(dead_code)]
+pub(crate) const MAX_REASON_LEN: usize = 280;
+#[allow(dead_code)]
+pub(crate) const MAX_SUGGESTION_LIMIT: u32 = 50;
+#[allow(dead_code)]
+pub(crate) const FOLLOW_SUGGESTION_SAMPLE: usize = 10;
+#[allow(dead_code)]
 pub(crate) const DEREGISTER_RATE_LIMIT: u32 = 1;
+#[allow(dead_code)]
 pub(crate) const DEREGISTER_RATE_WINDOW_SECS: u64 = 300;
 
-/// Rate-limited action names that store **per-handle** keys.
-/// Used by deregister to clean up rate-limit state.
-///
-/// Excludes `deregister` (keyed on NEAR account, not handle, so it
-/// intentionally survives re-registration) and `suggested` (keyed on
-/// caller and cleaned separately in `delete_aux_data`).
-pub(crate) const RATE_LIMITED_ACTIONS: &[&str] = &[
-    "follow",
-    "unfollow",
-    "endorse",
-    "unendorse",
-    "update_me",
-    "heartbeat",
-    "migrate_account",
-];
-const _: () = assert!(FOLLOW_RATE_WINDOW_SECS > 0, "rate window must be nonzero");
-const _: () = assert!(ENDORSE_RATE_WINDOW_SECS > 0, "rate window must be nonzero");
+pub(crate) const UPDATE_RATE_LIMIT: u32 = 10;
+pub(crate) const UPDATE_RATE_WINDOW_SECS: u64 = 60;
 
 pub(crate) const MAX_PLATFORMS: usize = 10;
 pub(crate) const MAX_PLATFORM_ID_LEN: usize = 64;
 pub(crate) const MAX_CAPABILITY_DEPTH: usize = 4;
 
+#[allow(dead_code)]
 pub(crate) const MAX_NOTIF_INDEX: usize = 500;
+#[allow(dead_code)]
 pub(crate) const DEDUP_WINDOW_SECS: u64 = 3600;
-pub(crate) const NOTIF_RETENTION_SECS: u64 = 7 * SECS_PER_DAY;
-/// Heartbeat timestamp modulus for probabilistic count reconciliation (~2%).
-pub(crate) const RECONCILE_MODULUS: u64 = 50;
-/// Multiplier applied to suggestion limit to form the candidate pool.
-pub(crate) const SUGGESTION_CANDIDATE_MULTIPLIER: usize = 5;
-/// Minimum number of candidates to consider for suggestions.
-pub(crate) const MIN_SUGGESTION_CANDIDATES: usize = 50;
-
-pub(crate) const PAGERANK_WALKS: usize = 200;
-pub(crate) const WALK_DEPTH: usize = 5;
-pub(crate) const TELEPORT_PCT: u64 = 15;
-pub(crate) const SCORE_QUANTIZE_FACTOR: f64 = 100.0;
 
 #[derive(Debug)]
 pub(crate) enum AppError {
@@ -464,38 +403,11 @@ impl From<AppError> for Response {
     }
 }
 
-pub(crate) fn parse_u64_param(
-    name: &str,
-    value: Option<&String>,
-    default: u64,
-) -> Result<u64, Response> {
-    match value {
-        Some(s) => s.parse::<u64>().map_err(|_| {
-            AppError::Validation(format!(
-                "Invalid '{name}' value: expected numeric timestamp"
-            ))
-            .into()
-        }),
-        None => Ok(default),
-    }
-}
-
 pub(crate) struct Warnings(Vec<String>);
 
 impl Warnings {
     pub fn new() -> Self {
         Self(Vec::new())
-    }
-
-    pub fn on_err(&mut self, label: &str, r: Result<(), impl std::fmt::Display>) {
-        if let Err(e) = r {
-            eprintln!("[warning] {label}: {e}");
-            self.0.push(format!("{label}: failed"));
-        }
-    }
-
-    pub fn push(&mut self, msg: String) {
-        self.0.push(msg);
     }
 
     pub fn extend(&mut self, other: Vec<String>) {
@@ -535,9 +447,6 @@ mod enum_consistency_tests {
             Action::SetPlatforms,
             Action::ReconcileAll,
             Action::AdminDeregister,
-            Action::BatchFollow,
-            Action::BatchEndorse,
-            Action::SmokeTestStorage,
         ];
         for action in &all_actions {
             let serde_str = serde_json::to_value(action)

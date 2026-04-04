@@ -139,9 +139,6 @@ fn all_action_variants_deserialize_from_snake_case() {
         "set_platforms",
         "reconcile_all",
         "admin_deregister",
-        "batch_follow",
-        "batch_endorse",
-        "smoke_test_storage",
     ];
     for action_str in &actions {
         let json = format!(r#""{action_str}""#);
@@ -150,7 +147,7 @@ fn all_action_variants_deserialize_from_snake_case() {
     }
     assert_eq!(
         actions.len(),
-        21,
+        18,
         "Action count mismatch — did you add a new action?"
     );
 }
@@ -165,25 +162,6 @@ fn duplicate_tags_are_deduplicated() {
 fn duplicate_tags_case_insensitive() {
     let result = validate_tags(&["Rust".into(), "rust".into()]).unwrap();
     assert_eq!(result, vec!["rust"]);
-}
-
-#[test]
-fn validate_reason_accepts_valid() {
-    assert!(validate_reason("Interesting agent").is_ok());
-    assert!(validate_reason("").is_ok());
-    assert!(validate_reason("Multi-line\nreason").is_ok());
-    assert!(validate_reason(&"a".repeat(280)).is_ok());
-}
-
-#[test]
-fn validate_reason_rejects_over_limit() {
-    assert!(validate_reason(&"a".repeat(281)).is_err());
-}
-
-#[test]
-fn validate_reason_rejects_control_chars() {
-    assert!(validate_reason("has\x00null").is_err());
-    assert!(validate_reason("has\ttab").is_err());
 }
 
 #[test]

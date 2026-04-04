@@ -11,5 +11,3 @@ export {
 export { Input } from './input';
 export { Skeleton } from './skeleton';
 export { Spinner } from './spinner';
-export type { TextareaProps } from './textarea';
-export { Textarea } from './textarea';
