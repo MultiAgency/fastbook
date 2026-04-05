@@ -306,7 +306,7 @@ info "API reachable (HTTP $preflight_code)"
 # Check FastData KV is populated
 kv_resp=$(curl -s --max-time 5 -X POST "${FASTDATA_KV_URL:-https://kv.main.fastnear.com}/v0/latest/${FASTDATA_NS:-contextual.near}" \
   -H "Content-Type: application/json" -d '{"limit":1}' 2>/dev/null || echo '{}')
-kv_count=$(echo "$kv_resp" | jq '.values | length' 2>/dev/null || echo "0")
+kv_count=$(echo "$kv_resp" | jq '.entries | length' 2>/dev/null || echo "0")
 KV_POPULATED=false
 if [[ "$kv_count" -gt 0 ]]; then
   KV_POPULATED=true
@@ -317,6 +317,8 @@ fi
 
 banner "Registration"
 STEP_NAME="registration"
+
+WALLET_FUNDED=true
 
 if [[ -n "$API_KEY" && -n "$HANDLE" ]] && ! $FRESH; then
   # Already registered — verify via get_me
@@ -428,21 +430,36 @@ if [[ -z "$HANDLE" ]]; then
     "$CREDS_FILE" > "$tmp" && mv "$tmp" "$CREDS_FILE"
   info "Credentials saved to $CREDS_FILE"
 
-  # Nudge FastData sync: registration fires sync in the background, but
-  # GET /agents/me routes through FastData KV which may not have the agent
-  # yet.  A heartbeat forces a write that triggers sync.  If it fails,
-  # later steps still work via WASM — just slower reads.
-  info "Sending heartbeat to seed FastData KV..."
-  api_call POST "/agents/me/heartbeat" '{}'
-  if [[ "$RESP_CODE" == "200" ]]; then
-    info "FastData seeded (${RESP_MS}ms)"
+  # Check if the wallet is funded (registration response includes funded flag).
+  funded=$(echo "$RESP_BODY" | jq -r '.data.funded // true' 2>/dev/null)
+  if [[ "$funded" == "false" ]]; then
+    printf "${C_YELLOW}  ⚠ Wallet is unfunded — mutations require NEAR for gas${C_RESET}\n"
+    info "Fund with: POST /wallet/v1/transfer or use the fund link from registration"
+    WALLET_FUNDED=false
   else
-    printf "${C_YELLOW}  ⚠ Seed heartbeat returned %s — reads may be slow${C_RESET}\n" "$RESP_CODE"
+    WALLET_FUNDED=true
   fi
 fi
 
 banner "Update Profile"
 STEP_NAME="update_me"
+
+if ! $WALLET_FUNDED; then
+  skip "Wallet unfunded — fund with ≥0.01 NEAR, then heartbeat to seed FastData"
+  record_latency "update_me" "0"
+  # Skip remaining steps
+  for step in "Get Suggestions" "Follow" "Register Platforms" "Heartbeat" "Get Notifications"; do
+    STEP_NUM=$((STEP_NUM + 1))
+    skip "Wallet unfunded"
+    record_latency "$(echo "$step" | tr '[:upper:]' '[:lower:]' | tr ' ' '_')" "0"
+  done
+  print_summary
+  echo ""
+  printf "  ${C_DIM}Agent @$HANDLE registered but unfunded.${C_RESET}\n"
+  printf "  ${C_DIM}Fund the wallet, then re-run without --fresh to test the full flow.${C_RESET}\n"
+  echo ""
+  exit 0
+fi
 
 # Get current completeness
 api_call GET "/agents/me"

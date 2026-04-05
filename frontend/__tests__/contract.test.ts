@@ -134,7 +134,7 @@ describe('contract: getAgent is_following optionality', () => {
   it('should accept response without is_following field', async () => {
     mockSuccess({ agent: STUB_AGENT });
 
-    const result = await api.getAgent('test_bot');
+    const result = await api.getAgent('test.near');
 
     expect(result.is_following).toBeUndefined();
   });
@@ -151,7 +151,7 @@ describe('contract: getAgent my_endorsements', () => {
       my_endorsements: { tags: ['ai', 'nlp'] },
     });
 
-    const result = await api.getAgent('test_bot');
+    const result = await api.getAgent('test.near');
 
     expect(result.my_endorsements).toBeDefined();
     expect(result.my_endorsements!.tags).toEqual(['ai', 'nlp']);
@@ -202,7 +202,7 @@ describe('contract: getFollowers returns edge metadata', () => {
 
     mockPaginated([edgeAgent], { limit: 50 });
 
-    const result = await api.getFollowers('test_bot');
+    const result = await api.getFollowers('test.near');
 
     expect(result.agents[0].direction).toBe('incoming');
     expect(result.agents[0].follow_reason).toBe('shared tags: ai');
@@ -222,7 +222,7 @@ describe('contract: getFollowing returns edge metadata', () => {
 
     mockPaginated([edgeAgent], { limit: 50 });
 
-    const result = await api.getFollowing('test_bot');
+    const result = await api.getFollowing('test.near');
 
     expect(result.agents[0].direction).toBe('outgoing');
     expect(result.agents[0].followed_at).toBe(1700000600);
@@ -316,14 +316,14 @@ describe('contract: endorseAgent includes warnings', () => {
   it('should expose warnings array from endorse response', async () => {
     mockSuccess({
       action: 'endorsed',
-      handle: 'test_bot',
+      account_id: 'test.near',
       agent: STUB_AGENT,
       endorsed: { tags: ['ai'] },
       already_endorsed: {},
       warnings: ['endorsement index rebuild: minor error'],
     });
 
-    const result = await api.endorseAgent('test_bot', { tags: ['ai'] });
+    const result = await api.endorseAgent('test.near', { tags: ['ai'] });
 
     expect(result.action).toBe('endorsed');
     expect(result.warnings).toEqual(['endorsement index rebuild: minor error']);
@@ -334,13 +334,13 @@ describe('contract: unendorseAgent includes warnings', () => {
   it('should expose warnings array from unendorse response', async () => {
     mockSuccess({
       action: 'unendorsed',
-      handle: 'test_bot',
+      account_id: 'test.near',
       agent: STUB_AGENT,
       removed: { tags: ['ai'] },
       warnings: ['endorsement cleanup: minor error'],
     });
 
-    const result = await api.unendorseAgent('test_bot', { tags: ['ai'] });
+    const result = await api.unendorseAgent('test.near', { tags: ['ai'] });
 
     expect(result.action).toBe('unendorsed');
     expect(result.warnings).toEqual(['endorsement cleanup: minor error']);
@@ -348,44 +348,21 @@ describe('contract: unendorseAgent includes warnings', () => {
 });
 
 // ---------------------------------------------------------------------------
-// deregister: returns action, handle, and optional warnings
+// deregister: returns action, account_id, and optional warnings
 // ---------------------------------------------------------------------------
 describe('contract: deregister', () => {
-  it('should return action, handle, and warnings', async () => {
+  it('should return action, account_id, and warnings', async () => {
     mockSuccess({
       action: 'deregistered',
-      handle: 'test_bot',
+      account_id: 'test.near',
       warnings: ['failed to update follower some_bot'],
     });
 
     const result = await api.deregister();
 
     expect(result.action).toBe('deregistered');
-    expect(result.handle).toBe('test_bot');
+    expect(result.account_id).toBe('test.near');
     expect(result.warnings).toEqual(['failed to update follower some_bot']);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// checkHandle: returns handle and availability
-// ---------------------------------------------------------------------------
-describe('contract: checkHandle', () => {
-  it('should return handle and available boolean', async () => {
-    mockSuccess({ handle: 'new_bot', available: true });
-
-    const result = await api.checkHandle('new_bot');
-
-    expect(result.handle).toBe('new_bot');
-    expect(result.available).toBe(true);
-  });
-
-  it('should include reason when handle is unavailable', async () => {
-    mockSuccess({ handle: 'admin', available: false, reason: 'reserved' });
-
-    const result = await api.checkHandle('admin');
-
-    expect(result.available).toBe(false);
-    expect(result.reason).toBe('reserved');
   });
 });
 
@@ -446,7 +423,7 @@ describe('contract: listAgents', () => {
 describe('contract: getEdges', () => {
   it('should return full edge response with history and pagination', async () => {
     mockSuccess({
-      handle: 'test_bot',
+      account_id: 'test.near',
       edges: [
         {
           ...STUB_AGENT,
@@ -460,11 +437,11 @@ describe('contract: getEdges', () => {
       pagination: { limit: 50, next_cursor: 'edge_cursor_1' },
     });
 
-    const result = await api.getEdges('test_bot', {
+    const result = await api.getEdges('test.near', {
       direction: 'incoming',
     });
 
-    expect(result.handle).toBe('test_bot');
+    expect(result.account_id).toBe('test.near');
     expect(result.edges).toHaveLength(1);
     expect(result.edges[0].direction).toBe('incoming');
     expect(result.edges[0].follow_reason).toBe('shared tags');
@@ -500,14 +477,15 @@ describe('contract: getNetwork', () => {
 // getEndorsers: nested endorsers map
 // ---------------------------------------------------------------------------
 describe('contract: getEndorsers', () => {
-  it('should return handle and nested endorsers map', async () => {
+  it('should return account_id and nested endorsers map', async () => {
     mockSuccess({
-      handle: 'test_bot',
+      account_id: 'test.near',
       endorsers: {
         tags: {
           ai: [
             {
               handle: 'alice',
+              near_account_id: 'alice.near',
               description: 'Agent Alice',
               reason: 'good at ai',
               at: 1700002000,
@@ -517,9 +495,9 @@ describe('contract: getEndorsers', () => {
       },
     });
 
-    const result = await api.getEndorsers('test_bot');
+    const result = await api.getEndorsers('test.near');
 
-    expect(result.handle).toBe('test_bot');
+    expect(result.account_id).toBe('test.near');
     expect(result.endorsers.tags.ai).toHaveLength(1);
     expect(result.endorsers.tags.ai[0].handle).toBe('alice');
     expect(result.endorsers.tags.ai[0].at).toBe(1700002000);
@@ -529,37 +507,6 @@ describe('contract: getEndorsers', () => {
 // ===========================================================================
 // ERROR-PATH TESTS
 // ===========================================================================
-
-// ---------------------------------------------------------------------------
-// Client-side handle validation: rejects before fetch
-// ---------------------------------------------------------------------------
-describe('contract errors: client-side handle validation', () => {
-  it.each([
-    ['getAgent', () => api.getAgent('BAD!')],
-    ['followAgent', () => api.followAgent('BAD!')],
-    ['unfollowAgent', () => api.unfollowAgent('BAD!')],
-    ['endorseAgent', () => api.endorseAgent('BAD!', { tags: ['ai'] })],
-    ['unendorseAgent', () => api.unendorseAgent('BAD!', { tags: ['ai'] })],
-    ['getEdges', () => api.getEdges('BAD!')],
-    ['getEndorsers', () => api.getEndorsers('BAD!')],
-    ['getFollowers', () => api.getFollowers('BAD!')],
-    ['getFollowing', () => api.getFollowing('BAD!')],
-  ])('%s rejects invalid handle before fetch', async (_name, call) => {
-    await expect(call()).rejects.toMatchObject({
-      statusCode: 400,
-      message: expect.stringContaining('Invalid handle'),
-    });
-    expect(mockFetch).not.toHaveBeenCalled();
-  });
-
-  it('rejects reserved handle "admin"', async () => {
-    await expect(api.getAgent('admin')).rejects.toMatchObject({
-      statusCode: 400,
-      message: expect.stringContaining('Invalid handle'),
-    });
-    expect(mockFetch).not.toHaveBeenCalled();
-  });
-});
 
 // ---------------------------------------------------------------------------
 // AUTH_REQUIRED: authenticated endpoints throw 401 without API key
@@ -573,10 +520,13 @@ describe('contract errors: AUTH_REQUIRED (no API key)', () => {
     ['heartbeat', () => api.heartbeat()],
     ['register', () => api.register({ handle: 'new_bot' })],
     ['deregister', () => api.deregister()],
-    ['followAgent', () => api.followAgent('test_bot')],
-    ['unfollowAgent', () => api.unfollowAgent('test_bot')],
-    ['endorseAgent', () => api.endorseAgent('test_bot', { tags: ['ai'] })],
-    ['unendorseAgent', () => api.unendorseAgent('test_bot', { tags: ['ai'] })],
+    ['followAgent', () => api.followAgent('test_bot.near')],
+    ['unfollowAgent', () => api.unfollowAgent('test_bot.near')],
+    ['endorseAgent', () => api.endorseAgent('test_bot.near', { tags: ['ai'] })],
+    [
+      'unendorseAgent',
+      () => api.unendorseAgent('test_bot.near', { tags: ['ai'] }),
+    ],
     ['getActivity', () => api.getActivity()],
     ['getNetwork', () => api.getNetwork()],
     ['getSuggested', () => api.getSuggested()],
@@ -593,20 +543,19 @@ describe('contract errors: public endpoints without auth', () => {
   beforeEach(() => api.clearCredentials());
 
   it.each([
-    ['checkHandle', () => api.checkHandle('test_bot')],
-    ['getAgent', () => api.getAgent('test_bot')],
+    ['getAgent', () => api.getAgent('test_bot.near')],
     ['listTags', () => api.listTags()],
-    ['getEdges', () => api.getEdges('test_bot')],
-    ['getEndorsers', () => api.getEndorsers('test_bot')],
+    ['getEdges', () => api.getEdges('test_bot.near')],
+    ['getEndorsers', () => api.getEndorsers('test_bot.near')],
   ])('%s resolves without API key (public)', async (_name, call) => {
-    mockSuccess({ handle: 'test_bot', available: true });
+    mockSuccess({ account_id: 'test_bot.near', available: true });
     await expect(call()).resolves.toBeDefined();
   });
 
   it.each([
     ['listAgents', () => api.listAgents()],
-    ['getFollowers', () => api.getFollowers('test_bot')],
-    ['getFollowing', () => api.getFollowing('test_bot')],
+    ['getFollowers', () => api.getFollowers('test_bot.near')],
+    ['getFollowing', () => api.getFollowing('test_bot.near')],
   ])('%s resolves without API key (public paginated)', async (_name, call) => {
     mockPaginated([], { limit: 50 });
     await expect(call()).resolves.toBeDefined();
@@ -618,12 +567,12 @@ describe('contract errors: public endpoints without auth', () => {
 // ---------------------------------------------------------------------------
 describe('contract errors: NOT_FOUND', () => {
   it.each([
-    ['getAgent', () => api.getAgent('nonexistent_bot')],
-    ['followAgent', () => api.followAgent('nonexistent_bot')],
-    ['unfollowAgent', () => api.unfollowAgent('nonexistent_bot')],
+    ['getAgent', () => api.getAgent('nonexistent_bot.near')],
+    ['followAgent', () => api.followAgent('nonexistent_bot.near')],
+    ['unfollowAgent', () => api.unfollowAgent('nonexistent_bot.near')],
     [
       'endorseAgent',
-      () => api.endorseAgent('nonexistent_bot', { tags: ['ai'] }),
+      () => api.endorseAgent('nonexistent_bot.near', { tags: ['ai'] }),
     ],
   ] as const)('%s returns 404', async (_name, call) => {
     mockWasmError('Agent not found', 'NOT_FOUND');
@@ -686,22 +635,22 @@ describe('contract errors: self-action', () => {
     [
       'SELF_FOLLOW',
       'Cannot follow yourself',
-      () => api.followAgent('my_own_bot'),
+      () => api.followAgent('my_own_bot.near'),
     ],
     [
       'SELF_UNFOLLOW',
       'Cannot unfollow yourself',
-      () => api.unfollowAgent('my_own_bot'),
+      () => api.unfollowAgent('my_own_bot.near'),
     ],
     [
       'SELF_ENDORSE',
       'Cannot endorse yourself',
-      () => api.endorseAgent('my_own_bot', { tags: ['ai'] }),
+      () => api.endorseAgent('my_own_bot.near', { tags: ['ai'] }),
     ],
     [
       'SELF_UNENDORSE',
       'Cannot unendorse yourself',
-      () => api.unendorseAgent('my_own_bot', { tags: ['ai'] }),
+      () => api.unendorseAgent('my_own_bot.near', { tags: ['ai'] }),
     ],
   ] as const)('%s maps to 400', async (code, message, call) => {
     mockWasmError(message, code);

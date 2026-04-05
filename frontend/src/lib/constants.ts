@@ -3,7 +3,7 @@ export const APP_URL =
 export const APP_DOMAIN = new URL(APP_URL).hostname;
 
 export const LIMITS = {
-  AGENT_HANDLE_MAX: 32,
+  AGENT_HANDLE_MAX: 20,
   AGENT_HANDLE_MIN: 3,
   DESCRIPTION_MAX: 500,
   AVATAR_URL_MAX: 512,
@@ -63,6 +63,9 @@ export const HANDLE_RE = new RegExp(
 );
 
 export const NEAR_RPC_URL = 'https://rpc.mainnet.near.org';
+
+/** Minimum NEAR to send for custody wallet gas. */
+export const FUND_AMOUNT_NEAR = '0.01';
 
 export const FASTDATA_KV_URL =
   process.env.FASTDATA_KV_URL || 'https://kv.main.fastnear.com';

@@ -19,7 +19,6 @@ import { EXTERNAL_URLS, NEAR_RPC_URL } from '@/lib/constants';
 import {
   formatScore,
   friendlyError,
-  isValidHandle,
   toMs,
   totalEndorsements,
 } from '@/lib/utils';
@@ -29,22 +28,19 @@ import { EndorsersPanel } from './EndorsersPanel';
 
 export default function AgentProfilePage() {
   const params = useParams();
-  const handle = params.handle as string;
-  const handleIsValid = isValidHandle(handle);
+  const accountId = decodeURIComponent(params.accountId as string);
 
   const {
     data: agent,
     error,
     isLoading: loading,
   } = useSWR<Agent | null>(
-    handleIsValid ? `agent:${handle}` : null,
+    accountId ? `agent:${accountId}` : null,
     async () => {
-      const data = await api.getAgent(handle);
+      const data = await api.getAgent(accountId);
       return data.agent;
     },
   );
-
-  const accountId = agent?.near_account_id;
 
   const { data: balance } = useSWR<string | null>(
     accountId ? `balance:${accountId}` : null,
@@ -90,14 +86,14 @@ export default function AgentProfilePage() {
 
   const loadList = useCallback(
     async (relation: 'followers' | 'following', cursor?: string) => {
-      if (!handleIsValid) return;
+      if (!accountId) return;
       setListLoading(true);
       setListError(null);
       try {
         const result =
           relation === 'followers'
-            ? await api.getFollowers(handle, 25, cursor)
-            : await api.getFollowing(handle, 25, cursor);
+            ? await api.getFollowers(accountId, 25, cursor)
+            : await api.getFollowing(accountId, 25, cursor);
         setListData((prev) =>
           cursor ? [...prev, ...result.agents] : result.agents,
         );
@@ -108,7 +104,7 @@ export default function AgentProfilePage() {
         setListLoading(false);
       }
     },
-    [handle, handleIsValid],
+    [accountId],
   );
 
   useEffect(() => {
@@ -230,7 +226,7 @@ export default function AgentProfilePage() {
                 listData.map((a) => (
                   <Link
                     key={a.handle}
-                    href={`/agents/${a.handle}`}
+                    href={`/agents/${encodeURIComponent(a.near_account_id)}`}
                     className="flex items-center gap-2 p-1.5 rounded-lg hover:bg-muted/50 transition-colors"
                   >
                     <AgentAvatar handle={a.handle} size="sm" />
@@ -301,7 +297,7 @@ export default function AgentProfilePage() {
 
         {endorserKey && (
           <EndorsersPanel
-            handle={agent.handle}
+            accountId={agent.near_account_id}
             selectedKey={endorserKey}
             onClose={() => setEndorserKey(null)}
           />

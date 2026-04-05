@@ -7,14 +7,14 @@ See [README.md](README.md) for the proposal narrative and NEP-413 spec. See [AGE
 ## Architecture
 
 - **OutLayer Agent Custody wallets** (`wk_` keys) are the core value — NEAR accounts for agents.
-- **Only registration requires WASM** (handle uniqueness is a global check-and-set). All other mutations move to direct FastData writes via proxy + custody wallet.
+- **Registration uses WASM** as a convenience wrapper, but is not strictly required — any NEAR account that writes correct keys to FastData is a first-class citizen. All other mutations use direct FastData writes via proxy + custody wallet.
 - **Web UI is for humans; agents interact via API.** Don't flag missing UI for API-first features.
 - **Counts** (followers, endorsements, mutuals) are computed from graph traversal, not stored values — no WASM needed to protect them.
 - **reconcile_all** is the deliberate backstop. Do not build retry queues.
 
 ## Current Status
 
-Direct FastData write migration is complete — all non-registration mutations go through `fastdata-write.ts`. WASM handles registration only (+ VRF seed for suggestions).
+Direct FastData write migration is complete — all non-registration mutations go through `fastdata-write.ts`. WASM handles registration (+ VRF seed for suggestions). Identity is account-ID-based — handles are optional display names.
 
 ## Auth: `wk_` vs `near:` Tokens
 
@@ -30,12 +30,12 @@ Direct FastData write migration is complete — all non-registration mutations g
 
 ## FastData Read/Write Split
 
-- All reads go to **FastData KV** — no fallback. If FastData is empty, reads 404.
+- All reads go to **FastData KV** — no fallback. If FastData is empty, reads 404. Exception: heartbeat bootstraps newly funded wallets from WASM via `GetBootstrap` on first call.
 - All non-registration writes go directly to FastData via proxy + `wk_` custody wallet signing `__fastdata_kv` transactions.
-- Graph query: `POST /v0/latest/contextual.near` with `{"key": "graph/follow/bob"}` returns all predecessors (paginated, 200/page, up to 10k).
+- Graph query: `POST /v0/latest/contextual.near` with `{"key": "graph/follow/bob.near"}` returns all predecessors (paginated, 200/page, up to 10k).
 - Proxy-side validation replaces WASM validation for self-follow/endorse prevention, rate limiting, field validation.
 - reconcile_all is a read-only FastData audit — scans all agents and reports count discrepancies.
-- admin_deregister writes a `deregistered/{handle}` marker under the admin's predecessor. Read handlers check this marker to exclude the agent from results. The agent's own per-predecessor data is not deleted (can't write under another predecessor).
+- admin_deregister writes a `deregistered/{accountId}` marker under the admin's predecessor. Read handlers check this marker to exclude the agent from results. The agent's own per-predecessor data is not deleted (can't write under another predecessor).
 
 ## Build / Test / Deploy
 

@@ -33,7 +33,6 @@ pub(crate) struct Nep413Auth {
 #[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Action {
-    Register,
     GetVrfSeed,
     /// Catch-all for actions that migrated to direct FastData writes.
     #[serde(other)]
@@ -43,7 +42,6 @@ pub(crate) enum Action {
 impl Action {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Register => "register",
             Self::GetVrfSeed => "get_vrf_seed",
             Self::Other => "other",
         }
@@ -132,7 +130,11 @@ fn default_capabilities() -> serde_json::Value {
     serde_json::json!({})
 }
 
-pub(crate) const MAX_HANDLE_LEN: usize = 32;
+// Dead in Rust but parsed by frontend/__tests__/constant-sync.test.ts
+// as a cross-language source of truth.
+#[allow(dead_code)]
+pub(crate) const MAX_HANDLE_LEN: usize = 20;
+#[allow(dead_code)]
 pub(crate) const MIN_HANDLE_LEN: usize = 3;
 pub(crate) const MAX_DESCRIPTION_LEN: usize = 500;
 pub(crate) const MAX_TAGS: usize = 10;
@@ -172,6 +174,9 @@ impl std::fmt::Display for AppError {
     }
 }
 
+// Dead in Rust but parsed by frontend/__tests__/constant-sync.test.ts
+// as a cross-language source of truth.
+#[allow(dead_code)]
 pub(crate) const RESERVED_HANDLES: &[&str] = &[
     "admin",
     "agent",
@@ -256,20 +261,19 @@ mod enum_consistency_tests {
     /// Other is a catch-all and doesn't round-trip through serde.
     #[test]
     fn action_as_str_matches_serde() {
-        for action in &[Action::Register, Action::GetVrfSeed] {
-            let serde_str = serde_json::to_value(action)
-                .expect("Action should serialize")
-                .as_str()
-                .expect("Action should serialize as string")
-                .to_string();
-            assert_eq!(
-                action.as_str(),
-                serde_str,
-                "Action::{action:?} as_str() = {:?} but serde = {:?}",
-                action.as_str(),
-                serde_str,
-            );
-        }
+        let action = Action::GetVrfSeed;
+        let serde_str = serde_json::to_value(action)
+            .expect("Action should serialize")
+            .as_str()
+            .expect("Action should serialize as string")
+            .to_string();
+        assert_eq!(
+            action.as_str(),
+            serde_str,
+            "Action::{action:?} as_str() = {:?} but serde = {:?}",
+            action.as_str(),
+            serde_str,
+        );
     }
 
     /// Verify that unknown actions deserialize to Other.

@@ -74,23 +74,19 @@ describe('Frontend ↔ Rust constant sync', () => {
 // RESPONSE comment ↔ OpenAPI sync
 // ---------------------------------------------------------------------------
 
-const HANDLER_DIR = resolve(__dirname, '../../wasm/src/handlers');
+const HANDLER_DIR = resolve(__dirname, '../../wasm/src');
 const OPENAPI_PATH = resolve(__dirname, '../public/openapi.json');
 
 // Maps WASM handler function names to action strings.
 // Only registration lives in WASM — all other mutations use direct FastData
 // writes, and reads go through FastData KV dispatch.
-const HANDLER_TO_ACTION: Record<string, string> = {
-  handle_register: 'register',
-};
+const HANDLER_TO_ACTION: Record<string, string> = {};
 
 // Handlers with RESPONSE comments but intentionally excluded from openapi.json.
 const EXCLUDED_HANDLERS = new Set<string>();
 
 // Maps action strings to OpenAPI paths.
-const ACTION_TO_PATH: Record<string, [string, string]> = {
-  register: ['post', '/agents/register'],
-};
+const ACTION_TO_PATH: Record<string, [string, string]> = {};
 
 function extractResponseComments(): {
   handler: string;

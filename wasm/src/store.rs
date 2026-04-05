@@ -156,26 +156,18 @@ pub(crate) mod test_backend {
 /// Storage key schema (all colon-delimited):
 ///
 /// User-scoped (pub: prefix — atomic, TOCTOU-safe):
-///   pub:agent:{handle}                            — full AgentRecord JSON
-///   pub:agent_reg:{handle}                        — registry marker (value = "1")
-///   pub:near:{account_id}                         — account → handle mapping
-///       Can become stale after partial failures; `agent_handle_for_account()`
-///       verifies the agent record before returning, so stale mappings are
-///       invisible to callers.
+///   pub:agent:{account_id}                        — full AgentRecord JSON
+///   pub:agent_reg:{account_id}                    — registry marker (value = "1")
 ///
 /// Worker-scoped (auxiliary, RMW — requires serialised execution):
 ///   nonce:{nonce_val}          — replay-protection marker (user-scoped atomic)
 ///   nonce_idx                  — JSON array of active nonce keys
 pub mod keys {
-    pub fn pub_agent(handle: &str) -> String {
-        format!("pub:agent:{handle}")
+    pub fn pub_agent(account_id: &str) -> String {
+        format!("pub:agent:{account_id}")
     }
-    pub fn pub_agent_reg(handle: &str) -> String {
-        format!("pub:agent_reg:{handle}")
-    }
-
-    pub fn near_account(account_id: &str) -> String {
-        format!("pub:near:{account_id}")
+    pub fn pub_agent_reg(account_id: &str) -> String {
+        format!("pub:agent_reg:{account_id}")
     }
 
     pub fn nonce(nonce_val: &str) -> String {

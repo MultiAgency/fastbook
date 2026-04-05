@@ -1,46 +1,6 @@
 use super::*;
 
 #[test]
-fn valid_handles() {
-    assert!(validate_handle("alice").is_ok());
-    assert!(validate_handle("agent_007").is_ok());
-    assert!(validate_handle("abc").is_ok());
-    assert!(validate_handle(&"a".repeat(32)).is_ok());
-}
-
-#[test]
-fn handle_rejects_too_short() {
-    assert!(validate_handle("ab").is_err());
-    assert!(validate_handle("a").is_err());
-    assert!(validate_handle("").is_err());
-}
-
-#[test]
-fn handle_rejects_too_long() {
-    assert!(validate_handle(&"a".repeat(33)).is_err());
-}
-
-#[test]
-fn handle_rejects_special_chars() {
-    assert!(validate_handle("my-agent").is_err());
-    assert!(validate_handle("my agent").is_err());
-    assert!(validate_handle("agent@bot").is_err());
-}
-
-#[test]
-fn handle_rejects_reserved() {
-    assert!(validate_handle("admin").is_err());
-    assert!(validate_handle("system").is_err());
-    assert!(validate_handle("near").is_err());
-}
-
-#[test]
-fn handle_lowercases() {
-    assert_eq!(validate_handle("Alice").unwrap(), "alice");
-    assert_eq!(validate_handle("MyBot").unwrap(), "mybot");
-}
-
-#[test]
 fn valid_tags() {
     assert!(validate_tags(&["rust".into(), "ai".into()]).is_ok());
     assert!(validate_tags(&["web-3".into()]).is_ok());
@@ -76,54 +36,7 @@ fn tags_lowercase() {
 }
 
 #[test]
-fn profile_completeness_empty() {
-    let agent = make_agent("test");
-    assert_eq!(profile_completeness(&agent), 0);
-}
-
-#[test]
-fn profile_completeness_full() {
-    let mut agent = make_agent("test");
-    agent.description = "A test agent for validation".to_string();
-    agent.tags = vec!["rust".into()];
-    agent.capabilities = serde_json::json!({"skills": ["chat"]});
-    assert_eq!(profile_completeness(&agent), 100);
-}
-
-#[test]
-fn profile_completeness_description_boundary() {
-    let mut agent = make_agent("test");
-    agent.description = "exactly_10".to_string();
-    assert_eq!(agent.description.len(), 10);
-    assert_eq!(profile_completeness(&agent), 0); // not > 10
-
-    agent.description = "eleven_char".to_string();
-    assert_eq!(agent.description.len(), 11);
-    assert_eq!(profile_completeness(&agent), 30);
-}
-
-#[test]
-fn profile_completeness_tags_add_score() {
-    let mut agent = make_agent("test");
-    let without_tags = profile_completeness(&agent);
-    agent.tags = vec!["ai".into()];
-    let with_tags = profile_completeness(&agent);
-    assert!(with_tags > without_tags);
-}
-
-#[test]
-fn all_reserved_handles_rejected() {
-    for &h in RESERVED_HANDLES {
-        assert!(validate_handle(h).is_err(), "Expected {h} to be reserved");
-    }
-}
-
-#[test]
 fn active_actions_deserialize_to_named_variants() {
-    assert_eq!(
-        serde_json::from_str::<Action>(r#""register""#).unwrap(),
-        Action::Register,
-    );
     assert_eq!(
         serde_json::from_str::<Action>(r#""get_vrf_seed""#).unwrap(),
         Action::GetVrfSeed,
@@ -131,8 +44,22 @@ fn active_actions_deserialize_to_named_variants() {
 }
 
 #[test]
+fn retired_actions_deserialize_to_other() {
+    assert_eq!(
+        serde_json::from_str::<Action>(r#""register""#).unwrap(),
+        Action::Other,
+    );
+    assert_eq!(
+        serde_json::from_str::<Action>(r#""get_bootstrap""#).unwrap(),
+        Action::Other,
+    );
+}
+
+#[test]
 fn migrated_actions_deserialize_to_other() {
     for action_str in &[
+        "register",
+        "get_bootstrap",
         "get_me",
         "update_me",
         "follow",

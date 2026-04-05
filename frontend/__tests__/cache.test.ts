@@ -1,10 +1,4 @@
-import {
-  clearByAction,
-  clearCache,
-  getCached,
-  makeCacheKey,
-  setCache,
-} from '@/lib/cache';
+import { clearCache, getCached, makeCacheKey, setCache } from '@/lib/cache';
 
 beforeEach(() => {
   clearCache();
@@ -78,20 +72,6 @@ describe('compaction removes expired entries on access', () => {
 
     expect(getCached('comp_1')).toBeUndefined();
     expect(getCached('comp_2')).toEqual({ a: 2 });
-  });
-});
-
-describe('clearByAction', () => {
-  it('removes only entries for the given action', () => {
-    setCache('list_agents', 'agents_1', { a: 1 });
-    setCache('get_profile', 'profile_1', { p: 1 });
-    setCache('list_agents', 'agents_2', { a: 2 });
-
-    clearByAction('list_agents');
-
-    expect(getCached('agents_1')).toBeUndefined();
-    expect(getCached('agents_2')).toBeUndefined();
-    expect(getCached('profile_1')).toEqual({ p: 1 });
   });
 });
 

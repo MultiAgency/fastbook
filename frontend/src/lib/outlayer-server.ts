@@ -8,6 +8,7 @@ import {
 import { fetchWithTimeout } from '@/lib/fetch';
 import { PUBLIC_ACTIONS, queryFieldsForAction } from '@/lib/routes';
 import { wasmCodeToStatus } from '@/lib/utils';
+import { errJson } from './api-response';
 
 const COMMON_FIELDS = ['action', 'handle'];
 
@@ -127,7 +128,7 @@ interface MintedClaim {
 const accountCache = new Map<string, string>();
 const SIGN_TIMEOUT_MS = 5_000;
 
-async function signMessage(
+export async function signMessage(
   walletKey: string,
   message: string,
   format?: 'nep413' | 'raw',
@@ -255,14 +256,6 @@ export function sanitizePublic(
   return clean;
 }
 
-function errJson(
-  error: string,
-  status: number,
-  code = 'INTERNAL_ERROR',
-): NextResponse {
-  return NextResponse.json({ success: false, error, code }, { status });
-}
-
 export interface OutlayerResult {
   response: NextResponse;
   /** Decoded WASM output — null on upstream/decode errors. */
@@ -298,13 +291,17 @@ export async function callOutlayer(
       30_000,
     );
   } catch {
-    return { response: errJson('Upstream unreachable', 502), decoded: null };
+    return {
+      response: errJson('INTERNAL_ERROR', 'Upstream unreachable', 502),
+      decoded: null,
+    };
   }
 
   if (!response.ok) {
     if (response.status === 402) {
       return {
         response: errJson(
+          'INTERNAL_ERROR',
           'OutLayer quota exhausted — top up the payment key balance',
           503,
         ),
@@ -313,6 +310,7 @@ export async function callOutlayer(
     }
     return {
       response: errJson(
+        'INTERNAL_ERROR',
         `Upstream error: ${response.status}`,
         response.status >= 400 && response.status < 500 ? response.status : 502,
       ),
@@ -325,7 +323,7 @@ export async function callOutlayer(
     result = await response.json();
   } catch {
     return {
-      response: errJson('Invalid JSON from OutLayer', 502),
+      response: errJson('INTERNAL_ERROR', 'Invalid JSON from OutLayer', 502),
       decoded: null,
     };
   }
@@ -336,7 +334,7 @@ export async function callOutlayer(
     (result as Record<string, unknown>).status === 'failed'
   ) {
     return {
-      response: errJson('WASM execution failed', 502),
+      response: errJson('INTERNAL_ERROR', 'WASM execution failed', 502),
       decoded: null,
     };
   }
@@ -351,7 +349,7 @@ export async function callOutlayer(
     };
   } catch {
     return {
-      response: errJson('Failed to decode WASM output', 502),
+      response: errJson('INTERNAL_ERROR', 'Failed to decode WASM output', 502),
       decoded: null,
     };
   }

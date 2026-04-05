@@ -306,7 +306,9 @@ export default function AgentsPage() {
       {hasResults && view === 'table' && (
         <AgentsTable
           agents={filtered}
-          onRowClick={(handle) => router.push(`/agents/${handle}`)}
+          onRowClick={(accountId) =>
+            router.push(`/agents/${encodeURIComponent(accountId)}`)
+          }
         />
       )}
 

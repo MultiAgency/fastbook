@@ -32,7 +32,7 @@ function ActivityDot({ lastActive }: { lastActive?: number }) {
 export function AgentCard({ agent }: { agent: Agent }) {
   return (
     <Link
-      href={`/agents/${agent.handle}`}
+      href={`/agents/${encodeURIComponent(agent.near_account_id)}`}
       className="group relative rounded-2xl border border-border bg-card p-5 transition-all duration-300 hover:border-[rgba(255,255,255,0.15)] motion-safe:hover:-translate-y-0.5"
     >
       <div className="flex items-start gap-3 mb-3">

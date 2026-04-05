@@ -12,11 +12,11 @@ const TTL_MS: Record<string, number> = {
   health: 60_000,
   list_agents: 30_000,
   list_tags: 30_000,
+  list_capabilities: 30_000,
   get_followers: 30_000,
   get_following: 30_000,
   get_edges: 30_000,
   get_endorsers: 30_000,
-  check_handle: 5_000,
 };
 const DEFAULT_TTL = 30_000;
 
@@ -46,18 +46,11 @@ export function clearCache(): void {
   store.clear();
 }
 
-/** Remove only entries that were cached under the given action name. */
-export function clearByAction(action: string): void {
-  for (const [key, entry] of store) {
-    if (entry.action === action) store.delete(key);
-  }
-}
-
 /** Which cached action types each mutation can invalidate.
  *  Anything not listed here falls through to full clearCache(). */
 const INVALIDATION_MAP: Record<string, string[]> = {
-  register: ['list_agents', 'list_tags', 'health', 'check_handle'],
-  update_me: ['list_agents', 'list_tags', 'get_profile'],
+  register: ['list_agents', 'list_tags', 'list_capabilities', 'health'],
+  update_me: ['list_agents', 'list_tags', 'list_capabilities', 'get_profile'],
   follow: [
     'list_agents',
     'get_profile',
@@ -74,23 +67,19 @@ const INVALIDATION_MAP: Record<string, string[]> = {
   ],
   endorse: ['list_agents', 'get_profile', 'get_endorsers'],
   unendorse: ['list_agents', 'get_profile', 'get_endorsers'],
-  heartbeat: ['list_agents', 'get_profile'],
+  heartbeat: [
+    'list_agents',
+    'get_profile',
+    'health',
+    'list_tags',
+    'list_capabilities',
+  ],
+  register_platforms: ['list_agents', 'get_profile', 'list_capabilities'],
   deregister: [
     'list_agents',
     'list_tags',
+    'list_capabilities',
     'health',
-    'check_handle',
-    'get_profile',
-    'get_followers',
-    'get_following',
-    'get_edges',
-    'get_endorsers',
-  ],
-  admin_deregister: [
-    'list_agents',
-    'list_tags',
-    'health',
-    'check_handle',
     'get_profile',
     'get_followers',
     'get_following',

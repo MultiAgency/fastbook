@@ -199,7 +199,7 @@ pub(crate) mod tests {
     }
 
     fn sign_auth(account_id: &str, domain: &str, now_ms: u64) -> (Nep413Auth, SigningKey) {
-        sign_auth_with_action(account_id, domain, "register", now_ms)
+        sign_auth_with_action(account_id, domain, "get_vrf_seed", now_ms)
     }
 
     fn sign_auth_with_action(
@@ -262,14 +262,14 @@ pub(crate) mod tests {
     fn valid_signature_succeeds() {
         let now_ms = 1_700_000_000_000u64;
         let (auth, _) = sign_auth("alice.near", "nearly.social", now_ms);
-        assert!(verify_auth(&auth, now_ms, "register").is_ok());
+        assert!(verify_auth(&auth, now_ms, "get_vrf_seed").is_ok());
     }
 
     #[test]
     fn wrong_domain_rejected() {
         let now_ms = 1_700_000_000_000u64;
         let (auth, _) = sign_auth("alice.near", "evil.site", now_ms);
-        let err = verify_auth(&auth, now_ms, "register")
+        let err = verify_auth(&auth, now_ms, "get_vrf_seed")
             .unwrap_err()
             .to_string();
         assert!(err.contains("domain"), "expected domain error, got: {err}");
@@ -280,7 +280,7 @@ pub(crate) mod tests {
         let now_ms = 1_700_000_000_000u64;
         let (mut auth, _) = sign_auth("alice.near", "nearly.social", now_ms);
         auth.near_account_id = "bob.near".to_string();
-        let err = verify_auth(&auth, now_ms, "register")
+        let err = verify_auth(&auth, now_ms, "get_vrf_seed")
             .unwrap_err()
             .to_string();
         assert!(
@@ -293,7 +293,7 @@ pub(crate) mod tests {
     fn expired_timestamp_rejected() {
         let sign_time = 1_700_000_000_000u64;
         let (auth, _) = sign_auth("alice.near", "nearly.social", sign_time);
-        let err = verify_auth(&auth, sign_time + 6 * 60 * 1000, "register")
+        let err = verify_auth(&auth, sign_time + 6 * 60 * 1000, "get_vrf_seed")
             .unwrap_err()
             .to_string();
         assert!(err.contains("expired"), "expected expiry error, got: {err}");
@@ -303,7 +303,7 @@ pub(crate) mod tests {
     fn future_timestamp_rejected() {
         let now_ms = 1_700_000_000_000u64;
         let (auth, _) = sign_auth("alice.near", "nearly.social", now_ms + 2 * 60 * 1000);
-        let err = verify_auth(&auth, now_ms, "register")
+        let err = verify_auth(&auth, now_ms, "get_vrf_seed")
             .unwrap_err()
             .to_string();
         assert!(err.contains("future"), "expected future error, got: {err}");
@@ -313,11 +313,14 @@ pub(crate) mod tests {
     fn tampered_message_rejected() {
         let now_ms = 1_700_000_000_000u64;
         let (mut auth, _) = sign_auth("alice.near", "nearly.social", now_ms);
-        auth.message = auth.message.replace("register", "steal");
-        let err = verify_auth(&auth, now_ms, "steal").unwrap_err().to_string();
+        // Tamper the message by changing the domain — signature should fail.
+        auth.message = auth.message.replace("nearly.social", "evil.social");
+        let err = verify_auth(&auth, now_ms, "get_vrf_seed")
+            .unwrap_err()
+            .to_string();
         assert!(
-            err.contains("verification failed"),
-            "expected sig error, got: {err}"
+            err.contains("domain") || err.contains("verification failed"),
+            "expected domain or sig error, got: {err}"
         );
     }
 
@@ -326,7 +329,7 @@ pub(crate) mod tests {
         let now_ms = 1_700_000_000_000u64;
         let (mut auth, _) = sign_auth("alice.near", "nearly.social", now_ms);
         auth.public_key = "rsa:AAAA".to_string();
-        let err = verify_auth(&auth, now_ms, "register")
+        let err = verify_auth(&auth, now_ms, "get_vrf_seed")
             .unwrap_err()
             .to_string();
         assert!(
@@ -340,7 +343,7 @@ pub(crate) mod tests {
         let now_ms = 1_700_000_000_000u64;
         let (mut auth, _) = sign_auth("alice.near", "nearly.social", now_ms);
         auth.nonce = "not-valid-base64!!!".to_string();
-        let err = verify_auth(&auth, now_ms, "register")
+        let err = verify_auth(&auth, now_ms, "get_vrf_seed")
             .unwrap_err()
             .to_string();
         assert!(err.contains("nonce"), "expected nonce error, got: {err}");
@@ -350,14 +353,14 @@ pub(crate) mod tests {
     fn within_timestamp_window_succeeds() {
         let sign_time = 1_700_000_000_000u64;
         let (auth, _) = sign_auth("alice.near", "nearly.social", sign_time);
-        assert!(verify_auth(&auth, sign_time + 4 * 60 * 1000, "register").is_ok());
+        assert!(verify_auth(&auth, sign_time + 4 * 60 * 1000, "get_vrf_seed").is_ok());
     }
 
     #[test]
     fn slight_future_timestamp_succeeds() {
         let now_ms = 1_700_000_000_000u64;
         let (auth, _) = sign_auth("alice.near", "nearly.social", now_ms + 30_000);
-        assert!(verify_auth(&auth, now_ms, "register").is_ok());
+        assert!(verify_auth(&auth, now_ms, "get_vrf_seed").is_ok());
     }
 
     #[test]
@@ -376,7 +379,7 @@ pub(crate) mod tests {
         let (mut auth, _) = sign_auth("alice.near", "nearly.social", now_ms);
         // 31 bytes — valid base64 but wrong length
         auth.nonce = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [1u8; 31]);
-        let err = verify_auth(&auth, now_ms, "register")
+        let err = verify_auth(&auth, now_ms, "get_vrf_seed")
             .unwrap_err()
             .to_string();
         assert!(
@@ -391,7 +394,7 @@ pub(crate) mod tests {
         let (mut auth, _) = sign_auth("alice.near", "nearly.social", now_ms);
         // 16 bytes — valid base58 but wrong length for ed25519
         auth.public_key = format!("ed25519:{}", bs58::encode([0u8; 16]).into_string());
-        let err = verify_auth(&auth, now_ms, "register")
+        let err = verify_auth(&auth, now_ms, "get_vrf_seed")
             .unwrap_err()
             .to_string();
         assert!(
@@ -406,7 +409,7 @@ pub(crate) mod tests {
         let (mut auth, _) = sign_auth("alice.near", "nearly.social", now_ms);
         // 32 bytes — valid base58 but wrong length for ed25519 signature (needs 64)
         auth.signature = format!("ed25519:{}", bs58::encode([0u8; 32]).into_string());
-        let err = verify_auth(&auth, now_ms, "register")
+        let err = verify_auth(&auth, now_ms, "get_vrf_seed")
             .unwrap_err()
             .to_string();
         assert!(

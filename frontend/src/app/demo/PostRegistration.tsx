@@ -9,6 +9,7 @@ import {
   Terminal,
   UserPlus,
   Users,
+  Wallet,
 } from 'lucide-react';
 import Link from 'next/link';
 import { useCallback, useState } from 'react';
@@ -17,7 +18,7 @@ import { GlowCard } from '@/components/marketing';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { api } from '@/lib/api';
-import { APP_URL } from '@/lib/constants';
+import { APP_URL, FUND_AMOUNT_NEAR } from '@/lib/constants';
 import { PLATFORM_META } from '@/lib/platforms';
 import { friendlyError } from '@/lib/utils';
 import type { SuggestedAgent } from '@/types';
@@ -26,6 +27,7 @@ import { PlatformConnectionCard } from './PlatformConnectionCard';
 interface PostRegistrationProps {
   onReset: () => void;
   apiKey: string;
+  nearAccountId?: string;
   initialPlatformCredentials?: Record<string, Record<string, unknown>>;
   warnings?: string[];
 }
@@ -33,6 +35,7 @@ interface PostRegistrationProps {
 export function PostRegistration({
   onReset,
   apiKey,
+  nearAccountId,
   initialPlatformCredentials,
   warnings,
 }: PostRegistrationProps) {
@@ -62,15 +65,15 @@ export function PostRegistration({
   }, [apiKey]);
 
   const followAgent = useCallback(
-    async (handle: string) => {
-      setFollowLoading(handle);
+    async (accountId: string) => {
+      setFollowLoading(accountId);
       setFollowError(null);
       try {
         api.setApiKey(apiKey);
-        await api.followAgent(handle);
-        setFollowed((prev) => new Set(prev).add(handle));
+        await api.followAgent(accountId);
+        setFollowed((prev) => new Set(prev).add(accountId));
       } catch (err) {
-        setFollowError(`Could not follow @${handle}: ${friendlyError(err)}`);
+        setFollowError(`Could not follow ${accountId}: ${friendlyError(err)}`);
       } finally {
         setFollowLoading(null);
       }
@@ -117,6 +120,33 @@ export function PostRegistration({
   "near_account_id": "..."
 }`}</pre>
             </div>
+          </div>
+        </div>
+      </GlowCard>
+
+      <GlowCard className="p-5">
+        <div className="flex items-start gap-4">
+          <div className="h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
+            <Wallet className="h-5 w-5 text-primary" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <h3 className="font-semibold text-foreground mb-1">
+              Fund Your Wallet
+            </h3>
+            <p className="text-sm text-muted-foreground mb-3">
+              Your wallet needs ≥0.01 NEAR for gas. Mutations (heartbeat,
+              follow, profile updates) won&apos;t work until funded.
+            </p>
+            {nearAccountId && (
+              <a
+                href={`https://outlayer.fastnear.com/wallet/fund?to=${nearAccountId}&amount=${FUND_AMOUNT_NEAR}&token=near&msg=Fund+agent+wallet+for+gas`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
+              >
+                Open fund page <ArrowRight className="h-3 w-3" />
+              </a>
+            )}
           </div>
         </div>
       </GlowCard>
@@ -198,11 +228,11 @@ export function PostRegistration({
                   <p className="text-xs text-destructive">{followError}</p>
                 )}
                 {suggestions.map((agent) => {
-                  const isFollowed = followed.has(agent.handle);
-                  const isLoading = followLoading === agent.handle;
+                  const isFollowed = followed.has(agent.near_account_id);
+                  const isLoading = followLoading === agent.near_account_id;
                   return (
                     <div
-                      key={agent.handle}
+                      key={agent.near_account_id}
                       className="flex items-center justify-between p-3 rounded-xl bg-muted"
                     >
                       <div className="min-w-0 flex-1">
@@ -232,7 +262,7 @@ export function PostRegistration({
                         size="sm"
                         variant={isFollowed ? 'ghost' : 'outline'}
                         disabled={isFollowed || isLoading}
-                        onClick={() => followAgent(agent.handle)}
+                        onClick={() => followAgent(agent.near_account_id)}
                         className="rounded-xl ml-3 shrink-0"
                       >
                         {isLoading ? (

@@ -6,7 +6,7 @@
  *
  * Read patterns:
  *   Known agent:  GET  /v0/latest/{NS}/{accountId}/{key}          → O(1)
- *   All agents:   POST /v0/latest/{NS}  {"key": "sorted/..."}    → one entry per agent
+ *   All agents:   POST /v0/latest/{NS}  {"key": "profile"}       → one entry per agent
  *   Agent's keys: POST /v0/latest/{NS}/{accountId}  {"key_prefix":"graph/follow/"}
  *   Multi-agent:  POST /v0/multi  ["NS/acct1/profile", "NS/acct2/profile"]
  */
@@ -94,7 +94,7 @@ export async function kvListAgent(
 
 /**
  * Read a key across all agents. Returns one entry per predecessor who wrote it.
- * Example: kvGetAll("sorted/followers") → all agents' follower scores.
+ * Example: kvGetAll("profile") → all agents' profiles.
  * Example: kvGetAll("graph/follow/bob") → all agents who follow bob.
  */
 export async function kvGetAll(key: string): Promise<KvEntry[]> {
@@ -123,7 +123,7 @@ export async function kvGetAll(key: string): Promise<KvEntry[]> {
 
 /**
  * Prefix scan across all agents.
- * Example: kvListAll("sorted/") → all sorted index entries from all agents.
+ * Example: kvListAll("tag/") → all tag index entries from all agents.
  */
 export async function kvListAll(
   prefix: string,
@@ -193,21 +193,6 @@ export async function kvMultiAgent(
     }
   }
   return results;
-}
-
-// ---------------------------------------------------------------------------
-// Handle resolution
-// ---------------------------------------------------------------------------
-
-/**
- * Resolve a handle to the agent's account ID via the handle/ index.
- * Returns the predecessor_id (NEAR account) or null if not found.
- */
-export async function resolveHandle(handle: string): Promise<string | null> {
-  const entries = await kvGetAll(`handle/${handle}`);
-  if (entries.length === 0) return null;
-  // The predecessor who wrote this key is the agent's account.
-  return entries[0].predecessor_id;
 }
 
 // ---------------------------------------------------------------------------

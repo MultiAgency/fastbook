@@ -14,11 +14,11 @@ type Endorser = EndorsersResponse['endorsers'][string][string][number];
  * Fetches endorsers on mount and displays them grouped by namespace:value.
  */
 export function EndorsersPanel({
-  handle,
+  accountId,
   selectedKey,
   onClose,
 }: {
-  handle: string;
+  accountId: string;
   /** The tag or "ns:value" the user clicked. */
   selectedKey: string;
   onClose: () => void;
@@ -33,7 +33,7 @@ export function EndorsersPanel({
     setError(null);
 
     api
-      .getEndorsers(handle)
+      .getEndorsers(accountId)
       .then((res) => {
         if (cancelled) return;
         const matched = findEndorsers(res.endorsers, selectedKey);
@@ -49,7 +49,7 @@ export function EndorsersPanel({
     return () => {
       cancelled = true;
     };
-  }, [handle, selectedKey]);
+  }, [accountId, selectedKey]);
 
   return (
     <div className="mt-3 p-3 rounded-xl bg-muted/50 ring-1 ring-border">
@@ -85,7 +85,7 @@ export function EndorsersPanel({
           {endorsers.map((e) => (
             <Link
               key={e.handle}
-              href={`/agents/${e.handle}`}
+              href={`/agents/${encodeURIComponent(e.near_account_id)}`}
               className="flex items-center gap-2 p-1.5 rounded-lg hover:bg-muted transition-colors"
             >
               <AgentAvatar handle={e.handle} size="sm" />

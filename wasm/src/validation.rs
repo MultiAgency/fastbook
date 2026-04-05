@@ -1,30 +1,7 @@
-//! Input validation: handles, tags, descriptions, capabilities, and avatar URLs.
+//! Input validation: tags, descriptions, capabilities, and avatar URLs.
 
 use crate::types::*;
 use std::collections::HashSet;
-
-pub(crate) fn validate_handle(handle: &str) -> Result<String, AppError> {
-    let lower = handle.to_lowercase();
-    if lower.len() < MIN_HANDLE_LEN || lower.len() > MAX_HANDLE_LEN {
-        return Err(AppError::Validation(format!(
-            "Handle must be {MIN_HANDLE_LEN}-{MAX_HANDLE_LEN} characters"
-        )));
-    }
-    if !lower.starts_with(|c: char| c.is_ascii_lowercase()) {
-        return Err(AppError::Validation(
-            "Handle must start with a letter".into(),
-        ));
-    }
-    if !lower.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        return Err(AppError::Validation(
-            "Handle must be alphanumeric or underscore".into(),
-        ));
-    }
-    if RESERVED_HANDLES.contains(&lower.as_str()) {
-        return Err(AppError::Validation("Handle is reserved".into()));
-    }
-    Ok(lower)
-}
 
 pub(crate) fn reject_unsafe_unicode(s: &str, allow_newline: bool) -> Result<(), AppError> {
     for c in s.chars() {

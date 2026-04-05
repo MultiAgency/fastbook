@@ -2,44 +2,12 @@ import {
   formatRelativeTime,
   formatScore,
   friendlyError,
-  isValidHandle,
   sanitizeHandle,
   toErrorMessage,
   truncateAccountId,
 } from '@/lib/utils';
 
 describe('Utility Functions', () => {
-  describe('isValidHandle', () => {
-    it('validates correct handles', () => {
-      expect(isValidHandle('agent123')).toBe(true);
-      expect(isValidHandle('my_agent')).toBe(true);
-      expect(isValidHandle('agent_bot')).toBe(true);
-    });
-
-    it('validates boundary lengths', () => {
-      expect(isValidHandle('abc')).toBe(true);
-      expect(isValidHandle('a'.repeat(32))).toBe(true);
-      expect(isValidHandle('ab')).toBe(false);
-      expect(isValidHandle('a'.repeat(33))).toBe(false);
-    });
-
-    it('rejects invalid handles', () => {
-      expect(isValidHandle('a')).toBe(false);
-      expect(isValidHandle('ab')).toBe(false);
-      expect(isValidHandle('agent-name')).toBe(false);
-      expect(isValidHandle('agent name')).toBe(false);
-      expect(isValidHandle('Agent_Bot')).toBe(false);
-      expect(isValidHandle('123bot')).toBe(false);
-      expect(isValidHandle('_agent')).toBe(false);
-    });
-
-    it('rejects reserved handles', () => {
-      expect(isValidHandle('admin')).toBe(false);
-      expect(isValidHandle('system')).toBe(false);
-      expect(isValidHandle('near')).toBe(false);
-    });
-  });
-
   describe('sanitizeHandle', () => {
     it('lowercases input', () => {
       expect(sanitizeHandle('MyAgent')).toBe('myagent');

@@ -7,7 +7,7 @@
  * mutations, this module is the validation layer.
  */
 
-import { HANDLE_RE, LIMITS, RESERVED_HANDLES } from './constants';
+import { LIMITS } from './constants';
 
 // Match wasm/src/types.rs constants
 const MAX_TAGS = 10;
@@ -57,19 +57,6 @@ export function rejectUnsafeUnicode(
 // ---------------------------------------------------------------------------
 // Field validators
 // ---------------------------------------------------------------------------
-
-export function validateHandle(handle: string): ValidationError | null {
-  const lower = handle.toLowerCase();
-  if (!HANDLE_RE.test(lower)) {
-    return err(
-      `Handle must be ${LIMITS.AGENT_HANDLE_MIN}-${LIMITS.AGENT_HANDLE_MAX} characters, start with a letter, and contain only lowercase letters, numbers, or underscores`,
-    );
-  }
-  if (RESERVED_HANDLES.has(lower)) {
-    return err('Handle is reserved');
-  }
-  return null;
-}
 
 export function validateDescription(desc: string): ValidationError | null {
   if (desc.length > LIMITS.DESCRIPTION_MAX) {

@@ -77,7 +77,7 @@ export interface NetworkCounts {
 // ---------------------------------------------------------------------------
 
 export interface RegisterAgentForm {
-  handle: string;
+  handle?: string;
   description?: string;
   tags?: string[];
   capabilities?: AgentCapabilities;
@@ -108,6 +108,11 @@ export interface RegistrationResponse {
   onboarding?: OnboardingContext;
   /** Credentials from auto-registration, keyed by platform ID. */
   platform_credentials?: Record<string, Record<string, unknown>>;
+  funded?: boolean;
+  next_step?: 'fund_wallet';
+  fund_amount?: string;
+  fund_token?: string;
+  fund_url?: string;
   warnings?: string[];
 }
 
@@ -150,7 +155,7 @@ export interface SuggestedResponse {
 
 export interface FollowResponse {
   action: 'followed' | 'already_following';
-  followed?: Agent;
+  followed?: { account_id: string };
   your_network?: NetworkCounts;
   next_suggestion?: SuggestedAgent;
   warnings?: string[];
@@ -163,7 +168,7 @@ export interface UnfollowResponse {
 }
 
 export interface EdgesResponse {
-  handle: string;
+  account_id: string;
   edges: Edge[];
   edge_count?: number;
   truncated?: boolean;
@@ -186,7 +191,7 @@ export interface NetworkResponse {
 
 export interface EndorseResponse {
   action: 'endorsed' | 'unendorsed';
-  handle: string;
+  account_id: string;
   agent: Agent;
   endorsed?: Record<string, string[]>;
   already_endorsed?: Record<string, string[]>;
@@ -194,33 +199,24 @@ export interface EndorseResponse {
   warnings?: string[];
 }
 
-export interface EndorsersResponse {
+export interface EndorserEntry {
   handle: string;
-  endorsers: Record<
-    string,
-    Record<
-      string,
-      Array<{
-        handle: string;
-        description?: string;
-        avatar_url?: string | null;
-        reason?: string;
-        at?: number;
-      }>
-    >
-  >;
+  near_account_id: string;
+  description?: string;
+  avatar_url?: string | null;
+  reason?: string;
+  at?: number;
+}
+
+export interface EndorsersResponse {
+  account_id: string;
+  endorsers: Record<string, Record<string, EndorserEntry[]>>;
 }
 
 export interface DeregisterResponse {
   action: 'deregistered';
-  handle: string;
+  account_id: string;
   warnings?: string[];
-}
-
-export interface CheckHandleResponse {
-  handle: string;
-  available: boolean;
-  reason?: 'reserved' | 'taken';
 }
 
 export interface TagsResponse {

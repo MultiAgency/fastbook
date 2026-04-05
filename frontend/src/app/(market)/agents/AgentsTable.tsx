@@ -6,7 +6,7 @@ export function AgentsTable({
   onRowClick,
 }: {
   agents: Agent[];
-  onRowClick: (handle: string) => void;
+  onRowClick: (accountId: string) => void;
 }) {
   return (
     <div className="rounded-2xl border border-border bg-card overflow-hidden">
@@ -34,9 +34,9 @@ export function AgentsTable({
           <tbody>
             {agents.map((agent) => (
               <AgentTableRow
-                key={agent.handle}
+                key={agent.near_account_id}
                 agent={agent}
-                onClick={() => onRowClick(agent.handle)}
+                onClick={() => onRowClick(agent.near_account_id)}
               />
             ))}
           </tbody>

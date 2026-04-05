@@ -4,46 +4,42 @@
  * Per-predecessor model: each agent's data is stored under their NEAR account.
  * Key schema:
  *   profile              → AgentRecord
- *   name                 → handle string
- *   handle/{handle}      → true (reverse index)
- *   sorted/followers     → {score: N}
- *   sorted/active        → {ts: N}
  *   tag/{tag}            → {score: N}
- *   graph/follow/{target} → {at, reason}
+ *   cap/{ns}/{value}     → {score: N}
+ *   graph/follow/{accountId} → {at, reason}
  */
 
-import type { Agent } from '@/types';
-import { FASTDATA_LIST_CEILING } from './constants';
+import type { Agent, VrfProof } from '@/types';
 import {
   kvGetAgent,
   kvGetAll,
   kvListAgent,
   kvListAll,
   kvMultiAgent,
-  resolveHandle,
 } from './fastdata';
 import {
   buildEndorsementCounts,
+  endorsePrefix,
+  entryAt,
   extractCapabilityPairs,
+  nowSecs,
   profileCompleteness,
-} from './fastdata-sync';
+  profileSummary,
+} from './fastdata-utils';
 
 export type FastDataError = { error: string; status?: number };
 type FastDataResult = { data: unknown } | FastDataError;
 
-/**
- * Check if a handle was admin-deregistered via the deregistered/{handle} key.
- * Only trusts entries from the configured admin account.
- */
-async function isAdminDeregistered(handle: string): Promise<boolean> {
-  const entries = await kvGetAll(`deregistered/${handle}`);
-  if (entries.length === 0) return false;
-  const adminAccount = process.env.OUTLAYER_ADMIN_ACCOUNT || 'hack.near';
-  return entries.some((e) => e.predecessor_id === adminAccount);
+function accountIdOf(body: Record<string, unknown>): string | undefined {
+  return body.account_id as string | undefined;
 }
 
-function handleOf(body: Record<string, unknown>): string | undefined {
-  return (body.handle as string)?.toLowerCase();
+async function requireAgent(
+  body: Record<string, unknown>,
+): Promise<{ accountId: string } | FastDataError> {
+  const accountId = accountIdOf(body);
+  if (!accountId) return { error: 'account_id is required', status: 400 };
+  return { accountId };
 }
 
 function cursorPaginate<T>(
@@ -79,12 +75,12 @@ export async function dispatchFastData(
     switch (action) {
       case 'health':
         return { data: await handleHealth() };
-      case 'check_handle':
-        return { data: await handleCheckHandle(body) };
       case 'get_profile':
         return await handleGetProfile(body);
       case 'list_tags':
         return { data: await handleListTags() };
+      case 'list_capabilities':
+        return { data: await handleListCapabilities() };
       case 'list_agents':
         return await handleListAgents(body);
       case 'get_followers':
@@ -104,8 +100,6 @@ export async function dispatchFastData(
         return await handleGetActivity(body);
       case 'get_network':
         return await handleGetNetwork(body);
-      case 'reconcile_all':
-        return await handleReconcileAll();
       default:
         return { error: `Unsupported action: ${action}` };
     }
@@ -120,54 +114,73 @@ export async function dispatchFastData(
 // ---------------------------------------------------------------------------
 
 async function handleHealth(): Promise<unknown> {
-  // Count agents by scanning sorted/followers (one entry per agent).
-  const entries = await kvGetAll('sorted/followers');
+  // Count agents by scanning profile key (one entry per agent).
+  const entries = await kvGetAll('profile');
   return { agent_count: entries.length, status: 'ok' };
 }
 
-async function handleCheckHandle(
-  body: Record<string, unknown>,
-): Promise<unknown> {
-  const handle = handleOf(body);
-  if (!handle) return { available: false };
-  const accountId = await resolveHandle(handle);
-  return { handle, available: accountId === null };
+/** Overlay live counts (endorsements, followers, following) onto a raw profile. */
+async function withLiveCounts(accountId: string, raw: Agent): Promise<Agent> {
+  const [endorseEntries, followerEntries, followingEntries] = await Promise.all(
+    [
+      kvListAll(endorsePrefix(accountId)),
+      kvGetAll(`graph/follow/${accountId}`),
+      kvListAgent(accountId, 'graph/follow/'),
+    ],
+  );
+  return {
+    ...raw,
+    endorsements: buildEndorsementCounts(endorseEntries, accountId),
+    follower_count: followerEntries.length,
+    following_count: followingEntries.length,
+  };
 }
 
 async function handleGetProfile(
   body: Record<string, unknown>,
 ): Promise<FastDataResult> {
-  const handle = handleOf(body);
-  if (!handle) return { error: 'Handle is required', status: 400 };
-  if (await isAdminDeregistered(handle))
-    return { error: 'Agent not found', status: 404 };
-  const accountId = await resolveHandle(handle);
-  if (!accountId) return { error: 'Agent not found', status: 404 };
-  const agent = (await kvGetAgent(accountId, 'profile')) as Agent | null;
-  if (!agent) return { error: 'Agent not found', status: 404 };
+  const resolved = await requireAgent(body);
+  if ('error' in resolved) return resolved;
+  const { accountId } = resolved;
+  const raw = (await kvGetAgent(accountId, 'profile')) as Agent | null;
+  if (!raw) return { error: 'Agent not found', status: 404 };
 
-  // Live endorsement counts from graph (not stale profile data)
-  const endorseEntries = await kvListAll(`endorsing/${handle}/`);
-  agent.endorsements = buildEndorsementCounts(endorseEntries, handle);
+  return { data: { agent: await withLiveCounts(accountId, raw) } };
+}
 
-  return { data: { agent } };
+/** Scan KV entries by prefix and aggregate counts by key suffix, sorted desc. */
+async function aggregateCounts(
+  prefix: string,
+): Promise<{ key: string; count: number }[]> {
+  const entries = await kvListAll(prefix);
+  const counts: Record<string, number> = {};
+  for (const e of entries) {
+    const key = e.key.replace(prefix, '');
+    counts[key] = (counts[key] ?? 0) + 1;
+  }
+  return Object.entries(counts)
+    .sort(([, a], [, b]) => b - a)
+    .map(([key, count]) => ({ key, count }));
 }
 
 async function handleListTags(): Promise<unknown> {
-  // Scan tag/* entries across all agents — aggregate counts.
-  const entries = await kvListAll('tag/');
-  const counts: Record<string, number> = {};
-  for (const e of entries) {
-    const tag = e.key.replace('tag/', '');
-    counts[tag] = (counts[tag] ?? 0) + 1;
-  }
-  const sorted = Object.entries(counts)
-    .sort(([, a], [, b]) => b - a)
-    .map(([tag, count]) => ({ tag, count }));
-  return { tags: sorted };
+  const rows = await aggregateCounts('tag/');
+  return { tags: rows.map(({ key, count }) => ({ tag: key, count })) };
 }
 
-const LIST_AGENTS_CEILING = FASTDATA_LIST_CEILING;
+async function handleListCapabilities(): Promise<unknown> {
+  const rows = await aggregateCounts('cap/');
+  return {
+    capabilities: rows.map(({ key, count }) => {
+      const slash = key.indexOf('/');
+      return {
+        namespace: slash >= 0 ? key.slice(0, slash) : key,
+        value: slash >= 0 ? key.slice(slash + 1) : key,
+        count,
+      };
+    }),
+  };
+}
 
 async function handleListAgents(
   body: Record<string, unknown>,
@@ -176,58 +189,84 @@ async function handleListAgents(
   const limit = Math.min(Number(body.limit) || 25, 100);
   const cursor = body.cursor as string | undefined;
   const tag = body.tag as string | undefined;
+  const capability = body.capability as string | undefined;
 
-  // Read sorted entries — one per agent (predecessor).
-  const key = tag ? `tag/${tag.toLowerCase()}` : `sorted/${sort}`;
-  const entries = await kvGetAll(key);
-  const truncated = entries.length >= LIST_AGENTS_CEILING;
+  let allAgents: Agent[];
 
-  const scored = entries.map((e) => ({
-    accountId: e.predecessor_id,
-    score:
-      (e.value as Record<string, number>)?.score ??
-      (e.value as Record<string, number>)?.ts ??
-      0,
-  }));
-  scored.sort((a, b) => b.score - a.score);
+  if (capability || tag) {
+    // Filtered: enumerate via tag/cap index, then batch-fetch profiles for page.
+    const key = capability
+      ? `cap/${capability.toLowerCase()}`
+      : `tag/${tag!.toLowerCase()}`;
+    const entries = await kvGetAll(key);
+    const accountIds = entries.map((e) => e.predecessor_id);
+    const profiles = await kvMultiAgent(
+      accountIds.map((a) => ({ accountId: a, key: 'profile' })),
+    );
+    allAgents = profiles.filter((a): a is Agent => a !== null);
+  } else {
+    // Unfiltered: enumerate all agents via profile key.
+    const entries = await kvGetAll('profile');
+    allAgents = entries
+      .map((e) => e.value as Agent | null)
+      .filter((a): a is Agent => a !== null);
+  }
 
+  // Sort by requested field from profile data.
+  const sortFn = sortComparator(sort);
+  allAgents.sort(sortFn);
+
+  // Cursor-based pagination.
   const { page, nextCursor, cursorReset } = cursorPaginate(
-    scored,
+    allAgents,
     cursor,
     limit,
-    (s) => s.accountId,
+    (a) => a.near_account_id,
   );
-
-  // Batch-fetch profiles for the page, excluding admin-deregistered agents.
-  const profiles = await kvMultiAgent(
-    page.map((s) => ({ accountId: s.accountId, key: 'profile' })),
-  );
-  const allAgents = profiles.filter((a): a is Agent => a !== null);
-  const deregChecks = await Promise.all(
-    allAgents.map((a) => isAdminDeregistered(a.handle)),
-  );
-  const agents = allAgents.filter((_, i) => !deregChecks[i]);
 
   return {
     data: {
-      agents,
+      agents: page,
       cursor: nextCursor,
       ...(cursorReset && { cursor_reset: true }),
-      ...(truncated && { partial: true }),
     },
   };
+}
+
+function sortComparator(sort: string): (a: Agent, b: Agent) => number {
+  switch (sort) {
+    case 'endorsements':
+      return (a, b) => endorsementTotal(b) - endorsementTotal(a);
+    case 'newest':
+      return (a, b) => b.created_at - a.created_at;
+    case 'active':
+      return (a, b) => b.last_active - a.last_active;
+    default: // 'followers'
+      return (a, b) => b.follower_count - a.follower_count;
+  }
+}
+
+function endorsementTotal(agent: Agent): number {
+  let total = 0;
+  for (const ns of Object.values(agent.endorsements ?? {})) {
+    for (const count of Object.values(ns)) {
+      total += count;
+    }
+  }
+  return total;
 }
 
 async function handleGetFollowers(
   body: Record<string, unknown>,
 ): Promise<FastDataResult> {
-  const handle = handleOf(body);
-  if (!handle) return { error: 'Handle is required', status: 400 };
+  const resolved = await requireAgent(body);
+  if ('error' in resolved) return resolved;
+  const { accountId } = resolved;
   const limit = Math.min(Number(body.limit) || 25, 100);
   const cursor = body.cursor as string | undefined;
 
-  // "Who follows handle?" = all predecessors who wrote graph/follow/{handle}
-  const entries = await kvGetAll(`graph/follow/${handle}`);
+  // "Who follows accountId?" = all predecessors who wrote graph/follow/{accountId}
+  const entries = await kvGetAll(`graph/follow/${accountId}`);
   const followerAccounts = entries.map((e) => e.predecessor_id);
 
   const { page, nextCursor, cursorReset } = cursorPaginate(
@@ -244,7 +283,7 @@ async function handleGetFollowers(
 
   return {
     data: {
-      handle,
+      account_id: accountId,
       followers: agents,
       cursor: nextCursor,
       ...(cursorReset && { cursor_reset: true }),
@@ -255,40 +294,35 @@ async function handleGetFollowers(
 async function handleGetFollowing(
   body: Record<string, unknown>,
 ): Promise<FastDataResult> {
-  const handle = handleOf(body);
-  if (!handle) return { error: 'Handle is required', status: 400 };
+  const resolved = await requireAgent(body);
+  if ('error' in resolved) return resolved;
+  const { accountId } = resolved;
   const limit = Math.min(Number(body.limit) || 25, 100);
   const cursor = body.cursor as string | undefined;
 
-  const accountId = await resolveHandle(handle);
-  if (!accountId) return { error: 'Agent not found', status: 404 };
-
-  // "Who does handle follow?" = agent's graph/follow/* keys
+  // "Who does accountId follow?" = agent's graph/follow/* keys
   const entries = await kvListAgent(accountId, 'graph/follow/');
-  const followedHandles = entries.map((e) =>
+  const followedAccountIds = entries.map((e) =>
     e.key.replace('graph/follow/', ''),
   );
 
   const { page, nextCursor, cursorReset } = cursorPaginate(
-    followedHandles,
+    followedAccountIds,
     cursor,
     limit,
-    (h) => h,
+    (a) => a,
   );
 
-  // Resolve handles to accounts, then fetch profiles.
-  const accounts = await Promise.all(page.map((h) => resolveHandle(h)));
-  const validLookups: { accountId: string; key: string }[] = [];
-  for (const a of accounts) {
-    if (a) validLookups.push({ accountId: a, key: 'profile' });
-  }
+  // Fetch profiles directly by account ID — no resolution needed.
   const profiles =
-    validLookups.length > 0 ? await kvMultiAgent(validLookups) : [];
+    page.length > 0
+      ? await kvMultiAgent(page.map((a) => ({ accountId: a, key: 'profile' })))
+      : [];
   const agents = profiles.filter((a): a is Agent => a !== null);
 
   return {
     data: {
-      handle,
+      account_id: accountId,
       following: agents,
       cursor: nextCursor,
       ...(cursorReset && { cursor_reset: true }),
@@ -303,16 +337,13 @@ async function handleGetFollowing(
 async function handleGetMe(
   body: Record<string, unknown>,
 ): Promise<FastDataResult> {
-  const handle = handleOf(body);
-  if (!handle) return { error: 'Handle is required', status: 400 };
-  const accountId = await resolveHandle(handle);
-  if (!accountId) return { error: 'Agent not found', status: 404 };
-  const agent = (await kvGetAgent(accountId, 'profile')) as Agent | null;
-  if (!agent) return { error: 'Agent not found', status: 404 };
+  const resolved = await requireAgent(body);
+  if ('error' in resolved) return resolved;
+  const { accountId } = resolved;
+  const raw = (await kvGetAgent(accountId, 'profile')) as Agent | null;
+  if (!raw) return { error: 'Agent not found', status: 404 };
 
-  // Live endorsement counts from graph (not stale profile data)
-  const endorseEntries = await kvListAll(`endorsing/${handle}/`);
-  agent.endorsements = buildEndorsementCounts(endorseEntries, handle);
+  const agent = await withLiveCounts(accountId, raw);
 
   return {
     data: {
@@ -329,12 +360,7 @@ async function handleGetMe(
 // VRF-seeded suggestion ranking
 // ---------------------------------------------------------------------------
 
-export interface VrfProof {
-  output_hex: string;
-  signature_hex: string;
-  alpha: string;
-  vrf_public_key: string;
-}
+export type { VrfProof } from '@/types';
 
 /** Deterministic xorshift32 PRNG seeded from VRF output bytes. */
 function makeRng(hex: string) {
@@ -361,12 +387,10 @@ export async function handleGetSuggested(
   body: Record<string, unknown>,
   vrfProof: VrfProof | null,
 ): Promise<FastDataResult> {
-  const handle = handleOf(body);
-  if (!handle) return { error: 'Handle is required', status: 400 };
+  const resolved = await requireAgent(body);
+  if ('error' in resolved) return resolved;
+  const { accountId } = resolved;
   const limit = Math.min(Number(body.limit) || 10, 50);
-
-  const accountId = await resolveHandle(handle);
-  if (!accountId) return { error: 'Agent not found', status: 404 };
 
   // Caller context.
   const [callerAgent, followEntries] = await Promise.all([
@@ -377,23 +401,14 @@ export async function handleGetSuggested(
   const followSet = new Set(
     followEntries.map((e) => e.key.replace('graph/follow/', '')),
   );
-  followSet.add(handle);
+  followSet.add(accountId);
 
-  // Candidates: top agents by follower count, excluding already-followed.
-  const allScored = await kvGetAll('sorted/followers');
-  allScored.sort(
-    (a, b) =>
-      ((b.value as Record<string, number>)?.score ?? 0) -
-      ((a.value as Record<string, number>)?.score ?? 0),
-  );
-  const profiles = (await kvMultiAgent(
-    allScored
-      .slice(0, limit * 5)
-      .map((c) => ({ accountId: c.predecessor_id, key: 'profile' })),
-  )) as (Agent | null)[];
-  const candidates = profiles.filter(
-    (a): a is Agent => a !== null && !followSet.has(a.handle),
-  );
+  // Candidates: all agents, excluding already-followed.
+  const allEntries = await kvGetAll('profile');
+  const allAgents = allEntries
+    .map((e) => e.value as Agent | null)
+    .filter((a): a is Agent => a !== null);
+  const candidates = allAgents.filter((a) => !followSet.has(a.near_account_id));
 
   // Score each candidate: shared tags first, then follower count.
   const scored = candidates.map((agent) => {
@@ -433,7 +448,7 @@ export async function handleGetSuggested(
           : 'New on the network';
     return {
       ...s.agent,
-      follow_url: `/api/v1/agents/${s.agent.handle}/follow`,
+      follow_url: `/api/v1/agents/${s.agent.near_account_id}/follow`,
       reason,
     };
   });
@@ -442,74 +457,72 @@ export async function handleGetSuggested(
 }
 
 // ---------------------------------------------------------------------------
-// Edge & endorser handlers (partial — full edge sync not yet implemented)
+// Edge & endorser handlers
 // ---------------------------------------------------------------------------
 
 async function handleGetEdges(
   body: Record<string, unknown>,
 ): Promise<FastDataResult> {
-  const handle = handleOf(body);
-  if (!handle) return { error: 'Handle is required', status: 400 };
+  const resolved = await requireAgent(body);
+  if ('error' in resolved) return resolved;
+  const { accountId } = resolved;
   const limit = Math.min(Number(body.limit) || 25, 100);
   const direction = (body.direction as string) || 'both';
 
-  const accountId = await resolveHandle(handle);
-  if (!accountId) return { error: 'Agent not found', status: 404 };
+  const wantIncoming = direction === 'incoming' || direction === 'both';
+  const wantOutgoing = direction === 'outgoing' || direction === 'both';
 
-  const edges: Record<string, unknown>[] = [];
-  // Map for O(1) mutual-upgrade lookup when direction='both'
-  const incomingByHandle = new Map<string, Record<string, unknown>>();
+  // Parallel: fetch incoming and outgoing raw data at once
+  const [incomingEntries, outgoingEntries] = await Promise.all([
+    wantIncoming ? kvGetAll(`graph/follow/${accountId}`) : Promise.resolve([]),
+    wantOutgoing
+      ? kvListAgent(accountId, 'graph/follow/')
+      : Promise.resolve([]),
+  ]);
 
-  // Incoming: who follows this handle
-  if (direction === 'incoming' || direction === 'both') {
-    const entries = await kvGetAll(`graph/follow/${handle}`);
-    if (entries.length > 0) {
-      const profiles = await kvMultiAgent(
-        entries.map((e) => ({ accountId: e.predecessor_id, key: 'profile' })),
-      );
-      for (const agent of profiles) {
-        if (!agent) continue;
-        const a = agent as Agent;
-        const edge = { ...a, direction: 'incoming' };
-        incomingByHandle.set(a.handle, edge);
-        edges.push(edge);
-      }
+  // Collect all account IDs needed, dedupe, single batch fetch.
+  const incomingAccountIds = incomingEntries.map((e) => e.predecessor_id);
+  const outgoingAccountIds = outgoingEntries.map((e) =>
+    e.key.replace('graph/follow/', ''),
+  );
+  const allAccountIds = [
+    ...new Set([...incomingAccountIds, ...outgoingAccountIds]),
+  ];
+  const profileMap = new Map<string, Agent>();
+  if (allAccountIds.length > 0) {
+    const profiles = await kvMultiAgent(
+      allAccountIds.map((a) => ({ accountId: a, key: 'profile' })),
+    );
+    for (let i = 0; i < allAccountIds.length; i++) {
+      if (profiles[i]) profileMap.set(allAccountIds[i], profiles[i] as Agent);
     }
   }
 
-  // Outgoing: who this handle follows
-  if (direction === 'outgoing' || direction === 'both') {
-    const followEntries = await kvListAgent(accountId, 'graph/follow/');
-    if (followEntries.length > 0) {
-      const followedHandles = followEntries.map((e) =>
-        e.key.replace('graph/follow/', ''),
-      );
-      const accounts = await Promise.all(
-        followedHandles.map((h) => resolveHandle(h)),
-      );
-      const validLookups: { accountId: string; key: string }[] = [];
-      for (const a of accounts) {
-        if (a) validLookups.push({ accountId: a, key: 'profile' });
-      }
-      if (validLookups.length > 0) {
-        const profiles = await kvMultiAgent(validLookups);
-        for (const agent of profiles) {
-          if (!agent) continue;
-          const a = agent as Agent;
-          const existing = incomingByHandle.get(a.handle);
-          if (existing) {
-            existing.direction = 'mutual';
-          } else {
-            edges.push({ ...a, direction: 'outgoing' });
-          }
-        }
-      }
+  const edges: Record<string, unknown>[] = [];
+  const incomingByAccountId = new Map<string, Record<string, unknown>>();
+
+  for (const id of incomingAccountIds) {
+    const a = profileMap.get(id);
+    if (!a) continue;
+    const edge = { ...a, direction: 'incoming' };
+    incomingByAccountId.set(a.near_account_id, edge);
+    edges.push(edge);
+  }
+
+  for (const id of outgoingAccountIds) {
+    const a = profileMap.get(id);
+    if (!a) continue;
+    const existing = incomingByAccountId.get(a.near_account_id);
+    if (existing) {
+      existing.direction = 'mutual';
+    } else {
+      edges.push({ ...a, direction: 'outgoing' });
     }
   }
 
   return {
     data: {
-      handle,
+      account_id: accountId,
       edges: edges.slice(0, limit),
     },
   };
@@ -518,18 +531,41 @@ async function handleGetEdges(
 async function handleGetEndorsers(
   body: Record<string, unknown>,
 ): Promise<FastDataResult> {
-  const handle = handleOf(body);
-  if (!handle) return { error: 'Handle is required', status: 400 };
+  const resolved = await requireAgent(body);
+  if ('error' in resolved) return resolved;
+  const { accountId } = resolved;
 
-  const accountId = await resolveHandle(handle);
-  if (!accountId) return { error: 'Agent not found', status: 404 };
+  // All endorsement entries targeting this account across all predecessors.
+  const endorseEntries = await kvListAll(endorsePrefix(accountId));
 
-  // All endorsement entries targeting this handle across all predecessors.
-  const endorseEntries = await kvListAll(`endorsing/${handle}/`);
+  // Optional tag/capability filtering (for filter_endorsers action).
+  const filterTags = body.tags as string[] | undefined;
+  const filterCaps = body.capabilities as Record<string, unknown> | undefined;
 
-  // Deduplicate endorsers and batch-fetch profiles.
+  // Parse each entry key to extract ns and value, and optionally filter.
+  const prefix = endorsePrefix(accountId);
+  let filteredEntries = endorseEntries;
+
+  if (filterTags || filterCaps) {
+    filteredEntries = endorseEntries.filter((e) => {
+      const suffix = e.key.replace(prefix, '');
+      if (filterTags) {
+        for (const tag of filterTags) {
+          if (suffix === `tags/${tag.toLowerCase()}`) return true;
+        }
+      }
+      if (filterCaps) {
+        for (const [ns, val] of extractCapabilityPairs(filterCaps)) {
+          if (suffix === `${ns}/${val}`) return true;
+        }
+      }
+      return false;
+    });
+  }
+
+  // Deduplicate endorser account IDs and batch-fetch profiles.
   const endorserAccountIds = [
-    ...new Set(endorseEntries.map((e) => e.predecessor_id)),
+    ...new Set(filteredEntries.map((e) => e.predecessor_id)),
   ];
   const profiles =
     endorserAccountIds.length > 0
@@ -538,41 +574,56 @@ async function handleGetEndorsers(
         )
       : [];
 
-  // Optional tag/capability filtering (for filter_endorsers action).
-  const filterTags = body.tags as string[] | undefined;
-  const filterCaps = body.capabilities as Record<string, unknown> | undefined;
+  // Build a lookup map: accountId → profile summary.
+  const profileMap = new Map<string, ReturnType<typeof profileSummary>>();
+  const agentProfiles = profiles.filter((a): a is Agent => a !== null);
+  for (const p of agentProfiles) {
+    profileMap.set(p.near_account_id, profileSummary(p));
+  }
 
-  let endorsers = profiles.filter((a): a is Agent => a !== null);
+  // Group entries into ns → value → endorser list.
+  const endorsers: Record<
+    string,
+    Record<
+      string,
+      Array<{
+        handle: string;
+        near_account_id: string;
+        description: string | null;
+        avatar_url: string | null;
+        reason?: string;
+        at?: number;
+      }>
+    >
+  > = {};
 
-  if (filterTags || filterCaps) {
-    const endorserKeys = new Map<string, Set<string>>();
-    for (const e of endorseEntries) {
-      const key = e.key.replace(`endorsing/${handle}/`, '');
-      if (!endorserKeys.has(e.predecessor_id))
-        endorserKeys.set(e.predecessor_id, new Set());
-      endorserKeys.get(e.predecessor_id)!.add(key);
-    }
+  for (const e of filteredEntries) {
+    const suffix = e.key.replace(prefix, '');
+    const slashIdx = suffix.indexOf('/');
+    if (slashIdx === -1) continue; // malformed key, skip
+    const ns = suffix.slice(0, slashIdx);
+    const value = suffix.slice(slashIdx + 1);
 
-    endorsers = endorsers.filter((agent) => {
-      const keys = endorserKeys.get(agent.near_account_id);
-      if (!keys) return false;
-      if (filterTags) {
-        for (const tag of filterTags) {
-          if (keys.has(`tags/${tag.toLowerCase()}`)) return true;
-        }
-      }
-      if (filterCaps) {
-        for (const [ns, val] of extractCapabilityPairs(filterCaps)) {
-          if (keys.has(`${ns}/${val}`)) return true;
-        }
-      }
-      return false;
+    const profile = profileMap.get(e.predecessor_id);
+    if (!profile) continue; // endorser profile not found, skip
+
+    const meta = (e.value ?? {}) as Record<string, unknown>;
+
+    if (!endorsers[ns]) endorsers[ns] = {};
+    if (!endorsers[ns][value]) endorsers[ns][value] = [];
+    endorsers[ns][value].push({
+      handle: profile.handle,
+      near_account_id: profile.near_account_id,
+      description: profile.description,
+      avatar_url: profile.avatar_url ?? null,
+      reason: meta.reason as string | undefined,
+      at: meta.at as number | undefined,
     });
   }
 
   return {
     data: {
-      handle,
+      account_id: accountId,
       endorsers,
     },
   };
@@ -585,13 +636,11 @@ async function handleGetEndorsers(
 async function handleGetActivity(
   body: Record<string, unknown>,
 ): Promise<FastDataResult> {
-  const handle = handleOf(body);
-  if (!handle) return { error: 'Handle is required', status: 400 };
+  const resolved = await requireAgent(body);
+  if ('error' in resolved) return resolved;
+  const { accountId } = resolved;
 
-  const accountId = await resolveHandle(handle);
-  if (!accountId) return { error: 'Agent not found', status: 404 };
-
-  const now = Math.floor(Date.now() / 1000);
+  const now = nowSecs();
   const sinceRaw = body.cursor ?? body.since;
   const since =
     typeof sinceRaw === 'string' ? parseInt(sinceRaw, 10) : now - 86400;
@@ -599,21 +648,21 @@ async function handleGetActivity(
     return { error: 'since must be a number', status: 400 };
   }
 
-  // New followers: predecessors who wrote graph/follow/{handle} with at >= since
-  const followerEntries = await kvGetAll(`graph/follow/${handle}`);
+  // New followers: predecessors who wrote graph/follow/{accountId} with at >= since
+  const followerEntries = await kvGetAll(`graph/follow/${accountId}`);
   const newFollowerAccounts: string[] = [];
   for (const e of followerEntries) {
-    const at = (e.value as Record<string, number>)?.at ?? 0;
+    const at = entryAt(e.value);
     if (at >= since) newFollowerAccounts.push(e.predecessor_id);
   }
 
   // New following: agent's graph/follow/* keys with at >= since
   const followingEntries = await kvListAgent(accountId, 'graph/follow/');
-  const newFollowingHandles: string[] = [];
+  const newFollowingAccountIds: string[] = [];
   for (const e of followingEntries) {
-    const at = (e.value as Record<string, number>)?.at ?? 0;
+    const at = entryAt(e.value);
     if (at >= since)
-      newFollowingHandles.push(e.key.replace('graph/follow/', ''));
+      newFollowingAccountIds.push(e.key.replace('graph/follow/', ''));
   }
 
   // Batch-fetch profiles for summaries
@@ -625,28 +674,20 @@ async function handleGetActivity(
       : [];
   const newFollowers = followerProfiles
     .filter((a): a is Agent => a !== null)
-    .map((a) => ({
-      handle: a.handle,
-      description: a.description,
-      avatar_url: a.avatar_url,
-    }));
+    .map(profileSummary);
 
-  const followingAccounts = await Promise.all(
-    newFollowingHandles.map((h) => resolveHandle(h)),
-  );
-  const validFollowing: { accountId: string; key: string }[] = [];
-  for (const a of followingAccounts) {
-    if (a) validFollowing.push({ accountId: a, key: 'profile' });
-  }
   const followingProfiles =
-    validFollowing.length > 0 ? await kvMultiAgent(validFollowing) : [];
+    newFollowingAccountIds.length > 0
+      ? await kvMultiAgent(
+          newFollowingAccountIds.map((a) => ({
+            accountId: a,
+            key: 'profile',
+          })),
+        )
+      : [];
   const newFollowing = followingProfiles
     .filter((a): a is Agent => a !== null)
-    .map((a) => ({
-      handle: a.handle,
-      description: a.description,
-      avatar_url: a.avatar_url,
-    }));
+    .map(profileSummary);
 
   return {
     data: {
@@ -660,16 +701,14 @@ async function handleGetActivity(
 async function handleGetNetwork(
   body: Record<string, unknown>,
 ): Promise<FastDataResult> {
-  const handle = handleOf(body);
-  if (!handle) return { error: 'Handle is required', status: 400 };
-
-  const accountId = await resolveHandle(handle);
-  if (!accountId) return { error: 'Agent not found', status: 404 };
+  const resolved = await requireAgent(body);
+  if ('error' in resolved) return resolved;
+  const { accountId } = resolved;
 
   // Profile + graph data in parallel.
   const [agent, followerEntries, followingEntries] = await Promise.all([
     kvGetAgent(accountId, 'profile') as Promise<Agent | null>,
-    kvGetAll(`graph/follow/${handle}`),
+    kvGetAll(`graph/follow/${accountId}`),
     kvListAgent(accountId, 'graph/follow/'),
   ]);
   if (!agent) return { error: 'Agent not found', status: 404 };
@@ -677,20 +716,13 @@ async function handleGetNetwork(
   const followerAccounts = new Set(
     followerEntries.map((e) => e.predecessor_id),
   );
-  const followingHandles = followingEntries.map((e) =>
+  // Following entries now store account IDs directly
+  const followingAccountIds = followingEntries.map((e) =>
     e.key.replace('graph/follow/', ''),
   );
 
-  // Resolve following handles to account IDs for mutual detection
-  const followingAccounts = await Promise.all(
-    followingHandles.map((h) => resolveHandle(h)),
-  );
-  const followingAccountSet = new Set(
-    followingAccounts.filter((a): a is string => a !== null),
-  );
-
   let mutualCount = 0;
-  for (const a of followingAccountSet) {
+  for (const a of followingAccountIds) {
     if (followerAccounts.has(a)) mutualCount++;
   }
 
@@ -701,49 +733,6 @@ async function handleGetNetwork(
       mutual_count: mutualCount,
       last_active: agent.last_active,
       created_at: agent.created_at,
-    },
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Admin: reconcile (read-only audit)
-// ---------------------------------------------------------------------------
-
-async function handleReconcileAll(): Promise<FastDataResult> {
-  // Scan all agents via sorted/followers index
-  const allScored = await kvGetAll('sorted/followers');
-  const accountIds = allScored.map((e) => e.predecessor_id);
-
-  // Batch-fetch all profiles
-  const profiles = await kvMultiAgent(
-    accountIds.map((a) => ({ accountId: a, key: 'profile' })),
-  );
-
-  let agentsChecked = 0;
-  let countsMismatched = 0;
-
-  for (let i = 0; i < profiles.length; i++) {
-    const agent = profiles[i] as Agent | null;
-    if (!agent) continue;
-    agentsChecked++;
-
-    // Verify follower count against actual graph edges
-    const followerEntries = await kvGetAll(`graph/follow/${agent.handle}`);
-    const followingEntries = await kvListAgent(accountIds[i], 'graph/follow/');
-
-    if (
-      agent.follower_count !== followerEntries.length ||
-      agent.following_count !== followingEntries.length
-    ) {
-      countsMismatched++;
-    }
-  }
-
-  return {
-    data: {
-      agents_checked: agentsChecked,
-      counts_mismatched: countsMismatched,
-      status: countsMismatched === 0 ? 'consistent' : 'discrepancies_found',
     },
   };
 }

@@ -160,24 +160,11 @@ describe('ApiClient', () => {
     });
 
     it('throws when required path param is missing', () => {
-      expect(() => routeFor('follow', {})).toThrow('requires handle');
+      expect(() => routeFor('follow', {})).toThrow('requires accountId');
     });
   });
 
   describe('input validation', () => {
-    it('rejects invalid handles', async () => {
-      await expect(api.getAgent('UPPER')).rejects.toMatchObject({
-        statusCode: 400,
-      });
-      await expect(api.getAgent('ab')).rejects.toMatchObject({
-        statusCode: 400,
-      });
-      await expect(api.getAgent('has-dash')).rejects.toMatchObject({
-        statusCode: 400,
-      });
-      expect(mockFetch).not.toHaveBeenCalled();
-    });
-
     it('clamps limit to valid range', async () => {
       mockSuccess([]);
 
@@ -362,10 +349,10 @@ describe('ApiClient', () => {
       expect((await api.listAgents(10)).agents).toEqual([]);
 
       mockSuccess({ unexpected: true });
-      expect((await api.getFollowers('alice_bot')).agents).toEqual([]);
+      expect((await api.getFollowers('alice_bot.near')).agents).toEqual([]);
 
       mockSuccess(null);
-      expect((await api.getFollowing('alice_bot')).agents).toEqual([]);
+      expect((await api.getFollowing('alice_bot.near')).agents).toEqual([]);
     });
   });
 
@@ -388,20 +375,20 @@ describe('ApiClient', () => {
     it('converts camelCase options to snake_case query params', async () => {
       api.clearCredentials();
       mockSuccess({
-        handle: 'bot_1',
+        account_id: 'bot_1.near',
         edges: [],
         edge_count: 0,
         history: null,
         pagination: { limit: 25 },
       });
 
-      await api.getEdges('bot_1', {
+      await api.getEdges('bot_1.near', {
         direction: 'both',
         limit: 10,
       });
 
       const call = lastFetchCall(mockFetch);
-      expect(call.url).toContain('/api/v1/agents/bot_1/edges');
+      expect(call.url).toContain('/api/v1/agents/bot_1.near/edges');
       expect(call.url).toContain('direction=both');
       expect(call.url).toContain('limit=10');
       expect(call.method).toBe('GET');
@@ -410,14 +397,14 @@ describe('ApiClient', () => {
     it('is a public endpoint (no auth required)', async () => {
       api.clearCredentials();
       mockSuccess({
-        handle: 'bot_1',
+        account_id: 'bot_1.near',
         edges: [],
         edge_count: 0,
         history: null,
         pagination: { limit: 25 },
       });
 
-      await expect(api.getEdges('bot_1')).resolves.toBeDefined();
+      await expect(api.getEdges('bot_1.near')).resolves.toBeDefined();
     });
   });
 
@@ -456,10 +443,12 @@ describe('ApiClient', () => {
           }),
       });
 
-      const result = await api.getFollowers('bot_1', 50);
+      const result = await api.getFollowers('bot_1.near', 50);
       expect(result.agents).toEqual([{ handle: 'follower_1' }]);
       expect(result.next_cursor).toBe('abc');
-      expect(lastFetchCall(mockFetch).url).toContain('/agents/bot_1/followers');
+      expect(lastFetchCall(mockFetch).url).toContain(
+        '/agents/bot_1.near/followers',
+      );
     });
 
     it('routes getFollowing to correct path', async () => {
@@ -473,9 +462,11 @@ describe('ApiClient', () => {
           }),
       });
 
-      const result = await api.getFollowing('bot_1', 50);
+      const result = await api.getFollowing('bot_1.near', 50);
       expect(result.agents).toEqual([{ handle: 'followed_1' }]);
-      expect(lastFetchCall(mockFetch).url).toContain('/agents/bot_1/following');
+      expect(lastFetchCall(mockFetch).url).toContain(
+        '/agents/bot_1.near/following',
+      );
     });
   });
 
@@ -497,25 +488,25 @@ describe('ApiClient', () => {
       expect(lastFetchCall(mockFetch).body).toBeNull();
     });
 
-    it('strips handle from body for follow (handle is in URL path)', async () => {
+    it('strips accountId from body for follow (accountId is in URL path)', async () => {
       mockSuccess({ action: 'followed' });
 
-      await api.followAgent('bot_1');
+      await api.followAgent('bot_1.near');
 
       const call = lastFetchCall(mockFetch);
-      expect(call.body?.handle).toBeUndefined();
-      expect(call.url).toContain('/agents/bot_1/follow');
+      expect(call.body?.accountId).toBeUndefined();
+      expect(call.url).toContain('/agents/bot_1.near/follow');
     });
 
-    it('routes unfollowAgent to DELETE with handle in path', async () => {
+    it('routes unfollowAgent to DELETE with accountId in path', async () => {
       mockSuccess({ action: 'unfollowed' });
 
-      await api.unfollowAgent('bot_1');
+      await api.unfollowAgent('bot_1.near');
 
       const call = lastFetchCall(mockFetch);
-      expect(call.url).toContain('/agents/bot_1/follow');
+      expect(call.url).toContain('/agents/bot_1.near/follow');
       expect(call.method).toBe('DELETE');
-      expect(call.body?.handle).toBeUndefined();
+      expect(call.body?.accountId).toBeUndefined();
     });
 
     it('keeps handle in body for register (handle is NOT in URL path)', async () => {
@@ -525,52 +516,37 @@ describe('ApiClient', () => {
       expect(lastFetchCall(mockFetch).body?.handle).toBe('my_bot');
     });
 
-    it('strips handle from body for endorse (handle is in URL path)', async () => {
+    it('strips accountId from body for endorse (accountId is in URL path)', async () => {
       mockSuccess({ action: 'endorsed', endorsed: { tags: ['rust'] } });
 
-      await api.endorseAgent('bot_1', { tags: ['rust'] });
+      await api.endorseAgent('bot_1.near', { tags: ['rust'] });
 
       const call = lastFetchCall(mockFetch);
-      expect(call.body?.handle).toBeUndefined();
+      expect(call.body?.accountId).toBeUndefined();
       expect(call.body?.tags).toEqual(['rust']);
-      expect(call.url).toContain('/agents/bot_1/endorse');
+      expect(call.url).toContain('/agents/bot_1.near/endorse');
       expect(call.method).toBe('POST');
     });
 
-    it('routes unendorse to DELETE with handle in path', async () => {
+    it('routes unendorse to DELETE with accountId in path', async () => {
       mockSuccess({ action: 'unendorsed', removed: { tags: ['rust'] } });
 
-      await api.unendorseAgent('bot_1', { tags: ['rust'] });
+      await api.unendorseAgent('bot_1.near', { tags: ['rust'] });
 
       const call = lastFetchCall(mockFetch);
-      expect(call.url).toContain('/agents/bot_1/endorse');
+      expect(call.url).toContain('/agents/bot_1.near/endorse');
       expect(call.method).toBe('DELETE');
     });
 
     it('routes getEndorsers to GET without auth', async () => {
       api.clearCredentials();
-      mockSuccess({ handle: 'bot_1', endorsers: {} });
+      mockSuccess({ account_id: 'bot_1.near', endorsers: {} });
 
-      await api.getEndorsers('bot_1');
-
-      const call = lastFetchCall(mockFetch);
-      expect(call.url).toContain('/agents/bot_1/endorsers');
-      expect(call.method).toBe('GET');
-    });
-  });
-
-  describe('checkHandle', () => {
-    it('sends GET to /api/v1/agents/check/:handle without auth', async () => {
-      api.clearCredentials();
-      mockSuccess({ handle: 'new_bot', available: true });
-
-      const result = await api.checkHandle('new_bot');
+      await api.getEndorsers('bot_1.near');
 
       const call = lastFetchCall(mockFetch);
-      expect(call.url).toContain('/agents/check/new_bot');
+      expect(call.url).toContain('/agents/bot_1.near/endorsers');
       expect(call.method).toBe('GET');
-      expect(call.headers?.Authorization).toBeUndefined();
-      expect(result.available).toBe(true);
     });
   });
 

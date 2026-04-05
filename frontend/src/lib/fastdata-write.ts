@@ -1,20 +1,14 @@
 /**
- * Direct FastData KV write path for social graph mutations.
+ * FastData KV write path for social graph mutations.
  *
- * Replaces WASM execution for all non-registration mutations.
+ * Handles all non-registration mutations via direct FastData writes.
  * Each function validates inputs, checks rate limits, writes via
  * the caller's custody wallet, and returns a structured response.
  *
  * Key schema (per-predecessor — caller writes under their own account):
- *   graph/follow/{targetHandle}                 → {at, reason?}
- *   endorsing/{targetHandle}/{ns}/{value}       → {at, reason?}
+ *   graph/follow/{targetAccountId}              → {at, reason?}
+ *   endorsing/{targetAccountId}/{ns}/{value}    → {at, reason?}
  *   profile                                     → full Agent record
- *   name                                        → handle string
- *   handle/{handle}                             → true
- *   sorted/active                               → {ts}
- *   sorted/followers                            → {score}  (updated on heartbeat)
- *   sorted/endorsements                         → {score}  (updated on heartbeat, live at read time)
- *   sorted/newest                               → {ts}
  *   tag/{tag}                                   → {score}
  */
 
@@ -26,15 +20,19 @@ import {
   kvListAgent,
   kvListAll,
   kvMultiAgent,
-  resolveHandle,
 } from './fastdata';
 import {
   agentEntries,
   buildEndorsementCounts,
   collectEndorsable,
+  endorsementKey,
+  endorsePrefix,
+  entryAt,
   extractCapabilityPairs,
+  nowSecs,
   profileCompleteness,
-} from './fastdata-sync';
+  profileSummary,
+} from './fastdata-utils';
 import { fetchWithTimeout } from './fetch';
 import {
   checkRateLimit,
@@ -127,7 +125,6 @@ async function writeToFastData(
 
 interface CallerIdentity {
   accountId: string;
-  handle: string;
   agent: Agent;
 }
 
@@ -138,29 +135,90 @@ async function resolveCaller(
   const accountId = await resolveAccountId(walletKey);
   if (!accountId) return fail('AUTH_FAILED', 'Could not resolve account', 401);
 
-  const [handle, agent] = await Promise.all([
-    kvGetAgent(accountId, 'name') as Promise<string | null>,
-    kvGetAgent(accountId, 'profile') as Promise<Agent | null>,
-  ]);
-  if (!handle)
-    return fail('NOT_REGISTERED', 'No agent registered for this account', 404);
-  if (!agent) return fail('NOT_FOUND', 'Agent profile not found', 404);
+  const agent = (await kvGetAgent(accountId, 'profile')) as Agent | null;
+  if (!agent) return fail('NOT_REGISTERED', 'Agent profile not found', 404);
 
-  return { accountId, handle, agent };
+  return { accountId, agent };
+}
+
+// ---------------------------------------------------------------------------
+// Resolve target agent
+// ---------------------------------------------------------------------------
+
+interface TargetIdentity {
+  accountId: string;
+  agent: Agent;
+}
+
+async function resolveTargetAgent(
+  accountId: string,
+): Promise<TargetIdentity | WriteResult> {
+  const agent = (await kvGetAgent(accountId, 'profile')) as Agent | null;
+  if (!agent) return fail('NOT_FOUND', 'Agent not found', 404);
+  return { accountId, agent };
+}
+
+/**
+ * Create a default agent profile for first-write (heartbeat or update_me).
+ * The agent enters the index when they first write — no prior registration needed.
+ */
+function defaultAgent(accountId: string): Agent {
+  const ts = nowSecs();
+  return {
+    handle: accountId,
+    description: '',
+    avatar_url: null,
+    tags: [],
+    capabilities: {},
+    endorsements: {},
+    platforms: [],
+    near_account_id: accountId,
+    follower_count: 0,
+    following_count: 0,
+    created_at: ts,
+    last_active: ts,
+  };
+}
+
+/**
+ * Resolve caller, creating a default profile if none exists.
+ * Used by heartbeat and update_me — the two entry points for first-write.
+ */
+async function resolveCallerOrInit(
+  walletKey: string,
+  resolveAccountId: (wk: string) => Promise<string | null>,
+): Promise<CallerIdentity | WriteResult> {
+  const accountId = await resolveAccountId(walletKey);
+  if (!accountId) return fail('AUTH_FAILED', 'Could not resolve account', 401);
+
+  const existing = (await kvGetAgent(accountId, 'profile')) as Agent | null;
+  if (existing) return { accountId, agent: existing };
+
+  // First-write: create default profile. The write itself checks funding.
+  const agent = defaultAgent(accountId);
+  const wrote = await writeToFastData(walletKey, agentEntries(agent));
+  if (!wrote) {
+    return fail(
+      'WALLET_UNFUNDED',
+      'Fund your wallet with ≥0.01 NEAR, then retry.',
+      402,
+    );
+  }
+
+  return { accountId, agent };
 }
 
 // ---------------------------------------------------------------------------
 // Follow / Unfollow
 // ---------------------------------------------------------------------------
 
-export async function handleDirectFollow(
+export async function handleFollow(
   walletKey: string,
-  targetHandle: string,
+  targetAccountId: string,
   reason: string | undefined,
   resolveAccountId: (wk: string) => Promise<string | null>,
 ): Promise<WriteResult> {
   // Validate
-  const target = targetHandle.toLowerCase();
   if (reason != null) {
     const e = validateReason(reason);
     if (e) return validationFail(e);
@@ -171,19 +229,25 @@ export async function handleDirectFollow(
   if ('success' in caller) return caller;
 
   // Self-follow
-  if (caller.handle === target)
+  if (caller.accountId === targetAccountId)
     return fail('SELF_FOLLOW', 'Cannot follow yourself');
 
   // Rate limit
-  const rl = checkRateLimit('follow', caller.handle);
+  const rl = checkRateLimit('follow', caller.accountId);
   if (!rl.ok) return rateLimited(rl.retryAfter);
 
   // Target must exist
-  const targetAccountId = await resolveHandle(target);
-  if (!targetAccountId) return fail('NOT_FOUND', 'Agent not found', 404);
+  const targetAgent = (await kvGetAgent(
+    targetAccountId,
+    'profile',
+  )) as Agent | null;
+  if (!targetAgent) return fail('NOT_FOUND', 'Agent not found', 404);
 
   // Idempotency: check if already following
-  const existing = await kvGetAgent(caller.accountId, `graph/follow/${target}`);
+  const existing = await kvGetAgent(
+    caller.accountId,
+    `graph/follow/${targetAccountId}`,
+  );
   if (existing) {
     return ok({
       action: 'already_following',
@@ -195,20 +259,19 @@ export async function handleDirectFollow(
   }
 
   // Write
-  const ts = Math.floor(Date.now() / 1000);
+  const ts = nowSecs();
   const entries: Record<string, unknown> = {
-    [`graph/follow/${target}`]: { at: ts, reason: reason ?? null },
-    'sorted/active': { ts },
+    [`graph/follow/${targetAccountId}`]: { at: ts, reason: reason ?? null },
   };
 
   const wrote = await writeToFastData(walletKey, entries);
   if (!wrote) return fail('STORAGE_ERROR', 'Failed to write to FastData', 500);
 
-  incrementRateLimit('follow', caller.handle);
+  incrementRateLimit('follow', caller.accountId);
 
   return ok({
     action: 'followed',
-    followed: { handle: target },
+    followed: { account_id: targetAccountId },
     your_network: {
       following_count: caller.agent.following_count + 1,
       follower_count: caller.agent.follower_count,
@@ -218,7 +281,7 @@ export async function handleDirectFollow(
 
 const MAX_BATCH_SIZE = 20;
 
-async function handleDirectMultiFollow(
+async function handleMultiFollow(
   walletKey: string,
   targets: string[],
   resolveAccountId: (wk: string) => Promise<string | null>,
@@ -231,22 +294,25 @@ async function handleDirectMultiFollow(
   const caller = await resolveCaller(walletKey, resolveAccountId);
   if ('success' in caller) return caller;
 
-  const budget = checkRateLimitBudget('follow', caller.handle);
+  const budget = checkRateLimitBudget('follow', caller.accountId);
   if (!budget.ok) return rateLimited(budget.retryAfter);
 
-  const ts = Math.floor(Date.now() / 1000);
+  const ts = nowSecs();
   const results: Record<string, unknown>[] = [];
   let followedCount = 0;
 
-  for (const raw of targets) {
-    const target = raw.trim().toLowerCase();
-    if (!target) {
-      results.push({ handle: raw, action: 'error', error: 'empty handle' });
+  for (const targetAccountId of targets) {
+    if (!targetAccountId.trim()) {
+      results.push({
+        account_id: targetAccountId,
+        action: 'error',
+        error: 'empty account_id',
+      });
       continue;
     }
-    if (target === caller.handle) {
+    if (targetAccountId === caller.accountId) {
       results.push({
-        handle: target,
+        account_id: targetAccountId,
         action: 'error',
         error: 'cannot follow yourself',
       });
@@ -255,17 +321,23 @@ async function handleDirectMultiFollow(
 
     const existing = await kvGetAgent(
       caller.accountId,
-      `graph/follow/${target}`,
+      `graph/follow/${targetAccountId}`,
     );
     if (existing) {
-      results.push({ handle: target, action: 'already_following' });
+      results.push({
+        account_id: targetAccountId,
+        action: 'already_following',
+      });
       continue;
     }
 
-    const targetAccountId = await resolveHandle(target);
-    if (!targetAccountId) {
+    const targetAgent = (await kvGetAgent(
+      targetAccountId,
+      'profile',
+    )) as Agent | null;
+    if (!targetAgent) {
       results.push({
-        handle: target,
+        account_id: targetAccountId,
         action: 'error',
         error: 'agent not found',
       });
@@ -274,7 +346,7 @@ async function handleDirectMultiFollow(
 
     if (followedCount >= budget.remaining) {
       results.push({
-        handle: target,
+        account_id: targetAccountId,
         action: 'error',
         error: 'rate limit reached within batch',
       });
@@ -282,18 +354,21 @@ async function handleDirectMultiFollow(
     }
 
     const entries: Record<string, unknown> = {
-      [`graph/follow/${target}`]: { at: ts },
-      'sorted/active': { ts },
+      [`graph/follow/${targetAccountId}`]: { at: ts },
     };
     const wrote = await writeToFastData(walletKey, entries);
     if (!wrote) {
-      results.push({ handle: target, action: 'error', error: 'storage error' });
+      results.push({
+        account_id: targetAccountId,
+        action: 'error',
+        error: 'storage error',
+      });
       continue;
     }
 
-    incrementRateLimit('follow', caller.handle);
+    incrementRateLimit('follow', caller.accountId);
     followedCount++;
-    results.push({ handle: target, action: 'followed' });
+    results.push({ account_id: targetAccountId, action: 'followed' });
   }
 
   return ok({
@@ -306,24 +381,25 @@ async function handleDirectMultiFollow(
   });
 }
 
-export async function handleDirectUnfollow(
+export async function handleUnfollow(
   walletKey: string,
-  targetHandle: string,
+  targetAccountId: string,
   resolveAccountId: (wk: string) => Promise<string | null>,
 ): Promise<WriteResult> {
-  const target = targetHandle.toLowerCase();
-
   const caller = await resolveCaller(walletKey, resolveAccountId);
   if ('success' in caller) return caller;
 
-  if (caller.handle === target)
+  if (caller.accountId === targetAccountId)
     return fail('SELF_UNFOLLOW', 'Cannot unfollow yourself');
 
-  const rl = checkRateLimit('unfollow', caller.handle);
+  const rl = checkRateLimit('unfollow', caller.accountId);
   if (!rl.ok) return rateLimited(rl.retryAfter);
 
   // Check if actually following
-  const existing = await kvGetAgent(caller.accountId, `graph/follow/${target}`);
+  const existing = await kvGetAgent(
+    caller.accountId,
+    `graph/follow/${targetAccountId}`,
+  );
   if (!existing) {
     return ok({
       action: 'not_following',
@@ -336,14 +412,13 @@ export async function handleDirectUnfollow(
 
   // Delete by writing null
   const entries: Record<string, unknown> = {
-    [`graph/follow/${target}`]: null,
-    'sorted/active': { ts: Math.floor(Date.now() / 1000) },
+    [`graph/follow/${targetAccountId}`]: null,
   };
 
   const wrote = await writeToFastData(walletKey, entries);
   if (!wrote) return fail('STORAGE_ERROR', 'Failed to write to FastData', 500);
 
-  incrementRateLimit('unfollow', caller.handle);
+  incrementRateLimit('unfollow', caller.accountId);
 
   return ok({
     action: 'unfollowed',
@@ -388,7 +463,7 @@ function resolveTagCore(val: string, endorsable: Set<string>): TagResolution {
 /** Strict resolution: returns WriteResult error on failure. */
 function resolveTag(
   val: string,
-  targetHandle: string,
+  targetAccountId: string,
   endorsable: Set<string>,
 ): { ns: string; value: string } | WriteResult {
   const r = resolveTagCore(val, endorsable);
@@ -401,19 +476,18 @@ function resolveTag(
   }
   return fail(
     'VALIDATION_ERROR',
-    `Agent @${targetHandle} does not have '${val}'`,
+    `Agent ${targetAccountId} does not have '${val}'`,
   );
 }
 
-export async function handleDirectEndorse(
+export async function handleEndorse(
   walletKey: string,
-  targetHandle: string,
+  targetAccountId: string,
   tags: string[] | undefined,
   capabilities: Record<string, unknown> | undefined,
   reason: string | undefined,
   resolveAccountId: (wk: string) => Promise<string | null>,
 ): Promise<WriteResult> {
-  const target = targetHandle.toLowerCase();
   if (reason != null) {
     const e = validateReason(reason);
     if (e) return validationFail(e);
@@ -425,20 +499,16 @@ export async function handleDirectEndorse(
   const caller = await resolveCaller(walletKey, resolveAccountId);
   if ('success' in caller) return caller;
 
-  if (caller.handle === target)
+  if (caller.accountId === targetAccountId)
     return fail('SELF_ENDORSE', 'Cannot endorse yourself');
 
-  const rl = checkRateLimit('endorse', caller.handle);
+  const rl = checkRateLimit('endorse', caller.accountId);
   if (!rl.ok) return rateLimited(rl.retryAfter);
 
   // Load target profile
-  const targetAccountId = await resolveHandle(target);
-  if (!targetAccountId) return fail('NOT_FOUND', 'Agent not found', 404);
-  const targetAgent = (await kvGetAgent(
-    targetAccountId,
-    'profile',
-  )) as Agent | null;
-  if (!targetAgent) return fail('NOT_FOUND', 'Agent not found', 404);
+  const targetResult = await resolveTargetAgent(targetAccountId);
+  if ('success' in targetResult) return targetResult;
+  const { agent: targetAgent } = targetResult;
 
   const endorsable = collectEndorsable(targetAgent);
 
@@ -446,7 +516,7 @@ export async function handleDirectEndorse(
   const resolved: { ns: string; value: string }[] = [];
   if (tags) {
     for (const tag of tags) {
-      const r = resolveTag(tag.toLowerCase(), target, endorsable);
+      const r = resolveTag(tag.toLowerCase(), targetAccountId, endorsable);
       if ('success' in r) return r;
       resolved.push(r);
     }
@@ -456,7 +526,7 @@ export async function handleDirectEndorse(
       if (!endorsable.has(`${ns}:${val}`)) {
         return fail(
           'VALIDATION_ERROR',
-          `Agent @${target} does not have ${ns} '${val}'`,
+          `Agent ${targetAccountId} does not have ${ns} '${val}'`,
         );
       }
       resolved.push({ ns, value: val });
@@ -467,17 +537,15 @@ export async function handleDirectEndorse(
   }
 
   // Batch idempotency check + build write entries
-  const ts = Math.floor(Date.now() / 1000);
-  const ekeys = resolved.map(
-    ({ ns, value }) => `endorsing/${target}/${ns}/${value}`,
+  const ts = nowSecs();
+  const ekeys = resolved.map(({ ns, value }) =>
+    endorsementKey(targetAccountId, ns, value),
   );
   const existingValues = await kvMultiAgent(
     ekeys.map((key) => ({ accountId: caller.accountId, key })),
   );
 
-  const entries: Record<string, unknown> = {
-    'sorted/active': { ts },
-  };
+  const entries: Record<string, unknown> = {};
   const endorsed: Record<string, string[]> = {};
   const alreadyEndorsed: Record<string, string[]> = {};
 
@@ -496,7 +564,7 @@ export async function handleDirectEndorse(
   if (Object.keys(endorsed).length === 0) {
     return ok({
       action: 'endorsed',
-      handle: target,
+      account_id: targetAccountId,
       endorsed: {},
       already_endorsed: alreadyEndorsed,
       agent: targetAgent,
@@ -506,11 +574,11 @@ export async function handleDirectEndorse(
   const wrote = await writeToFastData(walletKey, entries);
   if (!wrote) return fail('STORAGE_ERROR', 'Failed to write to FastData', 500);
 
-  incrementRateLimit('endorse', caller.handle);
+  incrementRateLimit('endorse', caller.accountId);
 
   return ok({
     action: 'endorsed',
-    handle: target,
+    account_id: targetAccountId,
     endorsed,
     already_endorsed: alreadyEndorsed,
     agent: targetAgent,
@@ -520,7 +588,6 @@ export async function handleDirectEndorse(
 /** Soft tag resolution for multi-target: collects skipped instead of failing. */
 function resolveTagSoft(
   val: string,
-  _targetHandle: string,
   endorsable: Set<string>,
 ): { ns: string; value: string } | { skipped: Record<string, unknown> } {
   const r = resolveTagCore(val, endorsable);
@@ -533,7 +600,7 @@ function resolveTagSoft(
   };
 }
 
-async function handleDirectMultiEndorse(
+async function handleMultiEndorse(
   walletKey: string,
   targets: string[],
   tags: string[] | undefined,
@@ -555,47 +622,41 @@ async function handleDirectMultiEndorse(
   const caller = await resolveCaller(walletKey, resolveAccountId);
   if ('success' in caller) return caller;
 
-  const budget = checkRateLimitBudget('endorse', caller.handle);
+  const budget = checkRateLimitBudget('endorse', caller.accountId);
   if (!budget.ok) return rateLimited(budget.retryAfter);
 
-  const ts = Math.floor(Date.now() / 1000);
+  const ts = nowSecs();
   const results: Record<string, unknown>[] = [];
   let endorsedCount = 0;
 
-  for (const raw of targets) {
-    const target = raw.trim().toLowerCase();
-    if (!target || target === caller.handle) {
+  for (const targetAccountId of targets) {
+    if (!targetAccountId.trim() || targetAccountId === caller.accountId) {
       const reason_ =
-        target === caller.handle ? 'cannot endorse yourself' : 'empty handle';
-      results.push({ handle: raw, action: 'error', error: reason_ });
+        targetAccountId === caller.accountId
+          ? 'cannot endorse yourself'
+          : 'empty account_id';
+      results.push({
+        account_id: targetAccountId,
+        action: 'error',
+        error: reason_,
+      });
       continue;
     }
 
-    const targetAccountId = await resolveHandle(target);
-    if (!targetAccountId) {
+    const targetResult = await resolveTargetAgent(targetAccountId);
+    if ('success' in targetResult) {
       results.push({
-        handle: target,
+        account_id: targetAccountId,
         action: 'error',
         error: 'agent not found',
       });
       continue;
     }
-    const targetAgent = (await kvGetAgent(
-      targetAccountId,
-      'profile',
-    )) as Agent | null;
-    if (!targetAgent) {
-      results.push({
-        handle: target,
-        action: 'error',
-        error: 'agent not found',
-      });
-      continue;
-    }
+    const { agent: targetAgent } = targetResult;
 
     if (endorsedCount >= budget.remaining) {
       results.push({
-        handle: target,
+        account_id: targetAccountId,
         action: 'error',
         error: 'rate limit reached within batch',
       });
@@ -608,7 +669,7 @@ async function handleDirectMultiEndorse(
 
     if (tags) {
       for (const tag of tags) {
-        const r = resolveTagSoft(tag.toLowerCase(), target, endorsable);
+        const r = resolveTagSoft(tag.toLowerCase(), endorsable);
         if ('ns' in r) resolved.push(r);
         else skipped.push(r.skipped);
       }
@@ -634,7 +695,7 @@ async function handleDirectMultiEndorse(
           : []),
       ];
       results.push({
-        handle: target,
+        account_id: targetAccountId,
         action: 'error',
         error: 'no endorsable items match',
         requested,
@@ -644,14 +705,14 @@ async function handleDirectMultiEndorse(
     }
 
     // Batch idempotency check + build write entries
-    const ekeys = resolved.map(
-      ({ ns, value }) => `endorsing/${target}/${ns}/${value}`,
+    const ekeys = resolved.map(({ ns, value }) =>
+      endorsementKey(targetAccountId, ns, value),
     );
     const existingValues = await kvMultiAgent(
       ekeys.map((key) => ({ accountId: caller.accountId, key })),
     );
 
-    const entries: Record<string, unknown> = { 'sorted/active': { ts } };
+    const entries: Record<string, unknown> = {};
     const endorsed: Record<string, string[]> = {};
 
     for (let i = 0; i < resolved.length; i++) {
@@ -667,18 +728,18 @@ async function handleDirectMultiEndorse(
       const wrote = await writeToFastData(walletKey, entries);
       if (!wrote) {
         results.push({
-          handle: target,
+          account_id: targetAccountId,
           action: 'error',
           error: 'storage error',
         });
         continue;
       }
-      incrementRateLimit('endorse', caller.handle);
+      incrementRateLimit('endorse', caller.accountId);
       endorsedCount++;
     }
 
     const result: Record<string, unknown> = {
-      handle: target,
+      account_id: targetAccountId,
       action: 'endorsed',
       endorsed,
     };
@@ -689,14 +750,13 @@ async function handleDirectMultiEndorse(
   return ok({ action: 'batch_endorsed', results });
 }
 
-export async function handleDirectUnendorse(
+export async function handleUnendorse(
   walletKey: string,
-  targetHandle: string,
+  targetAccountId: string,
   tags: string[] | undefined,
   capabilities: Record<string, unknown> | undefined,
   resolveAccountId: (wk: string) => Promise<string | null>,
 ): Promise<WriteResult> {
-  const target = targetHandle.toLowerCase();
   if ((!tags || tags.length === 0) && !capabilities) {
     return fail('VALIDATION_ERROR', 'Tags or capabilities are required');
   }
@@ -704,19 +764,15 @@ export async function handleDirectUnendorse(
   const caller = await resolveCaller(walletKey, resolveAccountId);
   if ('success' in caller) return caller;
 
-  if (caller.handle === target)
+  if (caller.accountId === targetAccountId)
     return fail('SELF_UNENDORSE', 'Cannot unendorse yourself');
 
-  const rl = checkRateLimit('unendorse', caller.handle);
+  const rl = checkRateLimit('unendorse', caller.accountId);
   if (!rl.ok) return rateLimited(rl.retryAfter);
 
-  const targetAccountId = await resolveHandle(target);
-  if (!targetAccountId) return fail('NOT_FOUND', 'Agent not found', 404);
-  const targetAgent = (await kvGetAgent(
-    targetAccountId,
-    'profile',
-  )) as Agent | null;
-  if (!targetAgent) return fail('NOT_FOUND', 'Agent not found', 404);
+  const targetResult = await resolveTargetAgent(targetAccountId);
+  if ('success' in targetResult) return targetResult;
+  const { agent: targetAgent } = targetResult;
 
   const endorsable = collectEndorsable(targetAgent);
 
@@ -724,7 +780,7 @@ export async function handleDirectUnendorse(
   const resolved: { ns: string; value: string }[] = [];
   if (tags) {
     for (const tag of tags) {
-      const r = resolveTag(tag.toLowerCase(), target, endorsable);
+      const r = resolveTag(tag.toLowerCase(), targetAccountId, endorsable);
       if ('success' in r) return r;
       resolved.push(r);
     }
@@ -737,8 +793,8 @@ export async function handleDirectUnendorse(
     }
   }
 
-  const ekeys = resolved.map(
-    ({ ns, value }) => `endorsing/${target}/${ns}/${value}`,
+  const ekeys = resolved.map(({ ns, value }) =>
+    endorsementKey(targetAccountId, ns, value),
   );
   const existingValues = await kvMultiAgent(
     ekeys.map((key) => ({ accountId: caller.accountId, key })),
@@ -760,12 +816,12 @@ export async function handleDirectUnendorse(
     const wrote = await writeToFastData(walletKey, entries);
     if (!wrote)
       return fail('STORAGE_ERROR', 'Failed to write to FastData', 500);
-    incrementRateLimit('unendorse', caller.handle);
+    incrementRateLimit('unendorse', caller.accountId);
   }
 
   return ok({
     action: 'unendorsed',
-    handle: target,
+    account_id: targetAccountId,
     removed,
     agent: targetAgent,
   });
@@ -775,15 +831,16 @@ export async function handleDirectUnendorse(
 // Update Me
 // ---------------------------------------------------------------------------
 
-export async function handleDirectUpdateMe(
+export async function handleUpdateMe(
   walletKey: string,
   body: Record<string, unknown>,
   resolveAccountId: (wk: string) => Promise<string | null>,
 ): Promise<WriteResult> {
-  const caller = await resolveCaller(walletKey, resolveAccountId);
+  // First-write: creates default profile if none exists (agent-paid).
+  const caller = await resolveCallerOrInit(walletKey, resolveAccountId);
   if ('success' in caller) return caller;
 
-  const rl = checkRateLimit('update_me', caller.handle);
+  const rl = checkRateLimit('update_me', caller.accountId);
   if (!rl.ok) return rateLimited(rl.retryAfter);
 
   const agent = { ...caller.agent };
@@ -825,10 +882,10 @@ export async function handleDirectUpdateMe(
     );
   }
 
-  const ts = Math.floor(Date.now() / 1000);
+  const ts = nowSecs();
   agent.last_active = ts;
 
-  // Build entries: full profile + sorted indexes
+  // Build entries: profile + tag/cap indexes
   const entries = agentEntries(agent);
 
   // Delete old tag keys if tags changed
@@ -844,7 +901,7 @@ export async function handleDirectUpdateMe(
   const wrote = await writeToFastData(walletKey, entries);
   if (!wrote) return fail('STORAGE_ERROR', 'Failed to write to FastData', 500);
 
-  incrementRateLimit('update_me', caller.handle);
+  incrementRateLimit('update_me', caller.accountId);
 
   const completeness = profileCompleteness(agent);
   return ok({ agent, profile_completeness: completeness });
@@ -854,46 +911,71 @@ export async function handleDirectUpdateMe(
 // Heartbeat
 // ---------------------------------------------------------------------------
 
-export async function handleDirectHeartbeat(
+export async function handleHeartbeat(
   walletKey: string,
   resolveAccountId: (wk: string) => Promise<string | null>,
 ): Promise<WriteResult> {
-  const caller = await resolveCaller(walletKey, resolveAccountId);
-  if ('success' in caller) return caller;
+  // First-write: creates default profile if none exists (agent-paid).
+  const caller = await resolveCallerOrInit(walletKey, resolveAccountId);
+  if (!('accountId' in caller)) return caller;
 
-  const rl = checkRateLimit('heartbeat', caller.handle);
+  const rl = checkRateLimit('heartbeat', caller.accountId);
   if (!rl.ok) return rateLimited(rl.retryAfter);
 
   const previousActive = caller.agent.last_active;
-  const ts = Math.floor(Date.now() / 1000);
+  const ts = nowSecs();
   const agent = { ...caller.agent, last_active: ts };
 
   // Compute live counts from graph traversal (parallel)
   const [followerEntries, followingEntries, endorseEntries] = await Promise.all(
     [
-      kvGetAll(`graph/follow/${caller.handle}`),
+      kvGetAll(`graph/follow/${caller.accountId}`),
       kvListAgent(caller.accountId, 'graph/follow/'),
-      kvListAll(`endorsing/${caller.handle}/`),
+      kvListAll(endorsePrefix(caller.accountId)),
     ],
   );
   agent.follower_count = followerEntries.length;
   agent.following_count = followingEntries.length;
-  agent.endorsements = buildEndorsementCounts(endorseEntries, caller.handle);
+  agent.endorsements = buildEndorsementCounts(endorseEntries, caller.accountId);
 
-  // Write updated profile + sorted indexes
+  // New followers since last heartbeat
+  const newFollowerAccounts: string[] = [];
+  for (const e of followerEntries) {
+    const at = entryAt(e.value);
+    if (at >= previousActive) newFollowerAccounts.push(e.predecessor_id);
+  }
+
+  // New following since last heartbeat
+  const newFollowingCount = followingEntries.filter((e) => {
+    const at = entryAt(e.value);
+    return at >= previousActive;
+  }).length;
+
+  // Batch-fetch profiles for new follower summaries
+  const followerProfiles =
+    newFollowerAccounts.length > 0
+      ? await kvMultiAgent(
+          newFollowerAccounts.map((a) => ({ accountId: a, key: 'profile' })),
+        )
+      : [];
+  const newFollowers = followerProfiles
+    .filter((a): a is Agent => a !== null)
+    .map(profileSummary);
+
+  // Write updated profile + tag/cap indexes
   const entries = agentEntries(agent);
   const wrote = await writeToFastData(walletKey, entries);
   if (!wrote) return fail('STORAGE_ERROR', 'Failed to write to FastData', 500);
 
-  incrementRateLimit('heartbeat', caller.handle);
+  incrementRateLimit('heartbeat', caller.accountId);
 
   return ok({
     agent,
     delta: {
       since: previousActive,
-      new_followers: [],
-      new_followers_count: 0,
-      new_following_count: 0,
+      new_followers: newFollowers,
+      new_followers_count: newFollowers.length,
+      new_following_count: newFollowingCount,
       profile_completeness: profileCompleteness(agent),
     },
     suggested_action: {
@@ -907,30 +989,29 @@ export async function handleDirectHeartbeat(
 // Deregister
 // ---------------------------------------------------------------------------
 
-export async function handleDirectDeregister(
+export async function handleDeregister(
   walletKey: string,
   resolveAccountId: (wk: string) => Promise<string | null>,
 ): Promise<WriteResult> {
   const caller = await resolveCaller(walletKey, resolveAccountId);
   if ('success' in caller) return caller;
 
-  const rl = checkRateLimit('deregister', caller.handle);
+  const rl = checkRateLimit('deregister', caller.accountId);
   if (!rl.ok) return rateLimited(rl.retryAfter);
 
   // Null-write all agent keys
   const entries: Record<string, unknown> = {
     profile: null,
-    name: null,
-    [`handle/${caller.handle}`]: null,
-    'sorted/followers': null,
-    'sorted/endorsements': null,
-    'sorted/newest': null,
-    'sorted/active': null,
   };
 
   // Null-write tag keys
   for (const tag of caller.agent.tags) {
     entries[`tag/${tag}`] = null;
+  }
+
+  // Null-write capability keys
+  for (const [ns, val] of extractCapabilityPairs(caller.agent.capabilities)) {
+    entries[`cap/${ns}/${val}`] = null;
   }
 
   // Null-write follow edges
@@ -948,49 +1029,11 @@ export async function handleDirectDeregister(
   const wrote = await writeToFastData(walletKey, entries);
   if (!wrote) return fail('STORAGE_ERROR', 'Failed to write to FastData', 500);
 
-  incrementRateLimit('deregister', caller.handle);
+  incrementRateLimit('deregister', caller.accountId);
 
   return ok({
     action: 'deregistered',
-    handle: caller.handle,
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Admin deregister
-// ---------------------------------------------------------------------------
-
-export async function handleDirectAdminDeregister(
-  walletKey: string,
-  targetHandle: string,
-): Promise<WriteResult> {
-  const lower = targetHandle.toLowerCase();
-
-  // Resolve target to verify it exists
-  const targetAccountId = await resolveHandle(lower);
-  if (!targetAccountId)
-    return fail('NOT_FOUND', `Agent @${lower} not found`, 404);
-
-  const targetAgent = (await kvGetAgent(targetAccountId, 'profile')) as Record<
-    string,
-    unknown
-  > | null;
-  if (!targetAgent) return fail('NOT_FOUND', `Agent @${lower} not found`, 404);
-
-  // Write a deregistered marker under the admin's predecessor.
-  // Read handlers check this key to exclude deregistered agents.
-  const now = Math.floor(Date.now() / 1000);
-  const entries: Record<string, unknown> = {
-    [`deregistered/${lower}`]: { at: now, account_id: targetAccountId },
-  };
-
-  const wrote = await writeToFastData(walletKey, entries);
-  if (!wrote) return fail('STORAGE_ERROR', 'Failed to write to FastData', 500);
-
-  return ok({
-    action: 'admin_deregistered',
-    handle: lower,
-    account_id: targetAccountId,
+    account_id: caller.accountId,
   });
 }
 
@@ -998,13 +1041,13 @@ export async function handleDirectAdminDeregister(
 // Dispatcher
 // ---------------------------------------------------------------------------
 
-export async function dispatchDirectWrite(
+export async function dispatchWrite(
   action: string,
   body: Record<string, unknown>,
   walletKey: string,
   resolveAccountId: (wk: string) => Promise<string | null>,
 ): Promise<WriteResult> {
-  const handle = (body.handle as string)?.toLowerCase();
+  const accountId = body.account_id as string | undefined;
 
   const targets = Array.isArray(body.targets)
     ? (body.targets as string[])
@@ -1013,22 +1056,22 @@ export async function dispatchDirectWrite(
   switch (action) {
     case 'follow':
       if (targets)
-        return handleDirectMultiFollow(walletKey, targets, resolveAccountId);
-      if (!handle) return fail('VALIDATION_ERROR', 'Handle is required');
-      return handleDirectFollow(
+        return handleMultiFollow(walletKey, targets, resolveAccountId);
+      if (!accountId) return fail('VALIDATION_ERROR', 'account_id is required');
+      return handleFollow(
         walletKey,
-        handle,
+        accountId,
         body.reason as string | undefined,
         resolveAccountId,
       );
 
     case 'unfollow':
-      if (!handle) return fail('VALIDATION_ERROR', 'Handle is required');
-      return handleDirectUnfollow(walletKey, handle, resolveAccountId);
+      if (!accountId) return fail('VALIDATION_ERROR', 'account_id is required');
+      return handleUnfollow(walletKey, accountId, resolveAccountId);
 
     case 'endorse':
       if (targets)
-        return handleDirectMultiEndorse(
+        return handleMultiEndorse(
           walletKey,
           targets,
           body.tags as string[] | undefined,
@@ -1036,10 +1079,10 @@ export async function dispatchDirectWrite(
           body.reason as string | undefined,
           resolveAccountId,
         );
-      if (!handle) return fail('VALIDATION_ERROR', 'Handle is required');
-      return handleDirectEndorse(
+      if (!accountId) return fail('VALIDATION_ERROR', 'account_id is required');
+      return handleEndorse(
         walletKey,
-        handle,
+        accountId,
         body.tags as string[] | undefined,
         body.capabilities as Record<string, unknown> | undefined,
         body.reason as string | undefined,
@@ -1047,23 +1090,23 @@ export async function dispatchDirectWrite(
       );
 
     case 'unendorse':
-      if (!handle) return fail('VALIDATION_ERROR', 'Handle is required');
-      return handleDirectUnendorse(
+      if (!accountId) return fail('VALIDATION_ERROR', 'account_id is required');
+      return handleUnendorse(
         walletKey,
-        handle,
+        accountId,
         body.tags as string[] | undefined,
         body.capabilities as Record<string, unknown> | undefined,
         resolveAccountId,
       );
 
     case 'update_me':
-      return handleDirectUpdateMe(walletKey, body, resolveAccountId);
+      return handleUpdateMe(walletKey, body, resolveAccountId);
 
     case 'heartbeat':
-      return handleDirectHeartbeat(walletKey, resolveAccountId);
+      return handleHeartbeat(walletKey, resolveAccountId);
 
     case 'deregister':
-      return handleDirectDeregister(walletKey, resolveAccountId);
+      return handleDeregister(walletKey, resolveAccountId);
 
     default:
       return fail(

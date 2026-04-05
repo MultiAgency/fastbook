@@ -1,10 +1,15 @@
 import { NextResponse } from 'next/server';
 import { clearCache } from '@/lib/cache';
-import { MARKET_API_URL, OUTLAYER_API_URL } from '@/lib/constants';
+import {
+  FASTDATA_NAMESPACE,
+  MARKET_API_URL,
+  OUTLAYER_API_URL,
+} from '@/lib/constants';
+import { kvGetAgent } from '@/lib/fastdata';
+import { agentEntries } from '@/lib/fastdata-utils';
 import { fetchWithTimeout } from '@/lib/fetch';
-import { callOutlayer, getOutlayerPaymentKey } from '@/lib/outlayer-server';
-import { isValidCapabilities } from '@/lib/utils';
-import type { PlatformResult } from '@/types';
+import { resolveAccountId } from '@/lib/outlayer-server';
+import type { Agent, PlatformResult } from '@/types';
 
 export type { PlatformResult };
 
@@ -27,6 +32,7 @@ export const PLATFORM_META = [
 export interface PlatformContext {
   handle: string;
   near_account_id: string;
+  description?: string;
   tags?: string[];
   capabilities?: Record<string, unknown>;
   /** Agent's OutLayer wallet key (wk_...), needed for platforms that require signing. */
@@ -64,6 +70,8 @@ interface DirectPostConfig {
   timeoutMs: number;
   /** Which PlatformContext fields to include in the POST body. */
   bodyFields: readonly (keyof PlatformContext)[];
+  /** Optional: rename PlatformContext keys in the outgoing POST body. */
+  fieldMapping?: Partial<Record<string, string>>;
   /** Maps credential key name → response JSON path (dot notation). */
   credentialFields: Record<string, string>;
 }
@@ -151,7 +159,8 @@ async function executeDirectPost(
   for (const field of config.bodyFields) {
     const val = ctx[field];
     if (val && (!Array.isArray(val) || val.length > 0)) {
-      body[field] = val;
+      const key = config.fieldMapping?.[field] ?? field;
+      body[key] = val;
     }
   }
 
@@ -331,27 +340,11 @@ export async function tryPlatformRegistrations(
 // Server-side platform orchestration (moved from route.ts)
 // ---------------------------------------------------------------------------
 
-/** Extract the nested `.data.agent` object from an OutLayer JSON response. */
-function extractAgentFromJson(json: Record<string, unknown>): {
-  data?: Record<string, unknown>;
-  agent?: Record<string, unknown>;
-} {
-  const data =
-    typeof json.data === 'object' && json.data !== null
-      ? (json.data as Record<string, unknown>)
-      : undefined;
-  const rawAgent = data?.agent;
-  const agent =
-    typeof rawAgent === 'object' && rawAgent !== null
-      ? (rawAgent as Record<string, unknown>)
-      : undefined;
-  return { data, agent };
-}
-
 function buildPlatformContext(
   agent: {
     handle: string;
     near_account_id: string;
+    description?: string;
     tags?: string[];
     capabilities?: Record<string, unknown>;
   },
@@ -361,6 +354,7 @@ function buildPlatformContext(
   return {
     handle: agent.handle,
     near_account_id: agent.near_account_id,
+    description: agent.description,
     tags: agent.tags,
     capabilities: agent.capabilities,
     outlayer_api_key: walletKey?.startsWith('wk_') ? walletKey : undefined,
@@ -368,68 +362,92 @@ function buildPlatformContext(
   };
 }
 
-/** Persist succeeded platform IDs via the admin-only set_platforms action. */
+/** Write entries to FastData KV using the agent's own wallet key. */
+async function writePlatformEntries(
+  walletKey: string,
+  entries: Record<string, unknown>,
+): Promise<boolean> {
+  try {
+    const res = await fetchWithTimeout(
+      `${OUTLAYER_API_URL}/wallet/v1/call`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${walletKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          receiver_id: FASTDATA_NAMESPACE,
+          method_name: '__fastdata_kv',
+          args: entries,
+          gas: '30000000000000',
+          deposit: '0',
+        }),
+      },
+      15_000,
+    );
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Persist platform IDs by updating the agent profile in FastData. */
 async function persistPlatformResults(
-  handle: string,
+  walletKey: string,
+  accountId: string,
   succeeded: string[],
   existing: string[],
 ): Promise<{ persisted: string[]; persistWarnings: string[] }> {
   const persistWarnings: string[] = [];
-  const merged = [...new Set([...existing, ...succeeded])];
-  let persisted = existing;
-  if (succeeded.length > 0) {
-    const adminKey = getOutlayerPaymentKey();
-    if (adminKey) {
-      const { response: updateResult } = await callOutlayer(
-        { action: 'set_platforms', handle, platforms: merged },
-        adminKey,
-      );
-      if (updateResult.status === 200) {
-        persisted = merged;
-        clearCache();
-      } else {
-        persistWarnings.push('Failed to persist platform registrations');
-      }
-    }
+  if (succeeded.length === 0) return { persisted: existing, persistWarnings };
+
+  // Re-read agent for lost-update protection.
+  const freshAgent = (await kvGetAgent(accountId, 'profile')) as Agent | null;
+  if (!freshAgent) {
+    persistWarnings.push('Could not read agent profile to persist platforms');
+    return { persisted: existing, persistWarnings };
   }
-  return { persisted, persistWarnings };
+
+  const merged = [...new Set([...(freshAgent.platforms ?? []), ...succeeded])];
+  freshAgent.platforms = merged;
+
+  const wrote = await writePlatformEntries(walletKey, agentEntries(freshAgent));
+  if (wrote) {
+    clearCache();
+    return { persisted: merged, persistWarnings };
+  }
+  persistWarnings.push('Failed to persist platform registrations');
+  return { persisted: existing, persistWarnings };
 }
 
 /**
  * POST /agents/me/platforms — register on external platforms.
- * Proxy-only: fetches agent via WASM get_me, runs external registrations,
- * then persists succeeded platform IDs via the admin-only set_platforms action.
+ * Reads agent from FastData, runs external registrations,
+ * then persists succeeded platform IDs back to FastData.
  */
 export async function handleRegisterPlatforms(
   walletKey: string,
   wasmBody: Record<string, unknown>,
 ): Promise<NextResponse> {
-  // 1. Load agent profile
-  const { response: meResult } = await callOutlayer(
-    { action: 'get_me' },
-    walletKey,
-  );
-  if (meResult.status !== 200) {
+  // 1. Load agent profile from FastData
+  const accountId = await resolveAccountId(walletKey);
+  if (!accountId) {
     return NextResponse.json(
       {
         success: false,
-        error: 'Could not load agent profile',
-        code: 'INTERNAL_ERROR',
+        error: 'Could not resolve account',
+        code: 'AUTH_FAILED',
       },
-      { status: 502 },
+      { status: 401 },
     );
   }
-  const meData: Record<string, unknown> = await meResult.json();
-  const { agent } = extractAgentFromJson(meData);
-  if (
-    !agent ||
-    typeof agent.handle !== 'string' ||
-    typeof agent.near_account_id !== 'string'
-  ) {
+  const agent = (await kvGetAgent(accountId, 'profile')) as Agent | null;
+  if (!agent) {
     return NextResponse.json(
       {
         success: false,
-        error: 'Agent profile incomplete',
+        error: 'Agent profile not found — call heartbeat first',
         code: 'VALIDATION_ERROR',
       },
       { status: 400 },
@@ -440,17 +458,7 @@ export async function handleRegisterPlatforms(
   const requestedIds = Array.isArray(wasmBody.platforms)
     ? wasmBody.platforms.filter((p): p is string => typeof p === 'string')
     : undefined;
-  const ctx = buildPlatformContext(
-    {
-      handle: agent.handle,
-      near_account_id: agent.near_account_id,
-      tags: Array.isArray(agent.tags) ? agent.tags : undefined,
-      capabilities: isValidCapabilities(agent.capabilities)
-        ? agent.capabilities
-        : undefined,
-    },
-    walletKey,
-  );
+  const ctx = buildPlatformContext(agent, walletKey);
   const { platforms, warnings } = await tryPlatformRegistrations(
     ctx,
     requestedIds,
@@ -460,29 +468,12 @@ export async function handleRegisterPlatforms(
     .filter(([, r]) => r.success)
     .map(([id]) => id);
 
-  // 3. Re-read agent to get the freshest platforms list before merging.
-  // Without this, two concurrent register_platforms calls would each merge
-  // with the snapshot from step 1, and the last writer would overwrite the
-  // first writer's newly-registered platforms (classic lost-update race).
-  let bestAgent: Record<string, unknown> = agent;
-  if (succeeded.length > 0 && walletKey) {
-    const { response: freshResult } = await callOutlayer(
-      { action: 'get_me' },
-      walletKey,
-    );
-    if (freshResult.status === 200) {
-      const freshData: Record<string, unknown> = await freshResult.json();
-      bestAgent = extractAgentFromJson(freshData).agent ?? agent;
-    }
-  }
-  const existing: string[] = Array.isArray(bestAgent.platforms)
-    ? bestAgent.platforms.filter((p): p is string => typeof p === 'string')
-    : [];
-
+  // 3. Persist — re-reads agent inside for lost-update protection.
   const { persisted, persistWarnings } = await persistPlatformResults(
-    agent.handle as string,
+    walletKey,
+    accountId,
     succeeded,
-    existing,
+    agent.platforms ?? [],
   );
   warnings.push(...persistWarnings);
 
@@ -494,73 +485,60 @@ export async function handleRegisterPlatforms(
 }
 
 /**
- * After initial agent registration, auto-attempt all platform registrations
- * and persist succeeded platform IDs on the agent record.
+ * Check whether the agent has unregistered platforms and a profile worth sending.
+ * Used by route.ts to decide whether to fire-and-forget platform registration
+ * after heartbeat/update_me.
  */
-export async function tryPlatformRegistrationsOnRegister(
-  wasmBody: Record<string, unknown>,
-  result: NextResponse,
-  userAuthKey: string | undefined,
-): Promise<NextResponse> {
-  const nearlyData: Record<string, unknown> = await result.json();
-  const { data, agent } = extractAgentFromJson(nearlyData);
-  if (!agent?.handle || typeof agent.handle !== 'string') {
-    return NextResponse.json(nearlyData);
-  }
+export function shouldAutoRegisterPlatforms(agent: {
+  platforms?: string[];
+  description?: string;
+  tags?: string[];
+  capabilities?: Record<string, unknown>;
+}): boolean {
+  const registered = new Set(agent.platforms ?? []);
+  const allCovered = availablePlatformIds().every((id) => registered.has(id));
+  if (allCovered) return false;
 
-  const rawAccountId = data?.near_account_id ?? agent.near_account_id;
-  const nearAccountId = typeof rawAccountId === 'string' ? rawAccountId : '';
+  // Don't send an empty profile to platforms.
+  const hasDescription =
+    typeof agent.description === 'string' && agent.description.length > 10;
+  const hasTags = Array.isArray(agent.tags) && agent.tags.length > 0;
+  const hasCaps =
+    agent.capabilities &&
+    typeof agent.capabilities === 'object' &&
+    Object.keys(agent.capabilities).length > 0;
+  return hasDescription || hasTags || !!hasCaps;
+}
 
-  const claim =
-    typeof wasmBody.verifiable_claim === 'object' &&
-    wasmBody.verifiable_claim !== null
-      ? (wasmBody.verifiable_claim as Record<string, unknown>)
-      : undefined;
-  const ctx = buildPlatformContext(
-    {
-      handle: agent.handle,
-      near_account_id: nearAccountId,
-      tags: Array.isArray(wasmBody.tags)
-        ? wasmBody.tags.filter((t): t is string => typeof t === 'string')
-        : undefined,
-      capabilities: isValidCapabilities(wasmBody.capabilities)
-        ? wasmBody.capabilities
-        : undefined,
-    },
-    userAuthKey,
-    claim,
-  );
+/**
+ * Auto-register on platforms the agent hasn't registered on yet.
+ * Fire-and-forget from route.ts after heartbeat/update_me.
+ */
+export async function tryAutoRegisterPlatforms(
+  agent: {
+    handle: string;
+    near_account_id: string;
+    description?: string;
+    tags?: string[];
+    capabilities?: Record<string, unknown>;
+    platforms?: string[];
+  },
+  walletKey: string,
+): Promise<void> {
+  const registered = new Set(agent.platforms ?? []);
+  const missingIds = availablePlatformIds().filter((id) => !registered.has(id));
+  if (missingIds.length === 0) return;
 
-  const { platforms, warnings } = await tryPlatformRegistrations(ctx);
-
-  // Surface all successful platform credentials in the registration response
-  const platformCredentials: Record<string, Record<string, unknown>> = {};
-  for (const [id, result] of Object.entries(platforms)) {
-    if (result.success && result.credentials) {
-      platformCredentials[id] = result.credentials;
-    }
-  }
-  if (data && Object.keys(platformCredentials).length > 0) {
-    data.platform_credentials = platformCredentials;
-  }
+  const ctx = buildPlatformContext(agent, walletKey);
+  const { platforms } = await tryPlatformRegistrations(ctx, missingIds);
 
   const succeeded = Object.entries(platforms)
     .filter(([, r]) => r.success)
     .map(([id]) => id);
-  const { persisted, persistWarnings } = await persistPlatformResults(
-    agent.handle,
+  await persistPlatformResults(
+    walletKey,
+    agent.near_account_id,
     succeeded,
-    [],
+    agent.platforms ?? [],
   );
-  if (persisted.length > 0) {
-    agent.platforms = persisted;
-  }
-  warnings.push(...persistWarnings);
-
-  const existing = Array.isArray(nearlyData.warnings)
-    ? nearlyData.warnings.filter((w): w is string => typeof w === 'string')
-    : [];
-  nearlyData.warnings = [...existing, ...warnings];
-
-  return NextResponse.json(nearlyData);
 }

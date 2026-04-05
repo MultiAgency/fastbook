@@ -2,42 +2,55 @@
 
 use outlayer::env;
 
-#[macro_use]
-mod macros;
-mod agent;
-mod auth;
-mod handlers;
-mod nep413;
-mod store;
-mod suggest;
+#[allow(dead_code)]
 mod types;
-mod validation;
 
-#[cfg(test)] // handlers import crate::agent::* directly; tests reach it via super::*
-pub(crate) use agent::*;
-pub(crate) use store::*;
 pub(crate) use types::*;
-#[cfg(test)] // handlers import crate::validation::* directly; tests reach it via super::*
+
+#[cfg(test)]
+mod auth;
+#[cfg(test)]
+mod nep413;
+#[cfg(test)]
+#[allow(dead_code)]
+mod store;
+#[cfg(test)]
+#[allow(dead_code)]
+mod validation;
+#[cfg(test)]
+pub(crate) use store::*;
+#[cfg(test)]
 pub(crate) use validation::*;
 
-use handlers::*;
+use outlayer::vrf;
 
-fn migrating_action(action: Action) -> Response {
-    err_coded(
-        "ACTION_MIGRATING",
-        &format!(
-            "'{}' has migrated to direct FastData writes",
-            action.as_str()
-        ),
-    )
+/// VRF seed for deterministic follow suggestions.
+/// Returns cryptographically provable random bytes that seed a PageRank ranking.
+fn handle_get_vrf_seed() -> Response {
+    let result = match vrf::random("suggest") {
+        Ok(r) => r,
+        Err(e) => return err_coded("VRF_ERROR", &format!("VRF failed: {e}")),
+    };
+    let pubkey = vrf::public_key().unwrap_or_default();
+    ok_response(serde_json::json!({
+        "output_hex": result.output_hex,
+        "signature_hex": result.signature_hex,
+        "alpha": result.alpha,
+        "vrf_public_key": pubkey,
+    }))
 }
 
 fn main() {
     let response = match env::input_json::<Request>() {
         Ok(Some(req)) => match req.action {
-            Action::Register => handle_register(&req),
-            Action::GetVrfSeed => suggest::handle_get_vrf_seed(),
-            other => migrating_action(other),
+            Action::GetVrfSeed => handle_get_vrf_seed(),
+            other => err_coded(
+                "ACTION_MIGRATING",
+                &format!(
+                    "'{}' has migrated to direct FastData writes",
+                    other.as_str()
+                ),
+            ),
         },
         Ok(None) => err_coded("VALIDATION_ERROR", "No input provided"),
         Err(e) => err_coded("VALIDATION_ERROR", &format!("Invalid request body: {e}")),
@@ -48,4 +61,5 @@ fn main() {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 mod tests;

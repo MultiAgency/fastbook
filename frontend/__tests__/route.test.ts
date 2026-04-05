@@ -6,12 +6,14 @@ import { NextRequest } from 'next/server';
 import { setupFetchMock } from './fixtures';
 
 const mockCallOutlayer = jest.fn();
+const mockSignMessage = jest.fn();
 jest.mock('@/lib/outlayer-server', () => ({
   getOutlayerPaymentKey: () => 'pk_test',
   sanitizePublic: jest.requireActual('@/lib/outlayer-server').sanitizePublic,
   callOutlayer: (...args: unknown[]) => mockCallOutlayer(...args),
   mintClaimForWalletKey: jest.fn().mockResolvedValue(null),
   resolveAccountId: jest.fn().mockResolvedValue('test.near'),
+  signMessage: (...args: unknown[]) => mockSignMessage(...args),
 }));
 
 const mockDispatchFastData = jest.fn();
@@ -21,26 +23,19 @@ jest.mock('@/lib/fastdata-dispatch', () => ({
   handleGetSuggested: (...args: unknown[]) => mockHandleGetSuggested(...args),
 }));
 
-jest.mock('@/lib/fastdata-sync', () => ({
-  buildSyncEntries: jest.fn().mockReturnValue(null),
-  syncToFastData: jest.fn(),
-}));
-
-const mockDispatchDirectWrite = jest.fn();
+const mockDispatchWrite = jest.fn();
 jest.mock('@/lib/fastdata-write', () => ({
-  dispatchDirectWrite: (...args: unknown[]) => mockDispatchDirectWrite(...args),
+  dispatchWrite: (...args: unknown[]) => mockDispatchWrite(...args),
 }));
 
 const mockKvGetAgent = jest.fn().mockResolvedValue(null);
 jest.mock('@/lib/fastdata', () => ({
   kvGetAgent: (...args: unknown[]) => mockKvGetAgent(...args),
-  resolveHandle: jest.fn().mockResolvedValue(null),
 }));
 
 jest.mock('@/lib/cache', () => ({
   getCached: jest.fn().mockReturnValue(undefined),
   setCache: jest.fn(),
-  clearByAction: jest.fn(),
   invalidateForMutation: jest.fn(),
   makeCacheKey: jest.fn((body: Record<string, unknown>) =>
     JSON.stringify(body),
@@ -48,13 +43,7 @@ jest.mock('@/lib/cache', () => ({
 }));
 
 import { NextResponse } from 'next/server';
-import {
-  DELETE,
-  GET,
-  OPTIONS,
-  PATCH,
-  POST,
-} from '../src/app/api/v1/[...path]/route';
+import { DELETE, GET, PATCH, POST } from '../src/app/api/v1/[...path]/route';
 
 function makeRequest(
   method: string,
@@ -87,11 +76,10 @@ beforeEach(() => {
   });
   mockDispatchFastData.mockResolvedValue({ data: {} });
   mockHandleGetSuggested.mockResolvedValue({ data: [] });
-  mockDispatchDirectWrite.mockResolvedValue({ success: true, data: {} });
-  // Authenticated GETs resolve caller handle via kvGetAgent(accountId, 'name').
-  // resolveAccountId is mocked via mintClaimForWalletKey returning null,
-  // so the wk_ → accountId path uses the sign-message mock.
-  // For tests that use wk_ keys, mock kvGetAgent to return a handle.
+  mockDispatchWrite.mockResolvedValue({ success: true, data: {} });
+  mockSignMessage.mockResolvedValue(null);
+  // Authenticated GETs resolve caller account via resolveAccountId.
+  // For tests that use wk_ keys, mock kvGetAgent to return a profile.
   mockKvGetAgent.mockResolvedValue('test_agent');
 });
 
@@ -183,16 +171,16 @@ describe('route resolution', () => {
     ['POST', 'agents/me/heartbeat', 'heartbeat'],
     ['GET', 'agents/me/activity', 'get_activity'],
     ['GET', 'agents/me/network', 'get_network'],
-    ['GET', 'agents/alice', 'get_profile'],
-    ['POST', 'agents/alice/follow', 'follow'],
-    ['DELETE', 'agents/alice/follow', 'unfollow'],
-    ['GET', 'agents/alice/followers', 'get_followers'],
-    ['GET', 'agents/alice/following', 'get_following'],
-    ['GET', 'agents/alice/edges', 'get_edges'],
-    ['POST', 'agents/alice/endorse', 'endorse'],
-    ['DELETE', 'agents/alice/endorse', 'unendorse'],
-    ['GET', 'agents/alice/endorsers', 'get_endorsers'],
-    ['POST', 'agents/alice/endorsers', 'filter_endorsers'],
+    ['GET', 'agents/alice.near', 'get_profile'],
+    ['POST', 'agents/alice.near/follow', 'follow'],
+    ['DELETE', 'agents/alice.near/follow', 'unfollow'],
+    ['GET', 'agents/alice.near/followers', 'get_followers'],
+    ['GET', 'agents/alice.near/following', 'get_following'],
+    ['GET', 'agents/alice.near/edges', 'get_edges'],
+    ['POST', 'agents/alice.near/endorse', 'endorse'],
+    ['DELETE', 'agents/alice.near/endorse', 'unendorse'],
+    ['GET', 'agents/alice.near/endorsers', 'get_endorsers'],
+    ['POST', 'agents/alice.near/endorsers', 'filter_endorsers'],
   ])('%s %s → %s', async (method: string, path: string, expectedAction: string) => {
     const handlers: Record<string, typeof GET> = { GET, POST, PATCH, DELETE };
     const handler = handlers[method]!;
@@ -227,13 +215,12 @@ describe('route resolution', () => {
       expect(mockDispatchFastData).toHaveBeenCalledTimes(1);
       expect(mockDispatchFastData.mock.calls[0][0]).toBe(expectedAction);
     } else if (DIRECT_WRITE_ACTIONS.has(expectedAction)) {
-      expect(mockDispatchDirectWrite).toHaveBeenCalledTimes(1);
-      expect(mockDispatchDirectWrite.mock.calls[0][0]).toBe(expectedAction);
+      expect(mockDispatchWrite).toHaveBeenCalledTimes(1);
+      expect(mockDispatchWrite.mock.calls[0][0]).toBe(expectedAction);
       expect(mockCallOutlayer).not.toHaveBeenCalled();
     } else if (expectedAction === 'register') {
-      expect(mockCallOutlayer).toHaveBeenCalledTimes(1);
-      const wasmBody = mockCallOutlayer.mock.calls[0][0];
-      expect(wasmBody.action).toBe(expectedAction);
+      // Registration is zero-write: resolves account ID, returns onboarding.
+      expect(mockCallOutlayer).not.toHaveBeenCalled();
     }
     // Other POST actions (e.g. register_platforms) are handled by
     // dedicated proxy paths, not callOutlayer.
@@ -304,26 +291,29 @@ describe('injection prevention', () => {
     const [req, params] = makeRequest(
       'POST',
       'agents/register',
-      { action: 'get_me', handle: 'alice' },
+      { action: 'get_me' },
       { authorization: 'Bearer wk_test' },
     );
-    await POST(req, params);
+    const res = await POST(req, params);
+    const body = await json(res);
 
-    const wasmBody = mockCallOutlayer.mock.calls[0][0];
-    expect(wasmBody.action).toBe('register');
+    // Even though body.action was 'get_me', the route resolved to 'register'
+    // and the registration handler ran (returns onboarding, not get_me data).
+    expect(body.success).toBe(true);
+    expect(body.data.next_step).toBe('fund_wallet');
   });
 
-  it('route params override body handle to prevent handle injection', async () => {
+  it('route params override body account_id to prevent injection', async () => {
     const [req, params] = makeRequest(
       'POST',
-      'agents/alice/follow',
-      { handle: 'mallory' },
+      'agents/alice.near/follow',
+      { account_id: 'mallory.near' },
       { authorization: 'Bearer wk_test' },
     );
     await POST(req, params);
 
-    expect(mockDispatchDirectWrite).toHaveBeenCalledTimes(1);
-    expect(mockDispatchDirectWrite.mock.calls[0][1].handle).toBe('alice');
+    expect(mockDispatchWrite).toHaveBeenCalledTimes(1);
+    expect(mockDispatchWrite.mock.calls[0][1].account_id).toBe('alice.near');
   });
 
   it('sanitizePublic strips verifiable_claim and unknown fields on public reads', async () => {
@@ -425,14 +415,14 @@ describe('auth dispatch', () => {
 
     const [req, params] = makeRequest(
       'POST',
-      'agents/alice/follow',
+      'agents/alice.near/follow',
       {},
       { authorization: `Bearer near:${token}` },
     );
     const res = await POST(req, params);
 
     // near: tokens are not accepted for mutations — FastData writes require wk_
-    expect(mockDispatchDirectWrite).not.toHaveBeenCalled();
+    expect(mockDispatchWrite).not.toHaveBeenCalled();
     expect(res.status).toBe(401);
   });
 
@@ -485,25 +475,6 @@ describe('auth dispatch', () => {
   });
 });
 
-describe('CORS', () => {
-  it('includes CORS headers on responses', async () => {
-    const [req, params] = makeRequest('GET', 'agents');
-    const res = await GET(req, params);
-    expect(res.headers.get('Access-Control-Allow-Origin')).toBe('*');
-    expect(res.headers.get('Access-Control-Allow-Methods')).toContain('GET');
-    expect(res.headers.get('Access-Control-Allow-Headers')).toContain(
-      'Authorization',
-    );
-  });
-
-  it('handles OPTIONS preflight', () => {
-    const res = OPTIONS();
-    expect(res.status).toBe(204);
-    expect(res.headers.get('Access-Control-Allow-Origin')).toBe('*');
-    expect(res.headers.get('Access-Control-Max-Age')).toBe('86400');
-  });
-});
-
 describe('error handling', () => {
   it('returns 413 for oversized request body', async () => {
     const largeBody = 'x'.repeat(65_537);
@@ -550,16 +521,7 @@ describe('platform auto-registration on register (background)', () => {
 
   beforeEach(() => {
     marketFetch = setupFetchMock();
-    mockCallOutlayer.mockImplementation(() => {
-      const decoded = {
-        success: true,
-        data: { agent: { handle: 'my_bot' }, near_account_id: 'abc.near' },
-      };
-      return Promise.resolve({
-        response: NextResponse.json(decoded),
-        decoded,
-      });
-    });
+    // Registration is zero-write — resolveAccountId returns 'test.near' by default.
   });
 
   afterEach(() => marketFetch.restore());
@@ -633,32 +595,30 @@ describe('cache invalidation', () => {
   });
 
   it('invalidates affected cache entries on follow', async () => {
-    const { invalidateForMutation, clearByAction } =
-      jest.requireMock('@/lib/cache');
+    const { invalidateForMutation } = jest.requireMock('@/lib/cache');
 
     const [req, params] = makeRequest(
       'POST',
-      'agents/alice/follow',
+      'agents/alice.near/follow',
       {},
       { authorization: 'Bearer wk_test' },
     );
     await POST(req, params);
 
     expect(invalidateForMutation).toHaveBeenCalledWith('follow');
-    expect(clearByAction).not.toHaveBeenCalled();
   });
 });
 
 describe('direct write dispatch for wk_ keys', () => {
   it.each([
-    ['POST', 'agents/alice/follow', 'follow'],
-    ['DELETE', 'agents/alice/follow', 'unfollow'],
+    ['POST', 'agents/alice.near/follow', 'follow'],
+    ['DELETE', 'agents/alice.near/follow', 'unfollow'],
     ['POST', 'agents/alice/endorse', 'endorse'],
     ['DELETE', 'agents/alice/endorse', 'unendorse'],
     ['PATCH', 'agents/me', 'update_me'],
     ['POST', 'agents/me/heartbeat', 'heartbeat'],
     ['DELETE', 'agents/me', 'deregister'],
-  ] as const)('%s %s with wk_ key dispatches to dispatchDirectWrite', async (method, path, expectedAction) => {
+  ] as const)('%s %s with wk_ key dispatches to dispatchWrite', async (method, path, expectedAction) => {
     const handlers: Record<string, typeof GET> = { GET, POST, PATCH, DELETE };
     const handler = handlers[method]!;
     const [req, params] = makeRequest(
@@ -671,15 +631,15 @@ describe('direct write dispatch for wk_ keys', () => {
     );
     await handler(req, params);
 
-    expect(mockDispatchDirectWrite).toHaveBeenCalledTimes(1);
-    expect(mockDispatchDirectWrite.mock.calls[0][0]).toBe(expectedAction);
+    expect(mockDispatchWrite).toHaveBeenCalledTimes(1);
+    expect(mockDispatchWrite.mock.calls[0][0]).toBe(expectedAction);
     expect(mockCallOutlayer).not.toHaveBeenCalled();
   });
 
   it('x-payment-key without wk_ returns 401 for follow', async () => {
     const [req, params] = makeRequest(
       'POST',
-      'agents/alice/follow',
+      'agents/alice.near/follow',
       {},
       { 'x-payment-key': 'owner.near:1:secret' },
     );
@@ -687,7 +647,7 @@ describe('direct write dispatch for wk_ keys', () => {
 
     expect(res.status).toBe(401);
     expect(mockCallOutlayer).not.toHaveBeenCalled();
-    expect(mockDispatchDirectWrite).not.toHaveBeenCalled();
+    expect(mockDispatchWrite).not.toHaveBeenCalled();
   });
 
   it('verifiable_claim without wk_ returns 401 for heartbeat', async () => {
@@ -706,11 +666,11 @@ describe('direct write dispatch for wk_ keys', () => {
 
     expect(res.status).toBe(401);
     expect(mockCallOutlayer).not.toHaveBeenCalled();
-    expect(mockDispatchDirectWrite).not.toHaveBeenCalled();
+    expect(mockDispatchWrite).not.toHaveBeenCalled();
   });
 
   it('direct write error returns proper HTTP status', async () => {
-    mockDispatchDirectWrite.mockResolvedValueOnce({
+    mockDispatchWrite.mockResolvedValueOnce({
       success: false,
       error: 'Rate limit exceeded',
       code: 'RATE_LIMITED',
@@ -719,7 +679,7 @@ describe('direct write dispatch for wk_ keys', () => {
     });
     const [req, params] = makeRequest(
       'POST',
-      'agents/alice/follow',
+      'agents/alice.near/follow',
       {},
       { authorization: 'Bearer wk_test_key' },
     );
@@ -733,7 +693,7 @@ describe('direct write dispatch for wk_ keys', () => {
     const { invalidateForMutation } = jest.requireMock('@/lib/cache');
     const [req, params] = makeRequest(
       'POST',
-      'agents/alice/follow',
+      'agents/alice.near/follow',
       {},
       { authorization: 'Bearer wk_test_key' },
     );
@@ -742,16 +702,20 @@ describe('direct write dispatch for wk_ keys', () => {
     expect(invalidateForMutation).toHaveBeenCalledWith('follow');
   });
 
-  it('register still goes through callOutlayer with wk_ key', async () => {
+  it('register is zero-write and does not call WASM', async () => {
     const [req, params] = makeRequest(
       'POST',
       'agents/register',
-      { handle: 'my_bot' },
+      {},
       { authorization: 'Bearer wk_test_key' },
     );
-    await POST(req, params);
+    const res = await POST(req, params);
+    const body = await json(res);
 
-    expect(mockCallOutlayer).toHaveBeenCalledTimes(1);
-    expect(mockDispatchDirectWrite).not.toHaveBeenCalled();
+    expect(mockCallOutlayer).not.toHaveBeenCalled();
+    expect(mockDispatchWrite).not.toHaveBeenCalled();
+    expect(body.success).toBe(true);
+    expect(body.data.near_account_id).toBe('test.near');
+    expect(body.data.next_step).toBe('fund_wallet');
   });
 });

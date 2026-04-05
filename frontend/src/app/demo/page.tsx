@@ -7,7 +7,7 @@ import { SummaryCard } from '@/components/register/SummaryCard';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { api } from '@/lib/api';
-import { APP_DOMAIN, LIMITS } from '@/lib/constants';
+import { APP_DOMAIN } from '@/lib/constants';
 import { registerOutlayer, signMessage } from '@/lib/outlayer';
 import { friendlyError, sanitizeHandle } from '@/lib/utils';
 import { useAgentStore } from '@/store/agentStore';
@@ -121,7 +121,7 @@ export default function DemoPage() {
       message: signMsg,
     };
     const formData: RegisterAgentForm = {
-      handle: handle.trim(),
+      handle: handle.trim() || undefined,
       description: description.trim() || undefined,
       tags: parsedTags.length ? parsedTags : undefined,
       verifiable_claim: claim,
@@ -132,12 +132,7 @@ export default function DemoPage() {
   const handleStep3 = () => {
     if (step3Submitting.current) return;
     const { apiKey } = store;
-    if (
-      !apiKey ||
-      !handle.trim() ||
-      handle.trim().length < LIMITS.AGENT_HANDLE_MIN
-    )
-      return;
+    if (!apiKey) return;
     const built = buildRegistrationClaim();
     if (!built) return;
     const { claim, formData } = built;
@@ -313,21 +308,26 @@ export default function DemoPage() {
         response={stepData[3].response}
         highlightValue={store.nearAccountId || undefined}
       >
-        {store.stepStatus[3] === 'success' && store.handle ? (
+        {store.stepStatus[3] === 'success' && store.nearAccountId ? (
           <div className="p-4 rounded-xl bg-primary/5 border border-primary/20">
             <p className="text-xs text-muted-foreground mb-1">Registered as</p>
             <p className="text-lg font-mono font-bold text-primary">
-              @{store.handle}
+              {store.nearAccountId}
             </p>
-            <p className="text-xs text-muted-foreground mt-1">
-              NEAR account: {store.nearAccountId}
-            </p>
+            {store.handle && (
+              <p className="text-xs text-muted-foreground mt-1">
+                Display name: {store.handle}
+              </p>
+            )}
           </div>
         ) : (
           <div className="space-y-3">
             <div className="space-y-2">
               <label htmlFor="handle" className="text-sm font-medium">
-                Agent Handle
+                Display Name{' '}
+                <span className="text-muted-foreground font-normal">
+                  (optional)
+                </span>
               </label>
               <Input
                 id="handle"
@@ -335,13 +335,11 @@ export default function DemoPage() {
                 onChange={(e) => setHandle(sanitizeHandle(e.target.value))}
                 placeholder="my_agent"
                 maxLength={32}
-                required
                 className="rounded-xl"
                 aria-describedby="handle-help"
               />
               <p id="handle-help" className="text-xs text-muted-foreground">
-                Must start with a letter. Lowercase letters, numbers,
-                underscores.
+                Defaults to your NEAR account ID if not set.
               </p>
             </div>
             <div className="space-y-2">
@@ -382,7 +380,7 @@ export default function DemoPage() {
             </div>
             <Button
               onClick={handleStep3}
-              disabled={step3Loading || !handle.trim()}
+              disabled={step3Loading}
               className="w-full rounded-xl bg-primary text-primary-foreground hover:bg-primary/80"
             >
               {step3Loading ? (
@@ -413,6 +411,7 @@ export default function DemoPage() {
         <PostRegistration
           onReset={store.reset}
           apiKey={store.apiKey}
+          nearAccountId={store.nearAccountId ?? undefined}
           initialPlatformCredentials={store.platformCredentials ?? undefined}
           warnings={store.warnings}
         />

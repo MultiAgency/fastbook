@@ -2,7 +2,6 @@ import type {
   ActivityResponse,
   Agent,
   AgentCapabilities,
-  CheckHandleResponse,
   DeregisterResponse,
   Edge,
   EdgesResponse,
@@ -25,13 +24,7 @@ import type {
 import { API_TIMEOUT_MS, LIMITS } from './constants';
 import { fetchWithRetry, fetchWithTimeout, httpErrorText } from './fetch';
 import { hasPathParam, routeFor } from './routes';
-import { isValidHandle, wasmCodeToStatus } from './utils';
-
-function assertHandle(handle: string): void {
-  if (!isValidHandle(handle)) {
-    throw new ApiError(400, `Invalid handle: "${handle}"`);
-  }
-}
+import { wasmCodeToStatus } from './utils';
 
 function clampLimit(limit: number): number {
   return Math.max(1, Math.min(limit, LIMITS.MAX_LIMIT));
@@ -89,9 +82,9 @@ class ApiClient {
 
     let body: string | undefined;
     if (method !== 'GET') {
-      const handleInPath = hasPathParam(action, 'handle');
-      const { handle: _h, ...rest } = args;
-      const bodyArgs = handleInPath ? { ...rest } : { ...args };
+      const accountIdInPath = hasPathParam(action, 'accountId');
+      const { accountId: _aid, ...rest } = args;
+      const bodyArgs = accountIdInPath ? { ...rest } : { ...args };
       if (requiresAuth && this.auth) {
         bodyArgs.verifiable_claim = this.auth;
       }
@@ -173,37 +166,39 @@ class ApiClient {
     return this.request<DeregisterResponse>('deregister');
   }
 
-  async checkHandle(handle: string) {
-    return this.request<CheckHandleResponse>('check_handle', { handle }, false);
+  async getAgent(accountId: string) {
+    return this.request<GetProfileResponse>(
+      'get_profile',
+      { accountId },
+      false,
+    );
   }
 
-  async getAgent(handle: string) {
-    assertHandle(handle);
-    return this.request<GetProfileResponse>('get_profile', { handle }, false);
+  async followAgent(accountId: string, reason?: string) {
+    return this.request<FollowResponse>('follow', {
+      accountId,
+      reason,
+    });
   }
 
-  async followAgent(handle: string, reason?: string) {
-    assertHandle(handle);
-    return this.request<FollowResponse>('follow', { handle, reason });
-  }
-
-  async unfollowAgent(handle: string, reason?: string) {
-    assertHandle(handle);
-    return this.request<UnfollowResponse>('unfollow', { handle, reason });
+  async unfollowAgent(accountId: string, reason?: string) {
+    return this.request<UnfollowResponse>('unfollow', {
+      accountId,
+      reason,
+    });
   }
 
   async getEdges(
-    handle: string,
+    accountId: string,
     options?: {
       direction?: 'incoming' | 'outgoing' | 'both';
       limit?: number;
     },
   ) {
-    assertHandle(handle);
     return this.request<EdgesResponse>(
       'get_edges',
       {
-        handle,
+        accountId,
         direction: options?.direction,
         limit: options?.limit ? clampLimit(options.limit) : undefined,
       },
@@ -264,26 +259,25 @@ class ApiClient {
 
   private async listByRelation(
     action: 'get_followers' | 'get_following',
-    handle: string,
+    accountId: string,
     limit: number,
     cursor?: string,
   ) {
-    assertHandle(handle);
     return this.parsePaginatedList<Edge>(
       await this.requestRaw(
         action,
-        { handle, limit: clampLimit(limit), cursor },
+        { accountId, limit: clampLimit(limit), cursor },
         false,
       ),
     );
   }
 
-  async getFollowers(handle: string, limit = 50, cursor?: string) {
-    return this.listByRelation('get_followers', handle, limit, cursor);
+  async getFollowers(accountId: string, limit = 50, cursor?: string) {
+    return this.listByRelation('get_followers', accountId, limit, cursor);
   }
 
-  async getFollowing(handle: string, limit = 50, cursor?: string) {
-    return this.listByRelation('get_following', handle, limit, cursor);
+  async getFollowing(accountId: string, limit = 50, cursor?: string) {
+    return this.listByRelation('get_following', accountId, limit, cursor);
   }
 
   async registerPlatforms(platformIds?: string[]) {
@@ -299,13 +293,12 @@ class ApiClient {
 
   private async endorseOp(
     action: 'endorse' | 'unendorse',
-    handle: string,
+    accountId: string,
     endorsement: { tags?: string[]; capabilities?: Record<string, string[]> },
     reason?: string,
   ) {
-    assertHandle(handle);
     return this.request<EndorseResponse>(action, {
-      handle,
+      accountId,
       tags: endorsement.tags,
       capabilities: endorsement.capabilities,
       reason,
@@ -313,31 +306,30 @@ class ApiClient {
   }
 
   async endorseAgent(
-    handle: string,
+    accountId: string,
     endorsement: { tags?: string[]; capabilities?: Record<string, string[]> },
     reason?: string,
   ) {
-    return this.endorseOp('endorse', handle, endorsement, reason);
+    return this.endorseOp('endorse', accountId, endorsement, reason);
   }
 
   async unendorseAgent(
-    handle: string,
+    accountId: string,
     endorsement: { tags?: string[]; capabilities?: Record<string, string[]> },
     reason?: string,
   ) {
-    return this.endorseOp('unendorse', handle, endorsement, reason);
+    return this.endorseOp('unendorse', accountId, endorsement, reason);
   }
 
   async getEndorsers(
-    handle: string,
+    accountId: string,
     filter?: { tags?: string[]; capabilities?: Record<string, string[]> },
   ) {
-    assertHandle(handle);
     const hasFilter = !!(filter?.tags?.length || filter?.capabilities);
     return this.request<EndorsersResponse>(
       hasFilter ? 'filter_endorsers' : 'get_endorsers',
       {
-        handle,
+        accountId,
         ...(filter?.tags?.length ? { tags: filter.tags } : {}),
         ...(filter?.capabilities ? { capabilities: filter.capabilities } : {}),
       },
