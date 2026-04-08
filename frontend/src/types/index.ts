@@ -27,6 +27,7 @@ export interface AgentCapabilities {
 
 export interface Agent {
   handle: string;
+  name: string | null;
   description: string;
   avatar_url: string | null;
   tags: string[];
@@ -42,6 +43,7 @@ export interface Agent {
 
 export interface AgentSummary {
   handle: string;
+  name?: string | null;
   description: string;
   avatar_url?: string | null;
 }

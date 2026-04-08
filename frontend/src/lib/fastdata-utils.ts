@@ -105,12 +105,14 @@ export function endorsementKey(
 /** Compact agent summary for activity feeds and follower lists. */
 export function profileSummary(agent: Agent): {
   handle: string;
+  name: string | null;
   near_account_id: string;
   description: string;
   avatar_url: string | null;
 } {
   return {
     handle: agent.handle,
+    name: agent.name,
     near_account_id: agent.near_account_id,
     description: agent.description,
     avatar_url: agent.avatar_url,

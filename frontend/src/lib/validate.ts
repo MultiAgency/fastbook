@@ -58,6 +58,16 @@ export function rejectUnsafeUnicode(
 // Field validators
 // ---------------------------------------------------------------------------
 
+export function validateName(name: string): ValidationError | null {
+  if (name.length > LIMITS.AGENT_NAME_MAX) {
+    return err(`Name max ${LIMITS.AGENT_NAME_MAX} characters`);
+  }
+  if (name.trim().length === 0) {
+    return err('Name must not be blank');
+  }
+  return rejectUnsafeUnicode(name, false);
+}
+
 export function validateDescription(desc: string): ValidationError | null {
   if (desc.length > LIMITS.DESCRIPTION_MAX) {
     return err(`Description max ${LIMITS.DESCRIPTION_MAX} bytes`);

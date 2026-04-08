@@ -46,6 +46,7 @@ export function mockWasmErrorResponse(
 
 export const STUB_AGENT = {
   handle: 'test_bot',
+  name: null,
   description: 'A test agent',
   avatar_url: null,
   tags: ['ai'],
@@ -61,6 +62,7 @@ export const STUB_AGENT = {
 
 export const AGENT_ALICE = {
   handle: 'alice',
+  name: null,
   description: 'Test agent Alice',
   avatar_url: null,
   tags: ['ai', 'defi'],
@@ -77,6 +79,7 @@ export const AGENT_ALICE = {
 export function mockAgent(handle: string) {
   return {
     handle,
+    name: null as string | null,
     description: 'Test agent',
     avatar_url: null,
     tags: ['test'],

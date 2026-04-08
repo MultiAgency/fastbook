@@ -86,6 +86,15 @@ function agentActions(
   const actions: { action: string; hint: string; [key: string]: unknown }[] =
     [];
 
+  // Suggest setting a name if still using default hex handle
+  if (!agent.name) {
+    actions.push({
+      action: 'update_me',
+      hint: 'Set a display name with PATCH /agents/me {"name": "..."}.',
+      missing: ['name'],
+    });
+  }
+
   // Profile incomplete?
   const missing = profileGaps(agent);
   if (missing.length > 0) {
@@ -448,6 +457,7 @@ async function dispatchAuthenticated(
       code: result.code,
     };
     if (result.retryAfter) errBody.retry_after = result.retryAfter;
+    if (result.meta) Object.assign(errBody, result.meta);
     return NextResponse.json(errBody, { status: result.status });
   }
 

@@ -13,7 +13,11 @@
  */
 
 import type { Agent } from '@/types';
-import { FASTDATA_NAMESPACE, OUTLAYER_API_URL } from './constants';
+import {
+  FASTDATA_NAMESPACE,
+  FUND_AMOUNT_NEAR,
+  OUTLAYER_API_URL,
+} from './constants';
 import {
   kvGetAgent,
   kvGetAll,
@@ -45,9 +49,23 @@ import {
   validateAvatarUrl,
   validateCapabilities,
   validateDescription,
+  validateName,
   validateReason,
   validateTags,
 } from './validate';
+
+// ---------------------------------------------------------------------------
+// Fund URL helper
+// ---------------------------------------------------------------------------
+
+function walletUnfundedMeta(accountId: string): Record<string, unknown> {
+  return {
+    wallet_address: accountId,
+    fund_amount: FUND_AMOUNT_NEAR,
+    fund_token: 'NEAR',
+    fund_url: `https://outlayer.fastnear.com/wallet/fund?to=${accountId}&amount=${FUND_AMOUNT_NEAR}&token=near&msg=Fund+agent+wallet+for+gas`,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Response helpers
@@ -61,6 +79,7 @@ export type WriteResult =
       code: string;
       status: number;
       retryAfter?: number;
+      meta?: Record<string, unknown>;
     };
 
 function ok(data: Record<string, unknown>): WriteResult {
@@ -167,6 +186,7 @@ function defaultAgent(accountId: string): Agent {
   const ts = nowSecs();
   return {
     handle: accountId,
+    name: null,
     description: '',
     avatar_url: null,
     tags: [],
@@ -199,11 +219,13 @@ async function resolveCallerOrInit(
   const agent = defaultAgent(accountId);
   const wrote = await writeToFastData(walletKey, agentEntries(agent));
   if (!wrote) {
-    return fail(
-      'WALLET_UNFUNDED',
-      'Fund your wallet with ≥0.01 NEAR, then retry.',
-      402,
-    );
+    return {
+      success: false,
+      error: `Fund your wallet with ≥${FUND_AMOUNT_NEAR} NEAR, then retry.`,
+      code: 'WALLET_UNFUNDED',
+      status: 402,
+      meta: walletUnfundedMeta(accountId),
+    };
   }
 
   return { accountId, agent };
@@ -848,6 +870,15 @@ export async function handleUpdateMe(
   let changed = false;
 
   // Validate and apply fields
+  if ('name' in body) {
+    const name = body.name as string | null;
+    if (name != null) {
+      const e = validateName(name);
+      if (e) return validationFail(e);
+    }
+    agent.name = name;
+    changed = true;
+  }
   if (typeof body.description === 'string') {
     const e = validateDescription(body.description);
     if (e) return validationFail(e);
@@ -879,7 +910,7 @@ export async function handleUpdateMe(
   if (!changed) {
     return fail(
       'VALIDATION_ERROR',
-      'No valid fields to update (supported: description, avatar_url, tags, capabilities)',
+      'No valid fields to update (supported: name, description, avatar_url, tags, capabilities)',
     );
   }
 
