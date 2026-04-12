@@ -42,7 +42,7 @@ test('get_me(A) — discover account ID', async ({ request }) => {
   expect(res.ok()).toBe(true);
   const json = await res.json();
   expect(json.success).toBe(true);
-  accountIdA = json.data.agent.near_account_id;
+  accountIdA = json.data.agent.account_id;
   expect(accountIdA).toBeTruthy();
 });
 
@@ -52,7 +52,7 @@ test('get_me(B) — discover account ID', async ({ request }) => {
   expect(res.ok()).toBe(true);
   const json = await res.json();
   expect(json.success).toBe(true);
-  accountIdB = json.data.agent.near_account_id;
+  accountIdB = json.data.agent.account_id;
   expect(accountIdB).toBeTruthy();
   expect(accountIdB).not.toBe(accountIdA);
 });
@@ -90,9 +90,7 @@ test('list_agents — both agents appear', async ({ request }) => {
   expect(res.ok()).toBe(true);
   const json = await res.json();
   expect(Array.isArray(json.data.agents)).toBe(true);
-  const ids = json.data.agents.map(
-    (a: { near_account_id: string }) => a.near_account_id,
-  );
+  const ids = json.data.agents.map((a: { account_id: string }) => a.account_id);
   expect(ids).toContain(accountIdA);
   expect(ids).toContain(accountIdB);
 });
@@ -124,7 +122,7 @@ test('get_profile(B) — public, live counts', async ({ request }) => {
   const res = await request.get(`agents/${accountIdB}`);
   expect(res.ok()).toBe(true);
   const json = await res.json();
-  expect(json.data.agent.near_account_id).toBe(accountIdB);
+  expect(json.data.agent.account_id).toBe(accountIdB);
   expect(json.data.agent.tags).toContain('ai');
   expect(typeof json.data.agent.follower_count).toBe('number');
   expect(typeof json.data.agent.following_count).toBe('number');
@@ -139,7 +137,9 @@ test('follow(A→B)', async ({ request }) => {
   });
   expect(res.ok()).toBe(true);
   const json = await res.json();
-  expect(['followed', 'already_following']).toContain(json.data.action);
+  expect(['followed', 'already_following']).toContain(
+    json.data.results[0].action,
+  );
 });
 
 test('follow(B→A)', async ({ request }) => {
@@ -149,7 +149,9 @@ test('follow(B→A)', async ({ request }) => {
   });
   expect(res.ok()).toBe(true);
   const json = await res.json();
-  expect(['followed', 'already_following']).toContain(json.data.action);
+  expect(['followed', 'already_following']).toContain(
+    json.data.results[0].action,
+  );
 });
 
 // ── 11. Followers ──────────────────────────────────────────────────
@@ -160,7 +162,7 @@ test('get_followers(B) — includes A', async ({ request }) => {
   const json = await res.json();
   expect(Array.isArray(json.data.followers)).toBe(true);
   const ids = json.data.followers.map(
-    (f: { near_account_id: string }) => f.near_account_id,
+    (f: { account_id: string }) => f.account_id,
   );
   expect(ids).toContain(accountIdA);
 });
@@ -173,7 +175,7 @@ test('get_following(A) — includes B', async ({ request }) => {
   const json = await res.json();
   expect(Array.isArray(json.data.following)).toBe(true);
   const ids = json.data.following.map(
-    (f: { near_account_id: string }) => f.near_account_id,
+    (f: { account_id: string }) => f.account_id,
   );
   expect(ids).toContain(accountIdB);
 });
@@ -197,8 +199,8 @@ test('endorse(A→B) — tag "ai"', async ({ request }) => {
   });
   expect(res.ok()).toBe(true);
   const json = await res.json();
-  expect(json.data.action).toBe('endorsed');
-  expect(json.data.account_id).toBe(accountIdB);
+  expect(json.data.results[0].action).toBe('endorsed');
+  expect(json.data.results[0].account_id).toBe(accountIdB);
 });
 
 // ── 15. Endorsers ──────────────────────────────────────────────────
@@ -209,7 +211,7 @@ test('get_endorsers(B) — A endorsed ai', async ({ request }) => {
   const json = await res.json();
   expect(json.data.endorsers.tags.ai.length).toBeGreaterThanOrEqual(1);
   const endorserIds = json.data.endorsers.tags.ai.map(
-    (e: { near_account_id: string }) => e.near_account_id,
+    (e: { account_id: string }) => e.account_id,
   );
   expect(endorserIds).toContain(accountIdA);
 });
@@ -224,7 +226,7 @@ test('heartbeat(B) — sees delta', async ({ request }) => {
   const json = await res.json();
   expect(typeof json.data.delta).toBe('object');
   expect(typeof json.data.delta.since).toBe('number');
-  expect(json.data.agent.near_account_id).toBe(accountIdB);
+  expect(json.data.agent.account_id).toBe(accountIdB);
 });
 
 // ── 17. Activity ───────────────────────────────────────────────────
@@ -264,7 +266,7 @@ test('unendorse(A→B)', async ({ request }) => {
   });
   expect(res.ok()).toBe(true);
   const json = await res.json();
-  expect(json.data.action).toBe('unendorsed');
+  expect(json.data.results[0].action).toBe('unendorsed');
 });
 
 // ── 20. Unfollow (cleanup) ─────────────────────────────────────────
@@ -275,5 +277,7 @@ test('unfollow(A→B)', async ({ request }) => {
   });
   expect(res.ok()).toBe(true);
   const json = await res.json();
-  expect(['unfollowed', 'not_following']).toContain(json.data.action);
+  expect(['unfollowed', 'not_following']).toContain(
+    json.data.results[0].action,
+  );
 });

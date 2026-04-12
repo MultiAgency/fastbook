@@ -1,16 +1,9 @@
 export const TEST_AUTH = {
-  near_account_id: 'agency.near',
+  account_id: 'agency.near',
   public_key: 'ed25519:abc',
   signature: 'ed25519:sig',
   nonce: 'bm9uY2U=',
   message: '{"action":"heartbeat"}',
-} as const;
-
-export const TEST_SIGN_RESULT = {
-  account_id: 'user.near',
-  public_key: 'ed25519:abc',
-  signature: 'ed25519:sig',
-  nonce: 'bm9uY2U=',
 } as const;
 
 export function setupFetchMock() {
@@ -44,49 +37,31 @@ export function mockWasmErrorResponse(
   };
 }
 
-export const STUB_AGENT = {
-  handle: 'test_bot',
-  name: null,
-  description: 'A test agent',
-  avatar_url: null,
-  tags: ['ai'],
-  capabilities: {},
-  endorsements: {},
-  platforms: [],
-  near_account_id: 'test.near',
-  follower_count: 5,
-  following_count: 3,
-  created_at: 1700000000,
-  last_active: 1700001000,
-};
-
 export const AGENT_ALICE = {
-  handle: 'alice',
   name: null,
   description: 'Test agent Alice',
-  avatar_url: null,
+  image: null,
   tags: ['ai', 'defi'],
   capabilities: {},
-  near_account_id: 'alice.near',
+  account_id: 'alice.near',
   follower_count: 5,
   following_count: 3,
   endorsements: {},
-  platforms: [],
+
   created_at: 1700000000,
   last_active: 1700001000,
 };
 
-export function mockAgent(handle: string) {
+export function mockAgent(accountId: string) {
   return {
-    handle,
     name: null as string | null,
     description: 'Test agent',
-    avatar_url: null,
+    image: null,
     tags: ['test'],
     capabilities: {},
     endorsements: {},
-    platforms: [],
-    near_account_id: `${handle}.near`,
+
+    account_id: accountId,
     follower_count: 0,
     following_count: 0,
     created_at: 1000,

@@ -83,9 +83,9 @@ test.describe('Navigation', () => {
     await expect(exploreAgents).toHaveAttribute('href', '/agents');
   });
 
-  test('demo page is accessible', async ({ page }) => {
-    await page.goto('/demo');
-    await expect(page.getByText('Bring Your Own NEAR Account')).toBeVisible();
+  test('join page is accessible', async ({ page }) => {
+    await page.goto('/join');
+    await expect(page.getByText('Create Your Agent')).toBeVisible();
   });
 
   test('mobile menu opens and closes', async ({ page }) => {
@@ -137,11 +137,11 @@ test.describe('Mobile Responsiveness', () => {
     ).toBeVisible();
   });
 
-  test('demo page renders on mobile', async ({ page }) => {
+  test('join page renders on mobile', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 812 });
-    await page.goto('/demo');
+    await page.goto('/join');
 
-    await expect(page.getByText('Bring Your Own NEAR Account')).toBeVisible();
+    await expect(page.getByText('Create Your Agent')).toBeVisible();
     await expect(
       page.getByRole('button', { name: /Create Wallet/ }),
     ).toBeVisible();

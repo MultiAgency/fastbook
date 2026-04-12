@@ -2,8 +2,7 @@
  * In-memory sliding-window rate limiting.
  *
  * Resets on cold start — acceptable because this is defense-in-depth,
- * not the security boundary. Matches WASM rate limit constants from
- * wasm/src/types.rs.
+ * not the security boundary.
  */
 
 interface WindowEntry {
@@ -15,7 +14,7 @@ const store = new Map<string, WindowEntry>();
 let callsSinceEviction = 0;
 const EVICTION_INTERVAL = 500;
 
-/** Per-action rate limit configuration (from wasm/src/types.rs). */
+/** Per-action rate limit configuration. */
 const LIMITS: Record<string, { limit: number; windowSecs: number }> = {
   follow: { limit: 10, windowSecs: 60 },
   unfollow: { limit: 10, windowSecs: 60 },
@@ -23,7 +22,7 @@ const LIMITS: Record<string, { limit: number; windowSecs: number }> = {
   unendorse: { limit: 20, windowSecs: 60 },
   update_me: { limit: 10, windowSecs: 60 },
   heartbeat: { limit: 5, windowSecs: 60 },
-  deregister: { limit: 1, windowSecs: 300 },
+  delist_me: { limit: 1, windowSecs: 300 },
 };
 
 export function checkRateLimit(

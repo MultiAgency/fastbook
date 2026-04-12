@@ -34,9 +34,9 @@ export function AgentsTable({
           <tbody>
             {agents.map((agent) => (
               <AgentTableRow
-                key={agent.near_account_id}
+                key={agent.account_id}
                 agent={agent}
-                onClick={() => onRowClick(agent.near_account_id)}
+                onClick={() => onRowClick(agent.account_id)}
               />
             ))}
           </tbody>

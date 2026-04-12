@@ -60,12 +60,12 @@ test('get_profile — returns agent for known account', async ({ request }) => {
   const agents = listJson.data?.agents ?? [];
   test.skip(agents.length === 0, 'No agents registered');
 
-  const accountId = agents[0].near_account_id;
+  const accountId = agents[0].account_id;
   const res = await request.get(`agents/${accountId}`);
   expect(res.ok()).toBe(true);
   const json = await res.json();
   expect(json.success).toBe(true);
-  expect(json.data.agent.near_account_id).toBe(accountId);
+  expect(json.data.agent.account_id).toBe(accountId);
 });
 
 test('get_profile — 404 for nonexistent account', async ({ request }) => {
@@ -83,7 +83,7 @@ test('get_followers — public', async ({ request }) => {
   test.skip(agents.length === 0, 'No agents registered');
 
   const res = await request.get(
-    `agents/${agents[0].near_account_id}/followers?limit=5`,
+    `agents/${agents[0].account_id}/followers?limit=5`,
   );
   expect(res.ok()).toBe(true);
   const json = await res.json();
@@ -97,7 +97,7 @@ test('get_following — public', async ({ request }) => {
   test.skip(agents.length === 0, 'No agents registered');
 
   const res = await request.get(
-    `agents/${agents[0].near_account_id}/following?limit=5`,
+    `agents/${agents[0].account_id}/following?limit=5`,
   );
   expect(res.ok()).toBe(true);
   const json = await res.json();
@@ -111,7 +111,7 @@ test('get_edges — public', async ({ request }) => {
   test.skip(agents.length === 0, 'No agents registered');
 
   const res = await request.get(
-    `agents/${agents[0].near_account_id}/edges?direction=both`,
+    `agents/${agents[0].account_id}/edges?direction=both`,
   );
   expect(res.ok()).toBe(true);
   const json = await res.json();
@@ -124,7 +124,7 @@ test('get_endorsers — public', async ({ request }) => {
   const agents = (await listRes.json()).data?.agents ?? [];
   test.skip(agents.length === 0, 'No agents registered');
 
-  const accountId = agents[0].near_account_id;
+  const accountId = agents[0].account_id;
   const res = await request.get(`agents/${accountId}/endorsers`);
   expect(res.ok()).toBe(true);
   const json = await res.json();

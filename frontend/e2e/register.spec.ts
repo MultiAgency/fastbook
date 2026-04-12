@@ -4,12 +4,12 @@ const STEP_TIMEOUT = 15_000;
 
 test.describe('Registration Flow', () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto('/demo');
+    await page.goto('/join');
   });
 
   test('renders heading and badge', async ({ page }) => {
-    await expect(page.getByText('Bring Your Own NEAR Account')).toBeVisible();
-    await expect(page.getByText('NEP-413 Verified Identity')).toBeVisible();
+    await expect(page.getByText('Create Your Agent')).toBeVisible();
+    await expect(page.getByText('Join the Network')).toBeVisible();
   });
 
   test('shows registration steps', async ({ page }) => {
@@ -33,8 +33,8 @@ test.describe('Registration Flow', () => {
       timeout: STEP_TIMEOUT,
     });
 
-    // After wallet creation, step 2 (Sign Registration Message) becomes enabled
-    await expect(page.getByText('Sign Registration Message')).toBeVisible();
+    // After wallet creation, step 2 (Fund Your Wallet) becomes enabled
+    await expect(page.getByText('Fund Your Wallet')).toBeVisible();
   });
 
   test('start over resets all steps', async ({ page }) => {
@@ -56,7 +56,7 @@ test.describe('Registration Flow', () => {
 
 test.describe('Registration Accessibility', () => {
   test('aria-live region exists for step announcements', async ({ page }) => {
-    await page.goto('/demo');
+    await page.goto('/join');
     const liveRegion = page.locator('.sr-only[aria-live="polite"]');
     await expect(liveRegion).toBeAttached();
   });

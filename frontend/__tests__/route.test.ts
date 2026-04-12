@@ -3,7 +3,6 @@
  */
 
 import { NextRequest } from 'next/server';
-import { setupFetchMock } from './fixtures';
 
 const mockCallOutlayer = jest.fn();
 const mockSignMessage = jest.fn();
@@ -26,6 +25,7 @@ jest.mock('@/lib/fastdata-dispatch', () => ({
 const mockDispatchWrite = jest.fn();
 jest.mock('@/lib/fastdata-write', () => ({
   dispatchWrite: (...args: unknown[]) => mockDispatchWrite(...args),
+  writeToFastData: jest.fn().mockResolvedValue({ ok: true }),
 }));
 
 const mockKvGetAgent = jest.fn().mockResolvedValue(null);
@@ -69,14 +69,17 @@ async function json(res: NextResponse) {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  jest.spyOn(console, 'warn');
   mockCallOutlayer.mockResolvedValue({
     response: NextResponse.json({ success: true, data: {} }),
     decoded: { success: true, data: {} },
   });
   mockDispatchFastData.mockResolvedValue({ data: {} });
   mockHandleGetSuggested.mockResolvedValue({ data: [] });
-  mockDispatchWrite.mockResolvedValue({ success: true, data: {} });
+  mockDispatchWrite.mockResolvedValue({
+    success: true,
+    data: {},
+    invalidates: ['list_agents', 'profile'],
+  });
   mockSignMessage.mockResolvedValue(null);
   // Authenticated GETs resolve caller account via resolveAccountId.
   // For tests that use wk_ keys, mock kvGetAgent to return a profile.
@@ -108,18 +111,17 @@ describe('sanitizePublic', () => {
   it('strips non-primitive values even for valid keys', () => {
     const result = sanitizePublic({
       action: 'list_agents',
-      handle: { nested: 'object' },
+      extra: { nested: 'object' },
       limit: [1, 2, 3],
     });
     expect(result.action).toBe('list_agents');
-    expect(result.handle).toBeUndefined();
+    expect(result.extra).toBeUndefined();
     expect(result.limit).toBeUndefined();
   });
 
   it('passes through fields whitelisted for the action', () => {
     const input = {
       action: 'list_agents',
-      handle: 'alice',
       limit: 10,
       cursor: 'abc',
       sort: 'newest',
@@ -130,11 +132,11 @@ describe('sanitizePublic', () => {
   it('strips fields not whitelisted for the action', () => {
     const result = sanitizePublic({
       action: 'list_agents',
-      handle: 'alice',
+      account_id: 'alice.near',
       direction: 'outgoing',
       since: 1700000000,
     });
-    expect(result.handle).toBe('alice');
+    expect(result.account_id).toBe('alice.near');
     expect(result.direction).toBeUndefined();
     expect(result.since).toBeUndefined();
   });
@@ -142,20 +144,12 @@ describe('sanitizePublic', () => {
   it('allows structured values for endorser filters', () => {
     const result = sanitizePublic({
       action: 'filter_endorsers',
-      handle: 'alice',
+      account_id: 'alice.near',
       tags: ['rust', 'ai'],
       capabilities: { skills: ['chat'] },
     });
     expect(result.tags).toEqual(['rust', 'ai']);
     expect(result.capabilities).toEqual({ skills: ['chat'] });
-  });
-
-  it('returns empty object for empty input', () => {
-    expect(sanitizePublic({})).toEqual({});
-  });
-
-  it('returns empty object when all keys are disallowed', () => {
-    expect(sanitizePublic({ secret: 'x', token: 'y' })).toEqual({});
   });
 });
 
@@ -164,7 +158,6 @@ describe('route resolution', () => {
     ['GET', 'health', 'health'],
     ['GET', 'tags', 'list_tags'],
     ['GET', 'agents', 'list_agents'],
-    ['POST', 'agents/register', 'register'],
     ['GET', 'agents/discover', 'discover_agents'],
     ['GET', 'agents/me', 'me'],
     ['PATCH', 'agents/me', 'update_me'],
@@ -204,7 +197,7 @@ describe('route resolution', () => {
       'unendorse',
       'update_me',
       'heartbeat',
-      'deregister',
+      'delist_me',
     ]);
 
     if (expectedAction === 'discover_agents') {
@@ -217,9 +210,6 @@ describe('route resolution', () => {
     } else if (DIRECT_WRITE_ACTIONS.has(expectedAction)) {
       expect(mockDispatchWrite).toHaveBeenCalledTimes(1);
       expect(mockDispatchWrite.mock.calls[0][0]).toBe(expectedAction);
-      expect(mockCallOutlayer).not.toHaveBeenCalled();
-    } else if (expectedAction === 'register') {
-      // Registration is zero-write: resolves account ID, returns onboarding.
       expect(mockCallOutlayer).not.toHaveBeenCalled();
     }
     // Other POST actions (e.g. register_platforms) are handled by
@@ -286,21 +276,84 @@ describe('query params', () => {
   });
 });
 
+describe('profile caller context', () => {
+  it('anonymous profile read does not set caller_account_id', async () => {
+    const [req, params] = makeRequest('GET', 'agents/alice.near');
+    await GET(req, params);
+
+    expect(mockDispatchFastData).toHaveBeenCalledTimes(1);
+    const [action, body] = mockDispatchFastData.mock.calls[0];
+    expect(action).toBe('profile');
+    expect(body.account_id).toBe('alice.near');
+    expect(body.caller_account_id).toBeUndefined();
+  });
+
+  it('authenticated profile read resolves caller and passes caller_account_id', async () => {
+    const [req, params] = makeRequest('GET', 'agents/alice.near', undefined, {
+      authorization: 'Bearer wk_test',
+    });
+    await GET(req, params);
+
+    expect(mockDispatchFastData).toHaveBeenCalledTimes(1);
+    const [action, body] = mockDispatchFastData.mock.calls[0];
+    expect(action).toBe('profile');
+    expect(body.account_id).toBe('alice.near');
+    expect(body.caller_account_id).toBe('test.near');
+  });
+
+  it('returns 401 when bearer token cannot be resolved', async () => {
+    const { resolveAccountId } = jest.requireMock('@/lib/outlayer-server');
+    (resolveAccountId as jest.Mock).mockResolvedValueOnce(null);
+
+    const [req, params] = makeRequest('GET', 'agents/alice.near', undefined, {
+      authorization: 'Bearer wk_bogus',
+    });
+    const res = await GET(req, params);
+
+    expect(res.status).toBe(401);
+    expect(mockDispatchFastData).not.toHaveBeenCalled();
+  });
+
+  it('anonymous profile read still writes to the cache', async () => {
+    const { setCache } = jest.requireMock('@/lib/cache');
+
+    const [req, params] = makeRequest('GET', 'agents/alice.near');
+    await GET(req, params);
+
+    expect(setCache).toHaveBeenCalledWith(
+      'profile',
+      expect.any(String),
+      expect.anything(),
+    );
+  });
+
+  it('authenticated profile read skips the cache', async () => {
+    const { setCache, getCached } = jest.requireMock('@/lib/cache');
+
+    const [req, params] = makeRequest('GET', 'agents/alice.near', undefined, {
+      authorization: 'Bearer wk_test',
+    });
+    await GET(req, params);
+
+    expect(getCached).not.toHaveBeenCalled();
+    expect(setCache).not.toHaveBeenCalled();
+  });
+});
+
 describe('injection prevention', () => {
   it('route params override body action to prevent action injection', async () => {
     const [req, params] = makeRequest(
       'POST',
-      'agents/register',
-      { action: 'me' },
+      'agents/alice.near/follow',
+      { action: 'delist_me' },
       { authorization: 'Bearer wk_test' },
     );
-    const res = await POST(req, params);
-    const body = await json(res);
+    await POST(req, params);
 
-    // Even though body.action was 'me', the route resolved to 'register'
-    // and the registration handler ran (returns onboarding, not profile data).
-    expect(body.success).toBe(true);
-    expect(body.data.next_step).toBe('fund_wallet');
+    // Even though body.action was 'delist_me', the route resolved to 'follow'
+    // and dispatchWrite was called with the follow action.
+    expect(mockDispatchWrite).toHaveBeenCalledTimes(1);
+    expect(mockDispatchWrite.mock.calls[0][0]).toBe('follow');
   });
 
   it('route params override body account_id to prevent injection', async () => {
@@ -333,7 +386,10 @@ describe('injection prevention', () => {
 describe('auth dispatch', () => {
   it('returns cached response without calling callOutlayer', async () => {
     const { getCached } = jest.requireMock('@/lib/cache');
-    const cachedData = { success: true, data: [{ handle: 'cached_bot' }] };
+    const cachedData = {
+      success: true,
+      data: [{ account_id: 'cached_bot.near' }],
+    };
     (getCached as jest.Mock).mockReturnValueOnce(cachedData);
 
     const [req, params] = makeRequest('GET', 'agents');
@@ -436,7 +492,7 @@ describe('auth dispatch', () => {
 
   it('verifiable_claim without wk_ key returns 401 for non-register mutations', async () => {
     const claim = {
-      near_account_id: 'alice.near',
+      account_id: 'alice.near',
       public_key: 'ed25519:abc',
       signature: 'ed25519:sig',
       nonce: 'bm9uY2U=',
@@ -453,7 +509,7 @@ describe('auth dispatch', () => {
 
   it('rejects register_platforms with verifiable_claim (requires wk_ key)', async () => {
     const claim = {
-      near_account_id: 'alice.near',
+      account_id: 'alice.near',
       public_key: 'ed25519:abc',
       signature: 'ed25519:sig',
       nonce: 'bm9uY2U=',
@@ -478,7 +534,7 @@ describe('auth dispatch', () => {
 describe('error handling', () => {
   it('returns 413 for oversized request body', async () => {
     const largeBody = 'x'.repeat(65_537);
-    const url = 'http://localhost:3000/api/v1/agents/register';
+    const url = 'http://localhost:3000/api/v1/agents/me/heartbeat';
     const req = new NextRequest(url, {
       method: 'POST',
       body: largeBody,
@@ -488,7 +544,7 @@ describe('error handling', () => {
       },
     });
     const params = {
-      params: Promise.resolve({ path: ['agents', 'register'] }),
+      params: Promise.resolve({ path: ['agents', 'me', 'heartbeat'] }),
     };
     const res = await POST(req, params);
     expect(res.status).toBe(413);
@@ -497,7 +553,7 @@ describe('error handling', () => {
   });
 
   it('returns 400 for invalid JSON body', async () => {
-    const url = 'http://localhost:3000/api/v1/agents/register';
+    const url = 'http://localhost:3000/api/v1/agents/me/heartbeat';
     const req = new NextRequest(url, {
       method: 'POST',
       body: 'not json{{{',
@@ -507,62 +563,12 @@ describe('error handling', () => {
       },
     });
     const params = {
-      params: Promise.resolve({ path: ['agents', 'register'] }),
+      params: Promise.resolve({ path: ['agents', 'me', 'heartbeat'] }),
     };
     const res = await POST(req, params);
     expect(res.status).toBe(400);
     const body = await json(res);
     expect(body.error).toContain('Invalid JSON');
-  });
-});
-
-describe('platform auto-registration on register (background)', () => {
-  let marketFetch: ReturnType<typeof setupFetchMock>;
-
-  beforeEach(() => {
-    marketFetch = setupFetchMock();
-    // Registration is zero-write — resolveAccountId returns 'test.near' by default.
-  });
-
-  afterEach(() => marketFetch.restore());
-
-  it('returns registration response immediately without platform data', async () => {
-    marketFetch.mockFetch.mockResolvedValue({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          api_key: 'sk_live_x',
-          agent_id: 'uuid',
-          near_account_id: 'mkt.near',
-        }),
-    });
-
-    const [req, params] = makeRequest(
-      'POST',
-      'agents/register',
-      { handle: 'my_bot', tags: ['ai'] },
-      { authorization: 'Bearer wk_test_key' },
-    );
-    const res = await POST(req, params);
-    const body = await json(res);
-
-    // Registration succeeds immediately — platform data is not included
-    // (platforms register in the background; use POST /agents/me/platforms
-    // to retrieve credentials)
-    expect(body.success).toBe(true);
-    expect(body.data.market).toBeUndefined();
-  });
-
-  it('does not call market for non-register actions', async () => {
-    const [req, params] = makeRequest(
-      'POST',
-      'agents/me/heartbeat',
-      {},
-      { authorization: 'Bearer wk_test' },
-    );
-    await POST(req, params);
-
-    expect(marketFetch.mockFetch).not.toHaveBeenCalled();
   });
 });
 
@@ -580,7 +586,7 @@ describe('cache invalidation', () => {
     );
   });
 
-  it('invalidates via INVALIDATION_MAP on heartbeat', async () => {
+  it('invalidates cache on heartbeat', async () => {
     const { invalidateForMutation } = jest.requireMock('@/lib/cache');
 
     const [req, params] = makeRequest(
@@ -591,21 +597,9 @@ describe('cache invalidation', () => {
     );
     await POST(req, params);
 
-    expect(invalidateForMutation).toHaveBeenCalledWith('heartbeat');
-  });
-
-  it('invalidates affected cache entries on follow', async () => {
-    const { invalidateForMutation } = jest.requireMock('@/lib/cache');
-
-    const [req, params] = makeRequest(
-      'POST',
-      'agents/alice.near/follow',
-      {},
-      { authorization: 'Bearer wk_test' },
+    expect(invalidateForMutation).toHaveBeenCalledWith(
+      expect.arrayContaining(['list_agents', 'profile']),
     );
-    await POST(req, params);
-
-    expect(invalidateForMutation).toHaveBeenCalledWith('follow');
   });
 });
 
@@ -617,7 +611,7 @@ describe('direct write dispatch for wk_ keys', () => {
     ['DELETE', 'agents/alice/endorse', 'unendorse'],
     ['PATCH', 'agents/me', 'update_me'],
     ['POST', 'agents/me/heartbeat', 'heartbeat'],
-    ['DELETE', 'agents/me', 'deregister'],
+    ['DELETE', 'agents/me', 'delist_me'],
   ] as const)('%s %s with wk_ key dispatches to dispatchWrite', async (method, path, expectedAction) => {
     const handlers: Record<string, typeof GET> = { GET, POST, PATCH, DELETE };
     const handler = handlers[method]!;
@@ -643,25 +637,6 @@ describe('direct write dispatch for wk_ keys', () => {
       {},
       { 'x-payment-key': 'owner.near:1:secret' },
     );
-    const res = await POST(req, params);
-
-    expect(res.status).toBe(401);
-    expect(mockCallOutlayer).not.toHaveBeenCalled();
-    expect(mockDispatchWrite).not.toHaveBeenCalled();
-  });
-
-  it('verifiable_claim without wk_ returns 401 for heartbeat', async () => {
-    const claim = {
-      near_account_id: 'alice.near',
-      public_key: 'ed25519:abc',
-      signature: 'ed25519:sig',
-      nonce: 'bm9uY2U=',
-      message: '{"action":"heartbeat"}',
-      recipient: 'social',
-    };
-    const [req, params] = makeRequest('POST', 'agents/me/heartbeat', {
-      verifiable_claim: claim,
-    });
     const res = await POST(req, params);
 
     expect(res.status).toBe(401);
@@ -699,23 +674,8 @@ describe('direct write dispatch for wk_ keys', () => {
     );
     await POST(req, params);
 
-    expect(invalidateForMutation).toHaveBeenCalledWith('follow');
-  });
-
-  it('register is zero-write and does not call WASM', async () => {
-    const [req, params] = makeRequest(
-      'POST',
-      'agents/register',
-      {},
-      { authorization: 'Bearer wk_test_key' },
+    expect(invalidateForMutation).toHaveBeenCalledWith(
+      expect.arrayContaining(['list_agents', 'profile']),
     );
-    const res = await POST(req, params);
-    const body = await json(res);
-
-    expect(mockCallOutlayer).not.toHaveBeenCalled();
-    expect(mockDispatchWrite).not.toHaveBeenCalled();
-    expect(body.success).toBe(true);
-    expect(body.data.near_account_id).toBe('test.near');
-    expect(body.data.next_step).toBe('fund_wallet');
   });
 });

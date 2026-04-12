@@ -2,7 +2,7 @@ import type {
   ActivityResponse,
   Agent,
   AgentCapabilities,
-  DeregisterResponse,
+  DelistMeResponse,
   Edge,
   EdgesResponse,
   EndorseResponse,
@@ -11,15 +11,14 @@ import type {
   GetMeResponse,
   GetProfileResponse,
   HeartbeatResponse,
-  Nep413Auth,
   NetworkResponse,
   PlatformResult,
-  RegisterAgentForm,
-  RegistrationResponse,
   SuggestedResponse,
   TagsResponse,
+  UnendorseResponse,
   UnfollowResponse,
   UpdateMeResponse,
+  VerifiableClaim,
 } from '@/types';
 import { API_TIMEOUT_MS, LIMITS } from './constants';
 import { fetchWithRetry, fetchWithTimeout, httpErrorText } from './fetch';
@@ -44,13 +43,13 @@ class ApiError extends Error {
 
 class ApiClient {
   private apiKey: string | null = null;
-  private auth: Nep413Auth | null = null;
+  private auth: VerifiableClaim | null = null;
 
   setApiKey(key: string | null) {
     this.apiKey = key;
   }
 
-  setAuth(auth: Nep413Auth | null) {
+  setAuth(auth: VerifiableClaim | null) {
     this.auth = auth;
   }
 
@@ -129,17 +128,6 @@ class ApiClient {
     return data as T;
   }
 
-  async register(data: RegisterAgentForm) {
-    const args: Record<string, unknown> = {
-      handle: data.handle,
-      description: data.description,
-    };
-    if (data.tags?.length) args.tags = data.tags;
-    if (data.capabilities) args.capabilities = data.capabilities;
-    if (data.verifiable_claim) args.verifiable_claim = data.verifiable_claim;
-    return this.request<RegistrationResponse>('register', args);
-  }
-
   async getSuggested(limit = 10) {
     return this.request<SuggestedResponse>('discover_agents', {
       limit: clampLimit(limit),
@@ -162,8 +150,8 @@ class ApiClient {
     });
   }
 
-  async deregister() {
-    return this.request<DeregisterResponse>('deregister');
+  async delistMe() {
+    return this.request<DelistMeResponse>('delist_me');
   }
 
   async getAgent(accountId: string) {
@@ -287,13 +275,12 @@ class ApiClient {
     return this.request<TagsResponse>('list_tags', {}, false);
   }
 
-  private async endorseOp(
-    action: 'endorse' | 'unendorse',
+  async endorseAgent(
     accountId: string,
     endorsement: { tags?: string[]; capabilities?: Record<string, string[]> },
     reason?: string,
   ) {
-    return this.request<EndorseResponse>(action, {
+    return this.request<EndorseResponse>('endorse', {
       accountId,
       tags: endorsement.tags,
       capabilities: endorsement.capabilities,
@@ -301,20 +288,15 @@ class ApiClient {
     });
   }
 
-  async endorseAgent(
-    accountId: string,
-    endorsement: { tags?: string[]; capabilities?: Record<string, string[]> },
-    reason?: string,
-  ) {
-    return this.endorseOp('endorse', accountId, endorsement, reason);
-  }
-
   async unendorseAgent(
     accountId: string,
     endorsement: { tags?: string[]; capabilities?: Record<string, string[]> },
-    reason?: string,
   ) {
-    return this.endorseOp('unendorse', accountId, endorsement, reason);
+    return this.request<UnendorseResponse>('unendorse', {
+      accountId,
+      tags: endorsement.tags,
+      capabilities: endorsement.capabilities,
+    });
   }
 
   async getEndorsers(

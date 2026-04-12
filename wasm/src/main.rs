@@ -1,65 +1,63 @@
-//! Entry point: deserializes the request, dispatches to the appropriate handler, and serializes the response.
+use outlayer::{env, vrf};
+use serde::{Deserialize, Serialize};
 
-use outlayer::env;
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Action {
+    GetVrfSeed,
+    #[serde(other)]
+    Other,
+}
 
-#[allow(dead_code)]
-mod types;
+#[derive(Deserialize)]
+struct Request {
+    action: Action,
+}
 
-pub(crate) use types::*;
+#[derive(Serialize, Default)]
+struct Response {
+    success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<String>,
+}
 
-#[cfg(test)]
-mod auth;
-#[cfg(test)]
-mod nep413;
-#[cfg(test)]
-#[allow(dead_code)]
-mod store;
-#[cfg(test)]
-#[allow(dead_code)]
-mod validation;
-#[cfg(test)]
-pub(crate) use store::*;
-#[cfg(test)]
-pub(crate) use validation::*;
-
-use outlayer::vrf;
-
-/// VRF seed for deterministic follow suggestions.
-/// Returns cryptographically provable random bytes that seed a PageRank ranking.
-fn handle_get_vrf_seed() -> Response {
-    let result = match vrf::random("suggest") {
-        Ok(r) => r,
-        Err(e) => return err_coded("VRF_ERROR", &format!("VRF failed: {e}")),
-    };
-    let pubkey = vrf::public_key().unwrap_or_default();
-    ok_response(serde_json::json!({
-        "output_hex": result.output_hex,
-        "signature_hex": result.signature_hex,
-        "alpha": result.alpha,
-        "vrf_public_key": pubkey,
-    }))
+fn err(code: &str, msg: impl Into<String>) -> Response {
+    Response {
+        code: Some(code.into()),
+        error: Some(msg.into()),
+        ..Response::default()
+    }
 }
 
 fn main() {
     let response = match env::input_json::<Request>() {
         Ok(Some(req)) => match req.action {
-            Action::GetVrfSeed => handle_get_vrf_seed(),
-            other => err_coded(
-                "ACTION_MIGRATING",
-                &format!(
-                    "'{}' has migrated to direct FastData writes",
-                    other.as_str()
-                ),
-            ),
+            // Seed string "suggest" is the VRF domain separator — must stay stable
+            // to preserve deterministic output for existing callers.
+            Action::GetVrfSeed => match (vrf::random("suggest"), vrf::public_key()) {
+                (Ok(r), Ok(pk)) => Response {
+                    success: true,
+                    data: Some(serde_json::json!({
+                        "output_hex": r.output_hex,
+                        "signature_hex": r.signature_hex,
+                        "alpha": r.alpha,
+                        "vrf_public_key": pk,
+                    })),
+                    ..Response::default()
+                },
+                (Err(e), _) => err("VRF_ERROR", format!("VRF failed: {e}")),
+                (_, Err(e)) => err("VRF_ERROR", format!("VRF public key unavailable: {e}")),
+            },
+            Action::Other => err("ACTION_NOT_SUPPORTED", "Only get_vrf_seed is supported"),
         },
-        Ok(None) => err_coded("VALIDATION_ERROR", "No input provided"),
-        Err(e) => err_coded("VALIDATION_ERROR", &format!("Invalid request body: {e}")),
+        Ok(None) => err("VALIDATION_ERROR", "No input provided"),
+        Err(e) => err("VALIDATION_ERROR", format!("Invalid request body: {e}")),
     };
     if env::output_json(&response).is_err() {
         env::output(br#"{"success":false,"error":"Response serialization failed"}"#);
     }
 }
-
-#[cfg(test)]
-#[allow(dead_code)]
-mod tests;

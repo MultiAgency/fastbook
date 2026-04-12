@@ -1,15 +1,9 @@
 /**
- * Proxy-side input validation.
- *
- * Ported from wasm/src/validation.rs — these rules must match exactly.
- * Registration still goes through WASM (handle uniqueness), so WASM
- * validation remains the authoritative gate for register. For all other
- * mutations, this module is the validation layer.
+ * Proxy-side input validation — source of truth for all mutation input rules.
  */
 
 import { LIMITS } from './constants';
 
-// Match wasm/src/types.rs constants
 const MAX_TAGS = 10;
 const MAX_TAG_LEN = 30;
 const MAX_REASON_LEN = 280;
@@ -22,7 +16,7 @@ function err(message: string): ValidationError {
 }
 
 // ---------------------------------------------------------------------------
-// Unicode safety (matches wasm/src/validation.rs reject_unsafe_unicode)
+// Unicode safety
 // ---------------------------------------------------------------------------
 
 /** Control chars + bidi overrides + zero-width chars. */
@@ -75,7 +69,7 @@ export function validateDescription(desc: string): ValidationError | null {
   return rejectUnsafeUnicode(desc, true);
 }
 
-/** Private host detection — matches wasm/src/validation.rs is_private_host. */
+/** Private host detection for image URL validation. */
 function isPrivateHost(host: string): boolean {
   const h = host.toLowerCase();
 
@@ -147,17 +141,17 @@ function isPrivateHost(host: string): boolean {
   return false;
 }
 
-export function validateAvatarUrl(url: string): ValidationError | null {
-  if (url.length > LIMITS.AVATAR_URL_MAX) {
-    return err(`Avatar URL max ${LIMITS.AVATAR_URL_MAX} bytes`);
+export function validateImageUrl(url: string): ValidationError | null {
+  if (url.length > LIMITS.IMAGE_URL_MAX) {
+    return err(`Image URL max ${LIMITS.IMAGE_URL_MAX} bytes`);
   }
   if (!url.startsWith('https://')) {
-    return err('Avatar URL must use https://');
+    return err('Image URL must use https://');
   }
   const afterScheme = url.slice('https://'.length);
   const authority = afterScheme.split('/')[0] ?? '';
   if (authority.includes('@')) {
-    return err('Avatar URL must not contain credentials');
+    return err('Image URL must not contain credentials');
   }
   let hostname: string;
   if (authority.startsWith('[')) {
@@ -166,10 +160,10 @@ export function validateAvatarUrl(url: string): ValidationError | null {
     hostname = authority.split(':')[0] ?? '';
   }
   if (!hostname) {
-    return err('Avatar URL must have a valid host');
+    return err('Image URL must have a valid host');
   }
   if (isPrivateHost(hostname)) {
-    return err('Avatar URL must not point to local or internal hosts');
+    return err('Image URL must not point to local or internal hosts');
   }
   return rejectUnsafeUnicode(url, false);
 }
@@ -216,7 +210,7 @@ export function validateReason(reason: string): ValidationError | null {
 }
 
 // ---------------------------------------------------------------------------
-// Capabilities validation (matches wasm/src/validation.rs)
+// Capabilities validation
 // ---------------------------------------------------------------------------
 
 function validateCapabilitiesContent(

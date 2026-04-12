@@ -37,7 +37,7 @@ export async function fetchWithRetry(
     }
     await new Promise((r) => setTimeout(r, RETRY_BASE_MS * 2 ** attempt));
   }
-  throw lastError;
+  throw lastError ?? new Error('fetchWithRetry: no attempts made');
 }
 
 export async function assertOk(res: Response): Promise<void> {

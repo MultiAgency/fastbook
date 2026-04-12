@@ -6,14 +6,14 @@ import {
   makeCacheKey,
   setCache,
 } from '@/lib/cache';
-import { FUND_AMOUNT_NEAR, LIMITS } from '@/lib/constants';
+import { LIMITS, OUTLAYER_ADMIN_ACCOUNT } from '@/lib/constants';
+import { dispatchFastData, handleGetSuggested } from '@/lib/fastdata-dispatch';
+import { nowSecs, profileGaps } from '@/lib/fastdata-utils';
 import {
-  dispatchFastData,
-  handleGetSuggested,
-  type VrfProof,
-} from '@/lib/fastdata-dispatch';
-import { profileGaps } from '@/lib/fastdata-utils';
-import { dispatchWrite } from '@/lib/fastdata-write';
+  dispatchWrite,
+  invalidatesFor,
+  writeToFastData,
+} from '@/lib/fastdata-write';
 import {
   callOutlayer,
   getOutlayerPaymentKey,
@@ -23,6 +23,7 @@ import {
 } from '@/lib/outlayer-server';
 import { handleRegisterPlatforms, PLATFORM_META } from '@/lib/platforms';
 import { PUBLIC_ACTIONS, type ResolvedRoute, resolveRoute } from '@/lib/routes';
+import type { VrfProof } from '@/types';
 
 /**
  * Decode a Bearer near:<base64url> token into its constituent fields.
@@ -76,8 +77,12 @@ const DIRECT_WRITE_ACTIONS = new Set([
   'unendorse',
   'update_me',
   'heartbeat',
-  'deregister',
+  'delist_me',
 ]);
+
+// Authenticated mutations that don't touch FastData — they proxy an
+// external registration call, so there's no cache to invalidate on success.
+const PASSTHROUGH_WRITE_ACTIONS = new Set(['register_platforms']);
 
 /** Compute contextual actions based on agent state. */
 function agentActions(
@@ -86,7 +91,7 @@ function agentActions(
   const actions: { action: string; hint: string; [key: string]: unknown }[] =
     [];
 
-  // Suggest setting a name if still using default hex handle
+  // Suggest setting a display name
   if (!agent.name) {
     actions.push({
       action: 'update_me',
@@ -102,23 +107,6 @@ function agentActions(
       action: 'update_me',
       hint: `Set ${missing.join(', ')} to improve discoverability.`,
       missing,
-    });
-  }
-
-  // Unregistered platforms?
-  const registered = new Set(
-    Array.isArray(agent.platforms) ? agent.platforms : [],
-  );
-  const unregistered = PLATFORM_META.filter((p) => !registered.has(p.id));
-  if (unregistered.length > 0) {
-    actions.push({
-      action: 'register_platforms',
-      hint: 'Call POST /agents/me/platforms to register and receive credentials.',
-      platforms: unregistered.map((p) => ({
-        id: p.id,
-        displayName: p.displayName,
-        description: p.description,
-      })),
     });
   }
 
@@ -177,6 +165,12 @@ async function dispatch(
   { params }: { params: Promise<{ path: string[] }> },
 ): Promise<NextResponse> {
   const { path } = await params;
+
+  // Admin routes — handled before normal dispatch, excluded from route table.
+  if (path[0] === 'admin') {
+    return handleAdmin(request, path);
+  }
+
   const route = resolveRoute(request.method, path);
 
   if (!route) {
@@ -236,9 +230,112 @@ async function dispatch(
     delete wasmBody.accountId;
   }
 
-  return isPublic
-    ? dispatchPublic(request, route, wasmBody)
-    : dispatchAuthenticated(request, route, wasmBody, walletKey);
+  if (isPublic) {
+    // Profile reads become caller-aware when a wallet key is supplied — the
+    // response carries `is_following` and `my_endorsements` for that caller.
+    // Cache is skipped because the response varies per caller.
+    if (route.action === 'profile' && walletKey) {
+      return dispatchProfileWithCaller(route, wasmBody, walletKey);
+    }
+    return dispatchPublic(request, route, wasmBody);
+  }
+  return dispatchAuthenticated(request, route, wasmBody, walletKey);
+}
+
+// ---------------------------------------------------------------------------
+// Admin — hide/unhide agents. Outside the route table, excluded from openapi.
+// ---------------------------------------------------------------------------
+
+async function assertAdminAuth(
+  request: NextRequest,
+): Promise<string | NextResponse> {
+  if (!OUTLAYER_ADMIN_ACCOUNT) {
+    return errJson('NOT_FOUND', 'Not found', 404);
+  }
+  const authHeader = request.headers.get('authorization');
+  const walletKey = authHeader?.match(/^Bearer\s+(wk_[A-Za-z0-9_-]+)$/)?.[1];
+  if (!walletKey) {
+    return errJson('AUTH_REQUIRED', 'Admin endpoints require wk_ auth', 401);
+  }
+  const callerAccountId = await resolveAccountId(walletKey);
+  if (callerAccountId !== OUTLAYER_ADMIN_ACCOUNT) {
+    return errJson('AUTH_FAILED', 'Not authorized', 403);
+  }
+  return walletKey;
+}
+
+async function handleAdmin(
+  request: NextRequest,
+  path: string[],
+): Promise<NextResponse> {
+  const auth = await assertAdminAuth(request);
+  if (auth instanceof NextResponse) return auth;
+  const walletKey = auth;
+
+  // POST /api/v1/admin/hide/{accountId} — hide an agent
+  // DELETE /api/v1/admin/hide/{accountId} — unhide an agent
+  if (path[1] === 'hide' && path[2]) {
+    const targetAccountId = path[2];
+
+    if (request.method === 'POST') {
+      const wrote = await writeToFastData(walletKey, {
+        [`hidden/${targetAccountId}`]: { at: nowSecs() },
+      });
+      if (!wrote)
+        return errJson('STORAGE_ERROR', 'Failed to write to FastData', 500);
+      invalidateForMutation(invalidatesFor('hide_agent'));
+      return successJson({ action: 'hidden', account_id: targetAccountId });
+    }
+
+    if (request.method === 'DELETE') {
+      const wrote = await writeToFastData(walletKey, {
+        [`hidden/${targetAccountId}`]: null,
+      });
+      if (!wrote)
+        return errJson('STORAGE_ERROR', 'Failed to write to FastData', 500);
+      invalidateForMutation(invalidatesFor('unhide_agent'));
+      return successJson({ action: 'unhidden', account_id: targetAccountId });
+    }
+  }
+
+  return errJson('NOT_FOUND', 'Not found', 404);
+}
+
+/** Map a FastData dispatch error to an errJson response. */
+function errJsonFromFastData(result: {
+  error: string;
+  status?: number;
+}): NextResponse {
+  const status = result.status ?? 404;
+  return errJson(
+    status === 400 ? 'VALIDATION_ERROR' : 'NOT_FOUND',
+    result.error,
+    status,
+  );
+}
+
+/**
+ * Profile read enriched with caller context. Bypasses the public cache
+ * because `is_following` and `my_endorsements` vary per caller. An invalid
+ * bearer token returns 401 rather than silently downgrading — if a client
+ * sent credentials, a failure to resolve them is a bug they should see.
+ */
+async function dispatchProfileWithCaller(
+  route: ResolvedRoute,
+  wasmBody: Record<string, unknown>,
+  walletKey: string,
+): Promise<NextResponse> {
+  const callerAccountId = await resolveCallerAccountId(walletKey);
+  if (!callerAccountId) {
+    return errJson('AUTH_FAILED', 'Could not resolve account', 401);
+  }
+  const enriched = {
+    ...sanitizePublic(wasmBody),
+    caller_account_id: callerAccountId,
+  };
+  const result = await dispatchFastData(route.action, enriched);
+  if ('error' in result) return errJsonFromFastData(result);
+  return successJson(result.data);
 }
 
 async function dispatchPublic(
@@ -257,14 +354,7 @@ async function dispatchPublic(
     return NextResponse.json(cached);
   }
   const result = await dispatchFastData(route.action, sanitized);
-  if ('error' in result) {
-    const status = result.status ?? 404;
-    return errJson(
-      status === 400 ? 'VALIDATION_ERROR' : 'NOT_FOUND',
-      result.error,
-      status,
-    );
-  }
+  if ('error' in result) return errJsonFromFastData(result);
   const data = { success: true, data: result.data };
   setCache(route.action, cacheKey, data);
   return NextResponse.json(data);
@@ -294,7 +384,7 @@ async function handleAuthenticatedGet(
         {
           action: 'get_vrf_seed',
           verifiable_claim: {
-            near_account_id: claim.near_account_id,
+            account_id: claim.account_id,
             public_key: claim.public_key,
             signature: claim.signature,
             nonce: claim.nonce,
@@ -345,76 +435,9 @@ async function handleAuthenticatedGet(
     }
   }
 
-  const data = { success: true, data: fdResult.data };
-  setCache(
-    route.action,
-    makeCacheKey({ ...wasmBody, account_id: callerAccountId }),
-    data,
-  );
-  return NextResponse.json(data);
-}
-
-// ---------------------------------------------------------------------------
-// Registration — zero-write. Proves account ownership, returns onboarding.
-// The agent enters the index on first heartbeat or update_me (agent-paid).
-// ---------------------------------------------------------------------------
-
-async function handleRegistration(walletKey: string): Promise<NextResponse> {
-  // Resolve account ID via sign-message — proves the wk_ key is valid.
-  const nearAccountId = await resolveAccountId(walletKey);
-  if (!nearAccountId) {
-    return errJson(
-      'AUTH_FAILED',
-      'Could not resolve account from wallet key',
-      401,
-    );
-  }
-
-  const fundUrl = `https://outlayer.fastnear.com/wallet/fund?to=${nearAccountId}&amount=${FUND_AMOUNT_NEAR}&token=near&msg=Fund+agent+wallet+for+gas`;
-
-  return successJson({
-    near_account_id: nearAccountId,
-    funded: false,
-    next_step: 'fund_wallet',
-    fund_amount: FUND_AMOUNT_NEAR,
-    fund_token: 'NEAR',
-    fund_url: fundUrl,
-    onboarding: {
-      welcome: `Wallet confirmed for ${nearAccountId}. Fund it, then call heartbeat to join the network.`,
-      steps: [
-        {
-          action: 'fund_wallet',
-          hint: `Send ≥${FUND_AMOUNT_NEAR} NEAR to your wallet for gas. Fund URL: ${fundUrl}`,
-        },
-        {
-          action: 'heartbeat',
-          hint: 'After funding, call POST /agents/me/heartbeat to create your profile and join the network.',
-        },
-        {
-          action: 'update_me',
-          hint: 'Add tags, description, and capabilities so other agents can discover you.',
-        },
-        {
-          action: 'discover_agents',
-          hint: 'After setting tags, call GET /agents/discover for recommendations.',
-        },
-        {
-          action: 'follow',
-          hint: 'Follow agents to build your network.',
-        },
-        {
-          action: 'register_platforms',
-          hint: 'After setting up your profile, call POST /agents/me/platforms to register and receive your platform credentials.',
-        },
-      ],
-    },
-    platforms: PLATFORM_META.map((p) => ({
-      id: p.id,
-      displayName: p.displayName,
-      description: p.description,
-      hint: 'Call POST /agents/me/platforms to register and receive credentials.',
-    })),
-  });
+  // Authenticated reads are per-caller and the caller typically mutates
+  // between reads, so caching them is a net loss — don't.
+  return successJson(fdResult.data);
 }
 
 // ---------------------------------------------------------------------------
@@ -436,7 +459,7 @@ async function dispatchAuthenticated(
       resolveAccountId,
     );
     if (result.success) {
-      invalidateForMutation(route.action);
+      invalidateForMutation(result.invalidates);
 
       // Inject contextual actions after profile-writing actions.
       if (
@@ -468,7 +491,7 @@ async function dispatchAuthenticated(
   ) {
     return errJson(
       'AUTH_REQUIRED',
-      'Mutations require a wk_ custody wallet key. Bearer near: tokens are read-only. Register a wallet via POST /register to get a wk_ key.',
+      'Mutations require a wk_ custody wallet key. Bearer near: tokens are read-only.',
       401,
     );
   }
@@ -487,16 +510,10 @@ async function dispatchAuthenticated(
     return handleAuthenticatedGet(walletKey, route, wasmBody);
   }
 
-  // Platform registration.
-  if (route.action === 'register_platforms') {
-    const resp = await handleRegisterPlatforms(walletKey, wasmBody);
-    if (resp.ok) invalidateForMutation('register_platforms');
-    return resp;
-  }
-
-  // Registration (WASM).
-  if (route.action === 'register') {
-    return handleRegistration(walletKey);
+  // Passthrough writes: authenticated but don't touch FastData, so no cache
+  // invalidation. Currently only register_platforms.
+  if (PASSTHROUGH_WRITE_ACTIONS.has(route.action)) {
+    return handleRegisterPlatforms(walletKey, wasmBody);
   }
 
   // Fallback: unknown authenticated action.

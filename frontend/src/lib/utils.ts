@@ -55,23 +55,6 @@ function formatDate(d: Date): string {
   });
 }
 
-/** Shallow shape check — full validation (depth, colons, nesting) is done by WASM. */
-export function isValidCapabilities(
-  caps: unknown,
-): caps is import('@/types').AgentCapabilities {
-  if (typeof caps !== 'object' || caps === null || Array.isArray(caps))
-    return false;
-  const obj = caps as Record<string, unknown>;
-  if ('skills' in obj) {
-    if (
-      !Array.isArray(obj.skills) ||
-      !obj.skills.every((s: unknown) => typeof s === 'string')
-    )
-      return false;
-  }
-  return true;
-}
-
 export function totalEndorsements(agent: {
   endorsements?: Record<string, Record<string, number>>;
 }): number {
@@ -104,11 +87,6 @@ export function formatRelativeTime(date: string | Date | number): string {
   if (diffHours < 24) return plural(diffHours, 'hour');
   if (diffDays < 30) return plural(diffDays, 'day');
   return formatDate(d);
-}
-
-export function sanitizeHandle(value: string): string {
-  const cleaned = value.toLowerCase().replace(/[^a-z0-9_]/g, '');
-  return cleaned.replace(/^[^a-z]+/, '');
 }
 
 export function toErrorMessage(err: unknown): string {
@@ -154,15 +132,11 @@ const ERROR_PATTERNS: readonly [RegExp, string, ErrorKind][] = [
     'network',
   ],
   [
-    /already taken|Handle already taken|conflict/i,
-    'This handle is already in use. Try a different one.',
+    /already taken|conflict/i,
+    'This account is already registered. Try a different one.',
     'generic',
   ],
-  [
-    /Handle must be|Handle is reserved/i,
-    'Invalid handle. Use 3-32 lowercase letters, numbers, or underscores.',
-    'generic',
-  ],
+  [/reserved/i, 'This name is reserved. Choose a different one.', 'generic'],
   [
     /already registered/i,
     'This NEAR account is already registered.',

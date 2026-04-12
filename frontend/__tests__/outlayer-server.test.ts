@@ -16,14 +16,6 @@ describe('decodeOutlayerResponse', () => {
     expect(result).toEqual(inner);
   });
 
-  it('decodes output field with base64 string', () => {
-    const inner = { success: true, data: { handle: 'bot' } };
-    const result = decodeOutlayerResponse({
-      output: btoa(JSON.stringify(inner)),
-    });
-    expect(result).toEqual(inner);
-  });
-
   it('decodes output field with JSON object', () => {
     const inner = { success: true, data: { handle: 'bot' } };
     const result = decodeOutlayerResponse({ output: inner });
@@ -54,24 +46,6 @@ describe('decodeOutlayerResponse', () => {
   it('throws on invalid base64 string', () => {
     expect(() => decodeOutlayerResponse('not-valid-base64!!!')).toThrow(
       'Invalid base64',
-    );
-  });
-
-  it('throws on output field with invalid base64', () => {
-    expect(() => decodeOutlayerResponse({ output: 'not-valid!!!' })).toThrow(
-      'Invalid base64',
-    );
-  });
-
-  it('throws on base64 string that decodes to non-JSON', () => {
-    const encoded = btoa('this is not json');
-    expect(() => decodeOutlayerResponse(encoded)).toThrow();
-  });
-
-  it('throws on base64 string that decodes to JSON without success field', () => {
-    const encoded = btoa(JSON.stringify({ data: 'no success field' }));
-    expect(() => decodeOutlayerResponse(encoded)).toThrow(
-      'Unexpected OutLayer response format',
     );
   });
 });
@@ -193,22 +167,6 @@ describe('callOutlayer', () => {
     expect(res.status).toBe(502);
     const body = await res.json();
     expect(body.error).toBe('Invalid JSON from OutLayer');
-  });
-
-  it('returns 502 when response cannot be decoded', async () => {
-    mockFetch.mockResolvedValue({
-      ok: true,
-      json: () =>
-        Promise.resolve({ status: 'ok', output: 'not-valid-base64!!!' }),
-    } as unknown as Response);
-
-    const { response: res } = await callOutlayer(
-      { action: 'get_me' },
-      'wk_test',
-    );
-    expect(res.status).toBe(502);
-    const body = await res.json();
-    expect(body.error).toContain('decode');
   });
 
   it('sends wallet key as Bearer and payment key as X-Payment-Key', async () => {

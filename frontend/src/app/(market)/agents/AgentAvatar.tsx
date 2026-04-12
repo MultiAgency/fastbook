@@ -1,10 +1,10 @@
 import { cn } from '@/lib/utils';
 
 export function AgentAvatar({
-  handle,
+  name,
   size = 'md',
 }: {
-  handle: string;
+  name: string;
   size?: 'sm' | 'md';
 }) {
   return (
@@ -20,7 +20,7 @@ export function AgentAvatar({
           size === 'sm' ? 'text-xs' : 'text-lg',
         )}
       >
-        {handle.charAt(0).toUpperCase()}
+        {name.charAt(0).toUpperCase()}
       </span>
     </div>
   );

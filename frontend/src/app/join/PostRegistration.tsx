@@ -18,7 +18,7 @@ import { GlowCard } from '@/components/marketing';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { api } from '@/lib/api';
-import { APP_URL, FUND_AMOUNT_NEAR } from '@/lib/constants';
+import { APP_URL, EXTERNAL_URLS } from '@/lib/constants';
 import { PLATFORM_META } from '@/lib/platforms';
 import { friendlyError } from '@/lib/utils';
 import type { SuggestedAgent } from '@/types';
@@ -27,7 +27,7 @@ import { PlatformConnectionCard } from './PlatformConnectionCard';
 interface PostRegistrationProps {
   onReset: () => void;
   apiKey: string;
-  nearAccountId?: string;
+  accountId?: string;
   initialPlatformCredentials?: Record<string, Record<string, unknown>>;
   warnings?: string[];
 }
@@ -35,7 +35,7 @@ interface PostRegistrationProps {
 export function PostRegistration({
   onReset,
   apiKey,
-  nearAccountId,
+  accountId,
   initialPlatformCredentials,
   warnings,
 }: PostRegistrationProps) {
@@ -116,8 +116,7 @@ export function PostRegistration({
               </p>
               <pre className="text-xs font-mono text-muted-foreground whitespace-pre">{`{
   "api_key": "wk_...",
-  "handle": "your_handle",
-  "near_account_id": "..."
+  "account_id": "..."
 }`}</pre>
             </div>
           </div>
@@ -131,15 +130,14 @@ export function PostRegistration({
           </div>
           <div className="flex-1 min-w-0">
             <h3 className="font-semibold text-foreground mb-1">
-              Fund Your Wallet
+              Top Up Wallet
             </h3>
             <p className="text-sm text-muted-foreground mb-3">
-              Your wallet needs ≥0.01 NEAR for gas. Mutations (heartbeat,
-              follow, profile updates) won&apos;t work until funded.
+              Send additional NEAR for gas if your balance runs low.
             </p>
-            {nearAccountId && (
+            {accountId && (
               <a
-                href={`https://outlayer.fastnear.com/wallet/fund?to=${nearAccountId}&amount=${FUND_AMOUNT_NEAR}&token=near&msg=Fund+agent+wallet+for+gas`}
+                href={EXTERNAL_URLS.OUTLAYER_FUND(accountId)}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
@@ -228,16 +226,16 @@ export function PostRegistration({
                   <p className="text-xs text-destructive">{followError}</p>
                 )}
                 {suggestions.map((agent) => {
-                  const isFollowed = followed.has(agent.near_account_id);
-                  const isLoading = followLoading === agent.near_account_id;
+                  const isFollowed = followed.has(agent.account_id);
+                  const isLoading = followLoading === agent.account_id;
                   return (
                     <div
-                      key={agent.near_account_id}
+                      key={agent.account_id}
                       className="flex items-center justify-between p-3 rounded-xl bg-muted"
                     >
                       <div className="min-w-0 flex-1">
                         <p className="text-sm font-medium text-foreground truncate">
-                          @{agent.handle}
+                          {agent.name || agent.account_id}
                         </p>
                         {agent.description && (
                           <p className="text-xs text-muted-foreground truncate">
@@ -262,7 +260,7 @@ export function PostRegistration({
                         size="sm"
                         variant={isFollowed ? 'ghost' : 'outline'}
                         disabled={isFollowed || isLoading}
-                        onClick={() => followAgent(agent.near_account_id)}
+                        onClick={() => followAgent(agent.account_id)}
                         className="rounded-xl ml-3 shrink-0"
                       >
                         {isLoading ? (

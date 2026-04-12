@@ -8,9 +8,10 @@ import {
 import { fetchWithTimeout } from '@/lib/fetch';
 import { PUBLIC_ACTIONS, queryFieldsForAction } from '@/lib/routes';
 import { wasmCodeToStatus } from '@/lib/utils';
+import type { VerifiableClaim } from '@/types';
 import { errJson } from './api-response';
 
-const COMMON_FIELDS = ['action', 'handle', 'account_id'];
+const COMMON_FIELDS = ['action', 'account_id'];
 
 const PUBLIC_ACTION_FIELDS: Record<string, readonly string[]> = {};
 for (const action of PUBLIC_ACTIONS) {
@@ -41,13 +42,11 @@ function isWasmShape(v: unknown): v is WasmResponse {
   );
 }
 
-const MAX_RESPONSE_BYTES = LIMITS.MAX_RESPONSE_BYTES;
-
 export function decodeOutlayerResponse<T = unknown>(
   result: unknown,
 ): WasmResponse<T> {
   if (typeof result === 'string') {
-    if (result.length > MAX_RESPONSE_BYTES) {
+    if (result.length > LIMITS.MAX_RESPONSE_BYTES) {
       throw new Error('OutLayer response too large');
     }
     let decoded: string;
@@ -73,7 +72,10 @@ export function decodeOutlayerResponse<T = unknown>(
   const r = result as Record<string, unknown>;
 
   if (r.output) {
-    if (typeof r.output === 'string' && r.output.length > MAX_RESPONSE_BYTES) {
+    if (
+      typeof r.output === 'string' &&
+      r.output.length > LIMITS.MAX_RESPONSE_BYTES
+    ) {
       throw new Error('OutLayer output field too large');
     }
     let decoded: unknown;
@@ -116,14 +118,6 @@ export function getOutlayerPaymentKey(): string {
 // First request for a new wk_ key costs 2 sign calls (resolve + sign).
 // Subsequent requests with a warm account cache cost 1 sign call.
 // ---------------------------------------------------------------------------
-
-interface MintedClaim {
-  near_account_id: string;
-  public_key: string;
-  signature: string;
-  nonce: string;
-  message: string;
-}
 
 const accountCache = new Map<string, string>();
 const SIGN_TIMEOUT_MS = 5_000;
@@ -193,15 +187,14 @@ export async function resolveAccountId(
   return result.account_id;
 }
 
-// Each WASM call needs a fresh nonce — NEP-413 nonces are single-use
-// (consumed via set_if_absent in auth.rs).  Caching claims would cause
-// NONCE_REPLAY errors on the second call with the same action type.
-// The accountCache above is safe to keep: account IDs are deterministic.
+// Each call needs a fresh nonce — NEP-413 nonces are single-use.
+// Caching claims would cause NONCE_REPLAY errors on the second call.
+// The accountCache above is safe: account IDs are deterministic.
 // Cost: one sign-message call per request (~network RTT to OutLayer API).
 export async function mintClaimForWalletKey(
   walletKey: string,
   action: string,
-): Promise<MintedClaim | null> {
+): Promise<VerifiableClaim | null> {
   const accountId = await resolveAccountId(walletKey);
   if (!accountId) return null;
 
@@ -217,7 +210,7 @@ export async function mintClaimForWalletKey(
   if (!result) return null;
 
   return {
-    near_account_id: accountId,
+    account_id: accountId,
     public_key: result.public_key,
     signature: result.signature,
     nonce: result.nonce,

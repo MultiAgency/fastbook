@@ -9,11 +9,12 @@
  *   graph/follow/{targetAccountId}              → {at, reason?}
  *   endorsing/{targetAccountId}/{ns}/{value}    → {at, reason?}
  *   profile                                     → full Agent record
- *   tag/{tag}                                   → {score}
+ *   tag/{tag}                                   → true (existence index)
  */
 
 import type { Agent } from '@/types';
 import {
+  EXTERNAL_URLS,
   FASTDATA_NAMESPACE,
   FUND_AMOUNT_NEAR,
   OUTLAYER_API_URL,
@@ -34,6 +35,7 @@ import {
   entryAt,
   extractCapabilityPairs,
   filterAgents,
+  liveNetworkCounts,
   nowSecs,
   profileCompleteness,
   profileSummary,
@@ -46,33 +48,25 @@ import {
 } from './rate-limit';
 import {
   type ValidationError,
-  validateAvatarUrl,
   validateCapabilities,
   validateDescription,
+  validateImageUrl,
   validateName,
   validateReason,
   validateTags,
 } from './validate';
 
 // ---------------------------------------------------------------------------
-// Fund URL helper
-// ---------------------------------------------------------------------------
-
-function walletUnfundedMeta(accountId: string): Record<string, unknown> {
-  return {
-    wallet_address: accountId,
-    fund_amount: FUND_AMOUNT_NEAR,
-    fund_token: 'NEAR',
-    fund_url: `https://outlayer.fastnear.com/wallet/fund?to=${accountId}&amount=${FUND_AMOUNT_NEAR}&token=near&msg=Fund+agent+wallet+for+gas`,
-  };
-}
-
-// ---------------------------------------------------------------------------
 // Response helpers
 // ---------------------------------------------------------------------------
 
 export type WriteResult =
-  | { success: true; data: Record<string, unknown> }
+  | {
+      success: true;
+      data: Record<string, unknown>;
+      /** Cache action types this mutation invalidates. Null = clear all. */
+      invalidates: readonly string[] | null;
+    }
   | {
       success: false;
       error: string;
@@ -83,7 +77,7 @@ export type WriteResult =
     };
 
 function ok(data: Record<string, unknown>): WriteResult {
-  return { success: true, data };
+  return { success: true, data, invalidates: [] };
 }
 
 function fail(code: string, message: string, status = 400): WriteResult {
@@ -104,11 +98,60 @@ function validationFail(e: ValidationError): WriteResult {
   return fail(e.code, e.message);
 }
 
+function walletFundingMeta(accountId: string): Record<string, unknown> {
+  return {
+    wallet_address: accountId,
+    fund_amount: FUND_AMOUNT_NEAR,
+    fund_token: 'NEAR',
+    fund_url: EXTERNAL_URLS.OUTLAYER_FUND(accountId),
+  };
+}
+
+function insufficientBalance(accountId: string): WriteResult {
+  return {
+    success: false,
+    error: `Fund your wallet with ≥${FUND_AMOUNT_NEAR} NEAR, then retry.`,
+    code: 'INSUFFICIENT_BALANCE',
+    status: 402,
+    meta: walletFundingMeta(accountId),
+  };
+}
+
+/**
+ * Per-target guard shared by the four graph handlers. Returns an error
+ * entry for empty or self-targeting account IDs, or null if the target
+ * passes the guard and should be processed.
+ */
+function targetGuardError(
+  targetAccountId: string,
+  callerAccountId: string,
+  selfCode: string,
+  verb: string,
+): Record<string, unknown> | null {
+  if (!targetAccountId.trim()) {
+    return {
+      account_id: targetAccountId,
+      action: 'error',
+      code: 'VALIDATION_ERROR',
+      error: 'empty account_id',
+    };
+  }
+  if (targetAccountId === callerAccountId) {
+    return {
+      account_id: targetAccountId,
+      action: 'error',
+      code: selfCode,
+      error: `cannot ${verb} yourself`,
+    };
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // FastData KV write (awaitable — primary write path, not fire-and-forget)
 // ---------------------------------------------------------------------------
 
-async function writeToFastData(
+export async function writeToFastData(
   walletKey: string,
   entries: Record<string, unknown>,
 ): Promise<boolean> {
@@ -185,15 +228,13 @@ async function resolveTargetAgent(
 function defaultAgent(accountId: string): Agent {
   const ts = nowSecs();
   return {
-    handle: accountId,
     name: null,
     description: '',
-    avatar_url: null,
+    image: null,
     tags: [],
     capabilities: {},
     endorsements: {},
-    platforms: [],
-    near_account_id: accountId,
+    account_id: accountId,
     follower_count: 0,
     following_count: 0,
     created_at: ts,
@@ -218,15 +259,7 @@ async function resolveCallerOrInit(
   // First-write: create default profile. The write itself checks funding.
   const agent = defaultAgent(accountId);
   const wrote = await writeToFastData(walletKey, agentEntries(agent));
-  if (!wrote) {
-    return {
-      success: false,
-      error: `Fund your wallet with ≥${FUND_AMOUNT_NEAR} NEAR, then retry.`,
-      code: 'WALLET_UNFUNDED',
-      status: 402,
-      meta: walletUnfundedMeta(accountId),
-    };
-  }
+  if (!wrote) return insufficientBalance(accountId);
 
   return { accountId, agent };
 }
@@ -235,84 +268,24 @@ async function resolveCallerOrInit(
 // Follow / Unfollow
 // ---------------------------------------------------------------------------
 
-export async function handleFollow(
-  walletKey: string,
-  targetAccountId: string,
-  reason: string | undefined,
-  resolveAccountId: (wk: string) => Promise<string | null>,
-): Promise<WriteResult> {
-  // Validate
-  if (reason != null) {
-    const e = validateReason(reason);
-    if (e) return validationFail(e);
-  }
-
-  // Resolve caller
-  const caller = await resolveCaller(walletKey, resolveAccountId);
-  if ('success' in caller) return caller;
-
-  // Self-follow
-  if (caller.accountId === targetAccountId)
-    return fail('SELF_FOLLOW', 'Cannot follow yourself');
-
-  // Rate limit
-  const rl = checkRateLimit('follow', caller.accountId);
-  if (!rl.ok) return rateLimited(rl.retryAfter);
-
-  // Target must exist
-  const targetAgent = (await kvGetAgent(
-    targetAccountId,
-    'profile',
-  )) as Agent | null;
-  if (!targetAgent) return fail('NOT_FOUND', 'Agent not found', 404);
-
-  // Idempotency: check if already following
-  const existing = await kvGetAgent(
-    caller.accountId,
-    `graph/follow/${targetAccountId}`,
-  );
-  if (existing) {
-    return ok({
-      action: 'already_following',
-      your_network: {
-        following_count: caller.agent.following_count,
-        follower_count: caller.agent.follower_count,
-      },
-    });
-  }
-
-  // Write
-  const ts = nowSecs();
-  const entries: Record<string, unknown> = {
-    [`graph/follow/${targetAccountId}`]: { at: ts, reason: reason ?? null },
-  };
-
-  const wrote = await writeToFastData(walletKey, entries);
-  if (!wrote) return fail('STORAGE_ERROR', 'Failed to write to FastData', 500);
-
-  incrementRateLimit('follow', caller.accountId);
-
-  return ok({
-    action: 'followed',
-    followed: { account_id: targetAccountId },
-    your_network: {
-      following_count: caller.agent.following_count + 1,
-      follower_count: caller.agent.follower_count,
-    },
-  });
-}
-
 const MAX_BATCH_SIZE = 20;
 
-async function handleMultiFollow(
+export async function handleFollow(
   walletKey: string,
-  targets: string[],
+  body: Record<string, unknown>,
   resolveAccountId: (wk: string) => Promise<string | null>,
 ): Promise<WriteResult> {
+  const targets = resolveTargets(body);
+  if (!Array.isArray(targets)) return targets;
   if (targets.length === 0)
     return fail('VALIDATION_ERROR', 'Targets array must not be empty');
   if (targets.length > MAX_BATCH_SIZE)
     return fail('VALIDATION_ERROR', `Too many targets (max ${MAX_BATCH_SIZE})`);
+  const reason = body.reason as string | undefined;
+  if (reason != null) {
+    const e = validateReason(reason);
+    if (e) return validationFail(e);
+  }
 
   const caller = await resolveCaller(walletKey, resolveAccountId);
   if ('success' in caller) return caller;
@@ -325,20 +298,14 @@ async function handleMultiFollow(
   let followedCount = 0;
 
   for (const targetAccountId of targets) {
-    if (!targetAccountId.trim()) {
-      results.push({
-        account_id: targetAccountId,
-        action: 'error',
-        error: 'empty account_id',
-      });
-      continue;
-    }
-    if (targetAccountId === caller.accountId) {
-      results.push({
-        account_id: targetAccountId,
-        action: 'error',
-        error: 'cannot follow yourself',
-      });
+    const guard = targetGuardError(
+      targetAccountId,
+      caller.accountId,
+      'SELF_FOLLOW',
+      'follow',
+    );
+    if (guard) {
+      results.push(guard);
       continue;
     }
 
@@ -362,6 +329,7 @@ async function handleMultiFollow(
       results.push({
         account_id: targetAccountId,
         action: 'error',
+        code: 'NOT_FOUND',
         error: 'agent not found',
       });
       continue;
@@ -371,19 +339,21 @@ async function handleMultiFollow(
       results.push({
         account_id: targetAccountId,
         action: 'error',
+        code: 'RATE_LIMITED',
         error: 'rate limit reached within batch',
       });
       continue;
     }
 
     const entries: Record<string, unknown> = {
-      [`graph/follow/${targetAccountId}`]: { at: ts },
+      [`graph/follow/${targetAccountId}`]: { at: ts, reason: reason ?? null },
     };
     const wrote = await writeToFastData(walletKey, entries);
     if (!wrote) {
       results.push({
         account_id: targetAccountId,
         action: 'error',
+        code: 'STORAGE_ERROR',
         error: 'storage error',
       });
       continue;
@@ -394,60 +364,93 @@ async function handleMultiFollow(
     results.push({ account_id: targetAccountId, action: 'followed' });
   }
 
+  const counts = await liveNetworkCounts(caller.accountId);
   return ok({
-    action: 'batch_followed',
     results,
     your_network: {
-      following_count: caller.agent.following_count + followedCount,
-      follower_count: caller.agent.follower_count,
+      following_count: counts.following_count + followedCount,
+      follower_count: counts.follower_count,
     },
   });
 }
 
 export async function handleUnfollow(
   walletKey: string,
-  targetAccountId: string,
+  body: Record<string, unknown>,
   resolveAccountId: (wk: string) => Promise<string | null>,
 ): Promise<WriteResult> {
+  const targets = resolveTargets(body);
+  if (!Array.isArray(targets)) return targets;
+  if (targets.length === 0)
+    return fail('VALIDATION_ERROR', 'Targets array must not be empty');
+  if (targets.length > MAX_BATCH_SIZE)
+    return fail('VALIDATION_ERROR', `Too many targets (max ${MAX_BATCH_SIZE})`);
+
   const caller = await resolveCaller(walletKey, resolveAccountId);
   if ('success' in caller) return caller;
 
-  if (caller.accountId === targetAccountId)
-    return fail('SELF_UNFOLLOW', 'Cannot unfollow yourself');
+  const budget = checkRateLimitBudget('unfollow', caller.accountId);
+  if (!budget.ok) return rateLimited(budget.retryAfter);
 
-  const rl = checkRateLimit('unfollow', caller.accountId);
-  if (!rl.ok) return rateLimited(rl.retryAfter);
+  const results: Record<string, unknown>[] = [];
+  let unfollowedCount = 0;
 
-  // Check if actually following
-  const existing = await kvGetAgent(
-    caller.accountId,
-    `graph/follow/${targetAccountId}`,
-  );
-  if (!existing) {
-    return ok({
-      action: 'not_following',
-      your_network: {
-        following_count: caller.agent.following_count,
-        follower_count: caller.agent.follower_count,
-      },
-    });
+  for (const targetAccountId of targets) {
+    const guard = targetGuardError(
+      targetAccountId,
+      caller.accountId,
+      'SELF_UNFOLLOW',
+      'unfollow',
+    );
+    if (guard) {
+      results.push(guard);
+      continue;
+    }
+
+    const existing = await kvGetAgent(
+      caller.accountId,
+      `graph/follow/${targetAccountId}`,
+    );
+    if (!existing) {
+      results.push({ account_id: targetAccountId, action: 'not_following' });
+      continue;
+    }
+
+    if (unfollowedCount >= budget.remaining) {
+      results.push({
+        account_id: targetAccountId,
+        action: 'error',
+        code: 'RATE_LIMITED',
+        error: 'rate limit reached within batch',
+      });
+      continue;
+    }
+
+    const entries: Record<string, unknown> = {
+      [`graph/follow/${targetAccountId}`]: null,
+    };
+    const wrote = await writeToFastData(walletKey, entries);
+    if (!wrote) {
+      results.push({
+        account_id: targetAccountId,
+        action: 'error',
+        code: 'STORAGE_ERROR',
+        error: 'storage error',
+      });
+      continue;
+    }
+
+    incrementRateLimit('unfollow', caller.accountId);
+    unfollowedCount++;
+    results.push({ account_id: targetAccountId, action: 'unfollowed' });
   }
 
-  // Delete by writing null
-  const entries: Record<string, unknown> = {
-    [`graph/follow/${targetAccountId}`]: null,
-  };
-
-  const wrote = await writeToFastData(walletKey, entries);
-  if (!wrote) return fail('STORAGE_ERROR', 'Failed to write to FastData', 500);
-
-  incrementRateLimit('unfollow', caller.accountId);
-
+  const counts = await liveNetworkCounts(caller.accountId);
   return ok({
-    action: 'unfollowed',
+    results,
     your_network: {
-      following_count: Math.max(0, caller.agent.following_count - 1),
-      follower_count: caller.agent.follower_count,
+      following_count: Math.max(0, counts.following_count - unfollowedCount),
+      follower_count: counts.follower_count,
     },
   });
 }
@@ -483,158 +486,20 @@ function resolveTagCore(val: string, endorsable: Set<string>): TagResolution {
   return { kind: 'not_found' };
 }
 
-/** Strict resolution: returns WriteResult error on failure. */
-function resolveTag(
-  val: string,
-  targetAccountId: string,
-  endorsable: Set<string>,
-): { ns: string; value: string } | WriteResult {
-  const r = resolveTagCore(val, endorsable);
-  if (r.kind === 'resolved') return { ns: r.ns, value: r.value };
-  if (r.kind === 'ambiguous') {
-    return fail(
-      'VALIDATION_ERROR',
-      `'${val}' is ambiguous — found in: ${r.namespaces.join(', ')}. Use ns:value prefix.`,
-    );
-  }
-  return fail(
-    'VALIDATION_ERROR',
-    `Agent ${targetAccountId} does not have '${val}'`,
-  );
-}
-
 export async function handleEndorse(
   walletKey: string,
-  targetAccountId: string,
-  tags: string[] | undefined,
-  capabilities: Record<string, unknown> | undefined,
-  reason: string | undefined,
+  body: Record<string, unknown>,
   resolveAccountId: (wk: string) => Promise<string | null>,
 ): Promise<WriteResult> {
-  if (reason != null) {
-    const e = validateReason(reason);
-    if (e) return validationFail(e);
-  }
-  if ((!tags || tags.length === 0) && !capabilities) {
-    return fail('VALIDATION_ERROR', 'Tags or capabilities are required');
-  }
-
-  const caller = await resolveCaller(walletKey, resolveAccountId);
-  if ('success' in caller) return caller;
-
-  if (caller.accountId === targetAccountId)
-    return fail('SELF_ENDORSE', 'Cannot endorse yourself');
-
-  const rl = checkRateLimit('endorse', caller.accountId);
-  if (!rl.ok) return rateLimited(rl.retryAfter);
-
-  // Load target profile
-  const targetResult = await resolveTargetAgent(targetAccountId);
-  if ('success' in targetResult) return targetResult;
-  const { agent: targetAgent } = targetResult;
-
-  const endorsable = collectEndorsable(targetAgent);
-
-  // Resolve requested items
-  const resolved: { ns: string; value: string }[] = [];
-  if (tags) {
-    for (const tag of tags) {
-      const r = resolveTag(tag.toLowerCase(), targetAccountId, endorsable);
-      if ('success' in r) return r;
-      resolved.push(r);
-    }
-  }
-  if (capabilities) {
-    for (const [ns, val] of extractCapabilityPairs(capabilities)) {
-      if (!endorsable.has(`${ns}:${val}`)) {
-        return fail(
-          'VALIDATION_ERROR',
-          `Agent ${targetAccountId} does not have ${ns} '${val}'`,
-        );
-      }
-      resolved.push({ ns, value: val });
-    }
-  }
-  if (resolved.length === 0) {
-    return fail('VALIDATION_ERROR', 'Tags or capabilities are required');
-  }
-
-  // Batch idempotency check + build write entries
-  const ts = nowSecs();
-  const ekeys = resolved.map(({ ns, value }) =>
-    endorsementKey(targetAccountId, ns, value),
-  );
-  const existingValues = await kvMultiAgent(
-    ekeys.map((key) => ({ accountId: caller.accountId, key })),
-  );
-
-  const entries: Record<string, unknown> = {};
-  const endorsed: Record<string, string[]> = {};
-  const alreadyEndorsed: Record<string, string[]> = {};
-
-  for (let i = 0; i < resolved.length; i++) {
-    const { ns, value } = resolved[i]!;
-    if (existingValues[i]) {
-      if (!alreadyEndorsed[ns]) alreadyEndorsed[ns] = [];
-      alreadyEndorsed[ns].push(value);
-    } else {
-      entries[ekeys[i]!] = { at: ts, reason: reason ?? null };
-      if (!endorsed[ns]) endorsed[ns] = [];
-      endorsed[ns].push(value);
-    }
-  }
-
-  if (Object.keys(endorsed).length === 0) {
-    return ok({
-      action: 'endorsed',
-      account_id: targetAccountId,
-      endorsed: {},
-      already_endorsed: alreadyEndorsed,
-      agent: targetAgent,
-    });
-  }
-
-  const wrote = await writeToFastData(walletKey, entries);
-  if (!wrote) return fail('STORAGE_ERROR', 'Failed to write to FastData', 500);
-
-  incrementRateLimit('endorse', caller.accountId);
-
-  return ok({
-    action: 'endorsed',
-    account_id: targetAccountId,
-    endorsed,
-    already_endorsed: alreadyEndorsed,
-    agent: targetAgent,
-  });
-}
-
-/** Soft tag resolution for multi-target: collects skipped instead of failing. */
-function resolveTagSoft(
-  val: string,
-  endorsable: Set<string>,
-): { ns: string; value: string } | { skipped: Record<string, unknown> } {
-  const r = resolveTagCore(val, endorsable);
-  if (r.kind === 'resolved') return { ns: r.ns, value: r.value };
-  return {
-    skipped: {
-      value: val,
-      reason: r.kind === 'ambiguous' ? 'ambiguous' : 'not_found',
-    },
-  };
-}
-
-async function handleMultiEndorse(
-  walletKey: string,
-  targets: string[],
-  tags: string[] | undefined,
-  capabilities: Record<string, unknown> | undefined,
-  reason: string | undefined,
-  resolveAccountId: (wk: string) => Promise<string | null>,
-): Promise<WriteResult> {
+  const targets = resolveTargets(body);
+  if (!Array.isArray(targets)) return targets;
   if (targets.length === 0)
     return fail('VALIDATION_ERROR', 'Targets array must not be empty');
   if (targets.length > MAX_BATCH_SIZE)
     return fail('VALIDATION_ERROR', `Too many targets (max ${MAX_BATCH_SIZE})`);
+  const tags = body.tags as string[] | undefined;
+  const capabilities = body.capabilities as Record<string, unknown> | undefined;
+  const reason = body.reason as string | undefined;
   if ((!tags || tags.length === 0) && !capabilities)
     return fail('VALIDATION_ERROR', 'Tags or capabilities are required');
   if (reason != null) {
@@ -653,16 +518,14 @@ async function handleMultiEndorse(
   let endorsedCount = 0;
 
   for (const targetAccountId of targets) {
-    if (!targetAccountId.trim() || targetAccountId === caller.accountId) {
-      const reason_ =
-        targetAccountId === caller.accountId
-          ? 'cannot endorse yourself'
-          : 'empty account_id';
-      results.push({
-        account_id: targetAccountId,
-        action: 'error',
-        error: reason_,
-      });
+    const guard = targetGuardError(
+      targetAccountId,
+      caller.accountId,
+      'SELF_ENDORSE',
+      'endorse',
+    );
+    if (guard) {
+      results.push(guard);
       continue;
     }
 
@@ -671,6 +534,7 @@ async function handleMultiEndorse(
       results.push({
         account_id: targetAccountId,
         action: 'error',
+        code: 'NOT_FOUND',
         error: 'agent not found',
       });
       continue;
@@ -681,6 +545,7 @@ async function handleMultiEndorse(
       results.push({
         account_id: targetAccountId,
         action: 'error',
+        code: 'RATE_LIMITED',
         error: 'rate limit reached within batch',
       });
       continue;
@@ -692,9 +557,13 @@ async function handleMultiEndorse(
 
     if (tags) {
       for (const tag of tags) {
-        const r = resolveTagSoft(tag.toLowerCase(), endorsable);
-        if ('ns' in r) resolved.push(r);
-        else skipped.push(r.skipped);
+        const r = resolveTagCore(tag.toLowerCase(), endorsable);
+        if (r.kind === 'resolved') resolved.push({ ns: r.ns, value: r.value });
+        else
+          skipped.push({
+            value: tag.toLowerCase(),
+            reason: r.kind === 'ambiguous' ? 'ambiguous' : 'not_found',
+          });
       }
     }
     if (capabilities) {
@@ -720,6 +589,7 @@ async function handleMultiEndorse(
       results.push({
         account_id: targetAccountId,
         action: 'error',
+        code: 'VALIDATION_ERROR',
         error: 'no endorsable items match',
         requested,
         available,
@@ -737,10 +607,14 @@ async function handleMultiEndorse(
 
     const entries: Record<string, unknown> = {};
     const endorsed: Record<string, string[]> = {};
+    const alreadyEndorsed: Record<string, string[]> = {};
 
     for (let i = 0; i < resolved.length; i++) {
       const { ns, value } = resolved[i]!;
-      if (!existingValues[i]) {
+      if (existingValues[i]) {
+        if (!alreadyEndorsed[ns]) alreadyEndorsed[ns] = [];
+        alreadyEndorsed[ns].push(value);
+      } else {
         entries[ekeys[i]!] = { at: ts, reason: reason ?? null };
         if (!endorsed[ns]) endorsed[ns] = [];
         endorsed[ns].push(value);
@@ -753,6 +627,7 @@ async function handleMultiEndorse(
         results.push({
           account_id: targetAccountId,
           action: 'error',
+          code: 'STORAGE_ERROR',
           error: 'storage error',
         });
         continue;
@@ -766,88 +641,125 @@ async function handleMultiEndorse(
       action: 'endorsed',
       endorsed,
     };
+    if (Object.keys(alreadyEndorsed).length > 0)
+      result.already_endorsed = alreadyEndorsed;
     if (skipped.length > 0) result.skipped = skipped;
     results.push(result);
   }
 
-  return ok({ action: 'batch_endorsed', results });
+  return ok({ results });
 }
 
 export async function handleUnendorse(
   walletKey: string,
-  targetAccountId: string,
-  tags: string[] | undefined,
-  capabilities: Record<string, unknown> | undefined,
+  body: Record<string, unknown>,
   resolveAccountId: (wk: string) => Promise<string | null>,
 ): Promise<WriteResult> {
-  if ((!tags || tags.length === 0) && !capabilities) {
+  const targets = resolveTargets(body);
+  if (!Array.isArray(targets)) return targets;
+  if (targets.length === 0)
+    return fail('VALIDATION_ERROR', 'Targets array must not be empty');
+  if (targets.length > MAX_BATCH_SIZE)
+    return fail('VALIDATION_ERROR', `Too many targets (max ${MAX_BATCH_SIZE})`);
+  const tags = body.tags as string[] | undefined;
+  const capabilities = body.capabilities as Record<string, unknown> | undefined;
+  if ((!tags || tags.length === 0) && !capabilities)
     return fail('VALIDATION_ERROR', 'Tags or capabilities are required');
-  }
 
   const caller = await resolveCaller(walletKey, resolveAccountId);
   if ('success' in caller) return caller;
 
-  if (caller.accountId === targetAccountId)
-    return fail('SELF_UNENDORSE', 'Cannot unendorse yourself');
+  const budget = checkRateLimitBudget('unendorse', caller.accountId);
+  if (!budget.ok) return rateLimited(budget.retryAfter);
 
-  const rl = checkRateLimit('unendorse', caller.accountId);
-  if (!rl.ok) return rateLimited(rl.retryAfter);
+  const results: Record<string, unknown>[] = [];
+  let unendorsedCount = 0;
 
-  const targetResult = await resolveTargetAgent(targetAccountId);
-  if ('success' in targetResult) return targetResult;
-  const { agent: targetAgent } = targetResult;
-
-  const endorsable = collectEndorsable(targetAgent);
-
-  // Resolve and check which ones exist
-  const resolved: { ns: string; value: string }[] = [];
-  if (tags) {
-    for (const tag of tags) {
-      const r = resolveTag(tag.toLowerCase(), targetAccountId, endorsable);
-      if ('success' in r) return r;
-      resolved.push(r);
+  for (const targetAccountId of targets) {
+    const guard = targetGuardError(
+      targetAccountId,
+      caller.accountId,
+      'SELF_UNENDORSE',
+      'unendorse',
+    );
+    if (guard) {
+      results.push(guard);
+      continue;
     }
-  }
-  if (capabilities) {
-    for (const [ns, val] of extractCapabilityPairs(capabilities)) {
-      if (endorsable.has(`${ns}:${val}`)) {
-        resolved.push({ ns, value: val });
+
+    if (unendorsedCount >= budget.remaining) {
+      results.push({
+        account_id: targetAccountId,
+        action: 'error',
+        code: 'RATE_LIMITED',
+        error: 'rate limit reached within batch',
+      });
+      continue;
+    }
+
+    // Scan the caller's actual endorsement keys for this target. This avoids
+    // gating on the target's current profile — if the target removed a tag or
+    // capability after being endorsed, the caller can still retract.
+    const prefix = endorsePrefix(targetAccountId);
+    const existingKeys = await kvListAgent(caller.accountId, prefix);
+
+    // Build a lookup: "ns/value" → full key
+    const keyMap = new Map<string, string>();
+    for (const e of existingKeys) {
+      const suffix = e.key.startsWith(prefix)
+        ? e.key.slice(prefix.length)
+        : e.key;
+      keyMap.set(suffix, e.key);
+    }
+
+    const entries: Record<string, unknown> = {};
+    const removed: Record<string, string[]> = {};
+
+    if (tags) {
+      for (const tag of tags) {
+        const lower = tag.toLowerCase();
+        const suffix = `tags/${lower}`;
+        if (keyMap.has(suffix)) {
+          entries[keyMap.get(suffix)!] = null;
+          if (!removed.tags) removed.tags = [];
+          removed.tags.push(lower);
+        }
       }
     }
-  }
-
-  const ekeys = resolved.map(({ ns, value }) =>
-    endorsementKey(targetAccountId, ns, value),
-  );
-  const existingValues = await kvMultiAgent(
-    ekeys.map((key) => ({ accountId: caller.accountId, key })),
-  );
-
-  const entries: Record<string, unknown> = {};
-  const removed: Record<string, string[]> = {};
-
-  for (let i = 0; i < resolved.length; i++) {
-    const { ns, value } = resolved[i]!;
-    if (existingValues[i]) {
-      entries[ekeys[i]!] = null;
-      if (!removed[ns]) removed[ns] = [];
-      removed[ns].push(value);
+    if (capabilities) {
+      for (const [ns, val] of extractCapabilityPairs(capabilities)) {
+        const suffix = `${ns}/${val}`;
+        if (keyMap.has(suffix)) {
+          entries[keyMap.get(suffix)!] = null;
+          if (!removed[ns]) removed[ns] = [];
+          removed[ns].push(val);
+        }
+      }
     }
+
+    if (Object.keys(removed).length > 0) {
+      const wrote = await writeToFastData(walletKey, entries);
+      if (!wrote) {
+        results.push({
+          account_id: targetAccountId,
+          action: 'error',
+          code: 'STORAGE_ERROR',
+          error: 'storage error',
+        });
+        continue;
+      }
+      incrementRateLimit('unendorse', caller.accountId);
+      unendorsedCount++;
+    }
+
+    results.push({
+      account_id: targetAccountId,
+      action: 'unendorsed',
+      removed,
+    });
   }
 
-  if (Object.keys(removed).length > 0) {
-    const wrote = await writeToFastData(walletKey, entries);
-    if (!wrote)
-      return fail('STORAGE_ERROR', 'Failed to write to FastData', 500);
-    incrementRateLimit('unendorse', caller.accountId);
-  }
-
-  return ok({
-    action: 'unendorsed',
-    account_id: targetAccountId,
-    removed,
-    agent: targetAgent,
-  });
+  return ok({ results });
 }
 
 // ---------------------------------------------------------------------------
@@ -885,13 +797,13 @@ export async function handleUpdateMe(
     agent.description = body.description;
     changed = true;
   }
-  if ('avatar_url' in body) {
-    const url = body.avatar_url as string | null;
+  if ('image' in body) {
+    const url = body.image as string | null;
     if (url != null) {
-      const e = validateAvatarUrl(url);
+      const e = validateImageUrl(url);
       if (e) return validationFail(e);
     }
-    agent.avatar_url = url;
+    agent.image = url;
     changed = true;
   }
   if (Array.isArray(body.tags)) {
@@ -910,7 +822,7 @@ export async function handleUpdateMe(
   if (!changed) {
     return fail(
       'VALIDATION_ERROR',
-      'No valid fields to update (supported: name, description, avatar_url, tags, capabilities)',
+      'No valid fields to update (supported: name, description, image, tags, capabilities)',
     );
   }
 
@@ -1012,17 +924,17 @@ export async function handleHeartbeat(
 }
 
 // ---------------------------------------------------------------------------
-// Deregister
+// Delist Me
 // ---------------------------------------------------------------------------
 
-export async function handleDeregister(
+export async function handleDelistMe(
   walletKey: string,
   resolveAccountId: (wk: string) => Promise<string | null>,
 ): Promise<WriteResult> {
   const caller = await resolveCaller(walletKey, resolveAccountId);
   if ('success' in caller) return caller;
 
-  const rl = checkRateLimit('deregister', caller.accountId);
+  const rl = checkRateLimit('delist_me', caller.accountId);
   if (!rl.ok) return rateLimited(rl.retryAfter);
 
   // Null-write all agent keys
@@ -1040,14 +952,14 @@ export async function handleDeregister(
     entries[`cap/${ns}/${val}`] = null;
   }
 
-  // Null-write follow edges
-  const followingEntries = await kvListAgent(caller.accountId, 'graph/follow/');
+  // Null-write follow + endorsement edges
+  const [followingEntries, endorsingEntries] = await Promise.all([
+    kvListAgent(caller.accountId, 'graph/follow/'),
+    kvListAgent(caller.accountId, 'endorsing/'),
+  ]);
   for (const e of followingEntries) {
     entries[e.key] = null;
   }
-
-  // Null-write endorsement edges
-  const endorsingEntries = await kvListAgent(caller.accountId, 'endorsing/');
   for (const e of endorsingEntries) {
     entries[e.key] = null;
   }
@@ -1055,17 +967,115 @@ export async function handleDeregister(
   const wrote = await writeToFastData(walletKey, entries);
   if (!wrote) return fail('STORAGE_ERROR', 'Failed to write to FastData', 500);
 
-  incrementRateLimit('deregister', caller.accountId);
+  incrementRateLimit('delist_me', caller.accountId);
 
   return ok({
-    action: 'deregistered',
+    action: 'delisted',
     account_id: caller.accountId,
   });
 }
 
 // ---------------------------------------------------------------------------
+// Invalidation map — co-located with mutations so new actions can't forget it.
+// Unmapped actions invalidate all cached action types (safe default).
+// ---------------------------------------------------------------------------
+
+// Admin hide/unhide share the same blast radius — every cached read that
+// filters hidden agents, plus the self-cached hidden set itself.
+const HIDDEN_STATE_INVALIDATES = [
+  'hidden',
+  'list_agents',
+  'profile',
+  'followers',
+  'following',
+  'endorsers',
+  'filter_endorsers',
+  'edges',
+];
+
+const INVALIDATION_MAP: Record<string, readonly string[]> = {
+  update_me: [
+    'list_agents',
+    'list_tags',
+    'list_capabilities',
+    'profile',
+    'followers',
+    'following',
+    'edges',
+    'endorsers',
+    'filter_endorsers',
+  ],
+  follow: [
+    'list_agents',
+    'profile',
+    'followers',
+    'following',
+    'edges',
+    'follower_counts',
+  ],
+  unfollow: [
+    'list_agents',
+    'profile',
+    'followers',
+    'following',
+    'edges',
+    'follower_counts',
+  ],
+  endorse: [
+    'list_agents',
+    'profile',
+    'endorsers',
+    'filter_endorsers',
+    'endorsement_counts',
+  ],
+  unendorse: [
+    'list_agents',
+    'profile',
+    'endorsers',
+    'filter_endorsers',
+    'endorsement_counts',
+  ],
+  heartbeat: [
+    'list_agents',
+    'profile',
+    'health',
+    'list_tags',
+    'list_capabilities',
+  ],
+  delist_me: [
+    'list_agents',
+    'list_tags',
+    'list_capabilities',
+    'health',
+    'profile',
+    'followers',
+    'following',
+    'edges',
+    'endorsers',
+    'filter_endorsers',
+    'follower_counts',
+    'endorsement_counts',
+  ],
+  hide_agent: HIDDEN_STATE_INVALIDATES,
+  unhide_agent: HIDDEN_STATE_INVALIDATES,
+};
+
+/** Cached reads that a given mutation stales. Null means "clear everything". */
+export function invalidatesFor(action: string): readonly string[] | null {
+  return INVALIDATION_MAP[action] ?? null;
+}
+
+// ---------------------------------------------------------------------------
 // Dispatcher
 // ---------------------------------------------------------------------------
+
+/** Normalize single account_id or targets[] into a non-empty array. */
+function resolveTargets(body: Record<string, unknown>): string[] | WriteResult {
+  if (Array.isArray(body.targets)) return body.targets as string[];
+  const accountId = body.account_id as string | undefined;
+  if (!accountId) return fail('VALIDATION_ERROR', 'account_id is required');
+  return [accountId];
+}
 
 export async function dispatchWrite(
   action: string,
@@ -1073,71 +1083,40 @@ export async function dispatchWrite(
   walletKey: string,
   resolveAccountId: (wk: string) => Promise<string | null>,
 ): Promise<WriteResult> {
-  const accountId = body.account_id as string | undefined;
-
-  const targets = Array.isArray(body.targets)
-    ? (body.targets as string[])
-    : undefined;
+  let result: WriteResult;
 
   switch (action) {
     case 'follow':
-      if (targets)
-        return handleMultiFollow(walletKey, targets, resolveAccountId);
-      if (!accountId) return fail('VALIDATION_ERROR', 'account_id is required');
-      return handleFollow(
-        walletKey,
-        accountId,
-        body.reason as string | undefined,
-        resolveAccountId,
-      );
-
+      result = await handleFollow(walletKey, body, resolveAccountId);
+      break;
     case 'unfollow':
-      if (!accountId) return fail('VALIDATION_ERROR', 'account_id is required');
-      return handleUnfollow(walletKey, accountId, resolveAccountId);
-
+      result = await handleUnfollow(walletKey, body, resolveAccountId);
+      break;
     case 'endorse':
-      if (targets)
-        return handleMultiEndorse(
-          walletKey,
-          targets,
-          body.tags as string[] | undefined,
-          body.capabilities as Record<string, unknown> | undefined,
-          body.reason as string | undefined,
-          resolveAccountId,
-        );
-      if (!accountId) return fail('VALIDATION_ERROR', 'account_id is required');
-      return handleEndorse(
-        walletKey,
-        accountId,
-        body.tags as string[] | undefined,
-        body.capabilities as Record<string, unknown> | undefined,
-        body.reason as string | undefined,
-        resolveAccountId,
-      );
-
+      result = await handleEndorse(walletKey, body, resolveAccountId);
+      break;
     case 'unendorse':
-      if (!accountId) return fail('VALIDATION_ERROR', 'account_id is required');
-      return handleUnendorse(
-        walletKey,
-        accountId,
-        body.tags as string[] | undefined,
-        body.capabilities as Record<string, unknown> | undefined,
-        resolveAccountId,
-      );
-
+      result = await handleUnendorse(walletKey, body, resolveAccountId);
+      break;
     case 'update_me':
-      return handleUpdateMe(walletKey, body, resolveAccountId);
-
+      result = await handleUpdateMe(walletKey, body, resolveAccountId);
+      break;
     case 'heartbeat':
-      return handleHeartbeat(walletKey, resolveAccountId);
-
-    case 'deregister':
-      return handleDeregister(walletKey, resolveAccountId);
-
+      result = await handleHeartbeat(walletKey, resolveAccountId);
+      break;
+    case 'delist_me':
+      result = await handleDelistMe(walletKey, resolveAccountId);
+      break;
     default:
       return fail(
         'VALIDATION_ERROR',
         `Action '${action}' not supported for direct write`,
       );
   }
+
+  // Attach invalidation targets to successful results.
+  if (result.success) {
+    result.invalidates = INVALIDATION_MAP[action] ?? null;
+  }
+  return result;
 }

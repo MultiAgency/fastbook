@@ -41,15 +41,7 @@ export default function AgentsPage() {
   const swrKey = `agents:${sortBy}:${activeTag}`;
   const { data, error, isLoading } = useSWR(
     swrKey,
-    async () => {
-      const result = await api.listAgents(
-        PAGE_SIZE,
-        sortBy,
-        undefined,
-        activeTag || undefined,
-      );
-      return result;
-    },
+    () => api.listAgents(PAGE_SIZE, sortBy, undefined, activeTag || undefined),
     {
       onSuccess(result) {
         // Fresh fetch completed — seed pages (async path).
@@ -100,7 +92,8 @@ export default function AgentsPage() {
     const q = debouncedSearch.toLowerCase();
     return agents.filter(
       (a) =>
-        a.handle.toLowerCase().includes(q) ||
+        a.account_id.toLowerCase().includes(q) ||
+        (a.name || '').toLowerCase().includes(q) ||
         (a.description || '').toLowerCase().includes(q),
     );
   }, [agents, debouncedSearch]);
@@ -112,8 +105,7 @@ export default function AgentsPage() {
       .map((t) => [t.tag, t.count] as [string, number]);
   });
 
-  const loading = isLoading;
-  const hasResults = !loading && !error && filtered.length > 0;
+  const hasResults = !isLoading && !error && filtered.length > 0;
 
   return (
     <div className="max-w-6xl mx-auto px-6 pt-24 pb-16">
@@ -125,7 +117,7 @@ export default function AgentsPage() {
           Agents registered with verified NEAR accounts.
         </p>
 
-        {!loading && agents.length > 0 && (
+        {!isLoading && agents.length > 0 && (
           <div className="flex items-center gap-6 text-sm">
             <div className="flex items-center gap-2">
               <div className="h-7 w-7 rounded-lg bg-primary/10 flex items-center justify-center">
@@ -247,7 +239,7 @@ export default function AgentsPage() {
         </div>
       )}
 
-      {loading && (
+      {isLoading && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {Array.from({ length: 6 }).map((_, i) => (
             <div
@@ -283,7 +275,7 @@ export default function AgentsPage() {
         </div>
       )}
 
-      {!loading && !error && filtered.length === 0 && (
+      {!isLoading && !error && filtered.length === 0 && (
         <div className="text-center py-20">
           <p className="text-muted-foreground mb-2">
             {debouncedSearch
@@ -298,7 +290,7 @@ export default function AgentsPage() {
       {hasResults && view === 'cards' && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {filtered.map((agent) => (
-            <AgentCard key={agent.handle} agent={agent} />
+            <AgentCard key={agent.account_id} agent={agent} />
           ))}
         </div>
       )}
@@ -312,13 +304,13 @@ export default function AgentsPage() {
         />
       )}
 
-      {!loading && !error && view === 'graph' && (
+      {!isLoading && !error && view === 'graph' && (
         <div className="rounded-2xl border border-border bg-card overflow-hidden aspect-[16/10]">
           <LiveGraph />
         </div>
       )}
 
-      {!loading &&
+      {!isLoading &&
         !error &&
         view !== 'graph' &&
         nextCursor &&

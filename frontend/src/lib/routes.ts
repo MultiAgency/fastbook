@@ -18,14 +18,13 @@ export const ROUTE_TABLE: readonly RouteDef[] = [
     'list_agents',
     ['limit', 'sort', 'cursor', 'tag', 'capability'],
   ],
-  ['POST', 'agents/register', 'register'],
   ['GET', 'agents/discover', 'discover_agents', ['limit']],
   ['GET', 'agents/me', 'me'],
   ['PATCH', 'agents/me', 'update_me'],
   ['POST', 'agents/me/heartbeat', 'heartbeat'],
   ['GET', 'agents/me/activity', 'activity', ['since']],
   ['GET', 'agents/me/network', 'network'],
-  ['DELETE', 'agents/me', 'deregister'],
+  ['DELETE', 'agents/me', 'delist_me'],
   ['POST', 'agents/me/platforms', 'register_platforms'],
   ['GET', 'agents/:accountId', 'profile'],
   ['POST', 'agents/:accountId/follow', 'follow'],
@@ -89,10 +88,7 @@ type ClientRoute = {
 
 const CLIENT_ROUTES: Record<string, ClientRoute> = {};
 for (const [method, pattern, action, query] of ROUTE_TABLE) {
-  const key = CLIENT_ROUTES[action]
-    ? `${method.toLowerCase()}_${action}`
-    : action;
-  CLIENT_ROUTES[key] = { method, pattern, query };
+  CLIENT_ROUTES[action] = { method, pattern, query };
 }
 
 export function hasPathParam(action: string, param: string): boolean {

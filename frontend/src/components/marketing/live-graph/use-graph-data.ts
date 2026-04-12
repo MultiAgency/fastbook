@@ -11,7 +11,7 @@ export interface GraphData {
 
 const AGENT_LIMIT = 20;
 const TOP_AGENTS = 8;
-const SEED_HANDLES = 12;
+const SEED_COUNT = 12;
 
 export function useGraphData(): GraphData | null {
   const [graphData, setGraphData] = useState<GraphData | null>(null);
@@ -32,14 +32,17 @@ export function useGraphData(): GraphData | null {
           topAgents.map(async (agent) => {
             try {
               const { agents: following } = await api.getFollowing(
-                agent.handle,
+                agent.account_id,
                 AGENT_LIMIT,
               );
               for (const f of following) {
-                const key = `${agent.handle}->${f.handle}`;
+                const key = `${agent.account_id}->${f.account_id}`;
                 if (!edgeSet.has(key)) {
                   edgeSet.add(key);
-                  edges.push({ from: agent.handle, to: f.handle });
+                  edges.push({
+                    from: agent.account_id,
+                    to: f.account_id,
+                  });
                 }
               }
             } catch {}
@@ -48,21 +51,21 @@ export function useGraphData(): GraphData | null {
 
         if (cancelled) return;
 
-        const handleSet = new Set<string>();
+        const idSet = new Set<string>();
         for (const e of edges) {
-          handleSet.add(e.from);
-          handleSet.add(e.to);
+          idSet.add(e.from);
+          idSet.add(e.to);
         }
-        for (const a of agents.slice(0, SEED_HANDLES)) {
-          handleSet.add(a.handle);
+        for (const a of agents.slice(0, SEED_COUNT)) {
+          idSet.add(a.account_id);
         }
 
-        const agentMap = new Map(agents.map((a) => [a.handle, a]));
-        const handles = Array.from(handleSet).filter((h) => agentMap.has(h));
+        const agentMap = new Map(agents.map((a) => [a.account_id, a]));
+        const ids = Array.from(idSet).filter((id) => agentMap.has(id));
 
-        const nodes: GraphNode[] = handles
-          .map((handle, i) => {
-            const agent = agentMap.get(handle);
+        const nodes: GraphNode[] = ids
+          .map((id, i) => {
+            const agent = agentMap.get(id);
             if (!agent) return null;
             const followers = agent.follower_count;
             const radius = Math.min(
@@ -70,28 +73,26 @@ export function useGraphData(): GraphData | null {
               Math.max(3, 3 + Math.sqrt(followers) * 0.8),
             );
             const angle =
-              (i / handles.length) * Math.PI * 2 + (Math.random() - 0.5) * 0.4;
+              (i / ids.length) * Math.PI * 2 + (Math.random() - 0.5) * 0.4;
             const r = 0.25 + Math.random() * 0.15;
             return {
-              id: handle,
+              id,
               x: 0.5 + Math.cos(angle) * r,
               y: 0.5 + Math.sin(angle) * r,
               vx: 0,
               vy: 0,
               radius,
-              label: handle,
+              label: agent.name || id,
             };
           })
           .filter((n): n is GraphNode => n !== null);
 
-        const nodeSet = new Set(handles);
+        const nodeSet = new Set(ids);
         const visibleEdges = edges.filter(
           (e) => nodeSet.has(e.from) && nodeSet.has(e.to),
         );
         setGraphData({ nodes, edges: visibleEdges });
-      } catch {
-        // Failure is non-critical; graph renders empty.
-      }
+      } catch {}
     }
 
     load();

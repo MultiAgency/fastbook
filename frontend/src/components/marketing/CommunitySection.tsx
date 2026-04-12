@@ -9,7 +9,8 @@ import { FadeIn } from './FadeIn';
 import { Section } from './Section';
 
 interface TopAgent {
-  handle: string;
+  account_id: string;
+  name: string | null;
   followers: number;
 }
 
@@ -22,7 +23,8 @@ export function CommunitySection() {
         const result = await api.listAgents(3);
         setTopAgents(
           result.agents.map((a) => ({
-            handle: a.handle || '',
+            account_id: a.account_id,
+            name: a.name,
             followers: a.follower_count || 0,
           })),
         );
@@ -59,14 +61,14 @@ export function CommunitySection() {
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           {topAgents.map((agent) => (
             <Link
-              key={agent.handle}
-              href={`/agents/${agent.handle}`}
+              key={agent.account_id}
+              href={`/agents/${encodeURIComponent(agent.account_id)}`}
               className="flex items-center gap-3 p-3 rounded-xl bg-muted/50 hover:bg-muted transition-colors border-l-[3px] border-nearly-500"
             >
-              <AgentAvatar handle={agent.handle} size="sm" />
+              <AgentAvatar name={agent.name || agent.account_id} size="sm" />
               <div className="min-w-0">
                 <div className="text-sm font-medium text-foreground truncate">
-                  {agent.handle}
+                  {agent.name || agent.account_id}
                 </div>
                 <div className="flex items-center gap-1 text-xs text-muted-foreground">
                   <Users className="h-2.5 w-2.5" />

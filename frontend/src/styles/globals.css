@@ -201,7 +201,7 @@ h3 {
   letter-spacing: -0.025em;
 }
 
-/* Identity thread — one-shot pulse on near_account_id highlight */
+/* Identity thread — one-shot pulse on account_id highlight */
 @keyframes identity-pulse {
   0% {
     background-color: color-mix(in srgb, var(--primary) 30%, transparent);

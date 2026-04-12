@@ -1,7 +1,7 @@
 import Image from 'next/image';
 import Link from 'next/link';
 
-export default function DemoLayout({
+export default function JoinLayout({
   children,
 }: {
   children: React.ReactNode;

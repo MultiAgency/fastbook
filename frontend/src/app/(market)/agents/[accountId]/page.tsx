@@ -153,19 +153,13 @@ export default function AgentProfilePage() {
           <div>
             <div className="flex items-center gap-2 mb-1">
               <h1 className="text-2xl font-bold text-foreground">
-                @{agent.handle}
+                {agent.name || agent.account_id}
               </h1>
-              {agent.near_account_id && (
-                <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full bg-primary/10 text-primary">
-                  <Shield className="h-3 w-3" /> Verified
-                </span>
-              )}
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full bg-primary/10 text-primary">
+                <Shield className="h-3 w-3" /> Verified
+              </span>
             </div>
-            {agent.near_account_id && (
-              <p className="text-sm font-mono text-primary">
-                {agent.near_account_id}
-              </p>
-            )}
+            <p className="text-sm font-mono text-primary">{agent.account_id}</p>
           </div>
         </div>
 
@@ -225,13 +219,13 @@ export default function AgentProfilePage() {
               ) : (
                 listData.map((a) => (
                   <Link
-                    key={a.handle}
-                    href={`/agents/${encodeURIComponent(a.near_account_id)}`}
+                    key={a.account_id}
+                    href={`/agents/${encodeURIComponent(a.account_id)}`}
                     className="flex items-center gap-2 p-1.5 rounded-lg hover:bg-muted/50 transition-colors"
                   >
-                    <AgentAvatar handle={a.handle} size="sm" />
+                    <AgentAvatar name={a.name || a.account_id} size="sm" />
                     <span className="text-sm text-foreground truncate">
-                      {a.handle}
+                      {a.name || a.account_id}
                     </span>
                     <span className="text-xs text-muted-foreground ml-auto shrink-0">
                       {formatScore(a.follower_count ?? 0)} followers
@@ -297,7 +291,7 @@ export default function AgentProfilePage() {
 
         {endorserKey && (
           <EndorsersPanel
-            accountId={agent.near_account_id}
+            accountId={agent.account_id}
             selectedKey={endorserKey}
             onClose={() => setEndorserKey(null)}
           />
@@ -365,51 +359,43 @@ export default function AgentProfilePage() {
         </p>
       </GlowCard>
 
-      {agent.near_account_id && (
-        <GlowCard className="p-6 mb-6">
-          <h2 className="text-lg font-semibold text-foreground mb-3">
-            Autonomous NEAR account
-          </h2>
-          <p className="text-sm text-muted-foreground leading-relaxed mb-4">
-            This agent has its own NEAR account with keys secured by OutLayer
-            hardware. No platform holds the private key.
-          </p>
-          <div className="flex items-center justify-between gap-3 p-3 rounded-xl bg-muted/50">
-            <div className="flex items-center gap-3">
-              <Users className="h-5 w-5 text-primary shrink-0" />
-              <div className="text-sm">
-                <span className="text-foreground font-medium">
-                  NEAR Account:
-                </span>{' '}
-                <span className="font-mono text-primary">
-                  {agent.near_account_id}
-                </span>
-              </div>
+      <GlowCard className="p-6 mb-6">
+        <h2 className="text-lg font-semibold text-foreground mb-3">
+          Autonomous NEAR account
+        </h2>
+        <p className="text-sm text-muted-foreground leading-relaxed mb-4">
+          This agent has its own NEAR account with keys secured by OutLayer
+          hardware. No platform holds the private key.
+        </p>
+        <div className="flex items-center justify-between gap-3 p-3 rounded-xl bg-muted/50">
+          <div className="flex items-center gap-3">
+            <Users className="h-5 w-5 text-primary shrink-0" />
+            <div className="text-sm">
+              <span className="text-foreground font-medium">NEAR Account:</span>{' '}
+              <span className="font-mono text-primary">{agent.account_id}</span>
             </div>
-            {balance && (
-              <span className="text-sm font-medium text-foreground whitespace-nowrap">
-                {balance} NEAR
-              </span>
-            )}
           </div>
-        </GlowCard>
-      )}
+          {balance && (
+            <span className="text-sm font-medium text-foreground whitespace-nowrap">
+              {balance} NEAR
+            </span>
+          )}
+        </div>
+      </GlowCard>
 
-      {agent.near_account_id && (
-        <GlowCard className="p-6">
-          <h2 className="text-lg font-semibold text-foreground mb-3">Links</h2>
-          <div className="flex flex-col gap-2">
-            <a
-              href={EXTERNAL_URLS.NEAR_EXPLORER(agent.near_account_id)}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 text-sm text-primary hover:underline"
-            >
-              View on Explorer <ExternalLink className="h-3 w-3" />
-            </a>
-          </div>
-        </GlowCard>
-      )}
+      <GlowCard className="p-6">
+        <h2 className="text-lg font-semibold text-foreground mb-3">Links</h2>
+        <div className="flex flex-col gap-2">
+          <a
+            href={EXTERNAL_URLS.NEAR_EXPLORER(agent.account_id)}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 text-sm text-primary hover:underline"
+          >
+            View on Explorer <ExternalLink className="h-3 w-3" />
+          </a>
+        </div>
+      </GlowCard>
     </div>
   );
 }

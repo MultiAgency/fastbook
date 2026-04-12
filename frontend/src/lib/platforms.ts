@@ -1,15 +1,9 @@
 import { NextResponse } from 'next/server';
-import { clearCache } from '@/lib/cache';
-import {
-  FASTDATA_NAMESPACE,
-  MARKET_API_URL,
-  OUTLAYER_API_URL,
-} from '@/lib/constants';
-import { kvGetAgent } from '@/lib/fastdata';
-import { agentEntries } from '@/lib/fastdata-utils';
+import { errJson } from '@/lib/api-response';
+import { MARKET_API_URL, OUTLAYER_API_URL } from '@/lib/constants';
 import { fetchWithTimeout } from '@/lib/fetch';
-import { resolveAccountId } from '@/lib/outlayer-server';
-import type { Agent, PlatformResult } from '@/types';
+import { mintClaimForWalletKey, resolveAccountId } from '@/lib/outlayer-server';
+import type { PlatformResult, VerifiableClaim } from '@/types';
 
 export type { PlatformResult };
 
@@ -30,15 +24,14 @@ export const PLATFORM_META = [
 ] as const;
 
 export interface PlatformContext {
-  handle: string;
-  near_account_id: string;
+  account_id: string;
   description?: string;
   tags?: string[];
   capabilities?: Record<string, unknown>;
   /** Agent's OutLayer wallet key (wk_...), needed for platforms that require signing. */
   outlayer_api_key?: string;
   /** NEP-413 verifiable claim proving NEAR account ownership. Stored as metadata by platforms that accept it. */
-  verifiable_claim?: Record<string, unknown>;
+  verifiable_claim?: VerifiableClaim;
 }
 
 // ---------------------------------------------------------------------------
@@ -48,7 +41,7 @@ export interface PlatformContext {
 //   1. Add a meta entry to PLATFORM_META above (display fields + requiresWalletKey).
 //   2. Add a config entry to PLATFORM_CONFIGS below (auth type, URL, timeout,
 //      credential fields). Add a local env-backed constant for the URL if needed.
-//   Everything else is generic: demo page cards, auto-registration, credential
+//   Everything else is generic: join page cards, auto-registration, credential
 //   surfacing, and persistence all derive from these two arrays.
 // ---------------------------------------------------------------------------
 
@@ -94,23 +87,17 @@ export type PlatformConfig = DirectPostConfig | OutlayerSigningConfig;
 
 const NEARFM_API_URL = process.env.NEARFM_API_URL || 'https://api.near.fm';
 
-export const PLATFORM_CONFIGS: readonly PlatformConfig[] = [
+const PLATFORM_CONFIGS: readonly PlatformConfig[] = [
   {
     ...meta('market.near.ai'),
     authType: 'direct-post',
     registerUrl: `${MARKET_API_URL}/agents/register`,
     timeoutMs: 5_000,
-    bodyFields: [
-      'handle',
-      'near_account_id',
-      'tags',
-      'capabilities',
-      'verifiable_claim',
-    ],
+    bodyFields: ['account_id', 'tags', 'capabilities', 'verifiable_claim'],
     credentialFields: {
       api_key: 'api_key',
       agent_id: 'agent_id',
-      near_account_id: 'near_account_id',
+      account_id: 'account_id',
     },
   },
   {
@@ -342,18 +329,16 @@ export async function tryPlatformRegistrations(
 
 function buildPlatformContext(
   agent: {
-    handle: string;
-    near_account_id: string;
+    account_id: string;
     description?: string;
     tags?: string[];
     capabilities?: Record<string, unknown>;
   },
   walletKey?: string,
-  claim?: Record<string, unknown>,
+  claim?: VerifiableClaim,
 ): PlatformContext {
   return {
-    handle: agent.handle,
-    near_account_id: agent.near_account_id,
+    account_id: agent.account_id,
     description: agent.description,
     tags: agent.tags,
     capabilities: agent.capabilities,
@@ -362,124 +347,34 @@ function buildPlatformContext(
   };
 }
 
-/** Write entries to FastData KV using the agent's own wallet key. */
-async function writePlatformEntries(
-  walletKey: string,
-  entries: Record<string, unknown>,
-): Promise<boolean> {
-  try {
-    const res = await fetchWithTimeout(
-      `${OUTLAYER_API_URL}/wallet/v1/call`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${walletKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          receiver_id: FASTDATA_NAMESPACE,
-          method_name: '__fastdata_kv',
-          args: entries,
-          gas: '30000000000000',
-          deposit: '0',
-        }),
-      },
-      15_000,
-    );
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
-
-/** Persist platform IDs by updating the agent profile in FastData. */
-async function persistPlatformResults(
-  walletKey: string,
-  accountId: string,
-  succeeded: string[],
-  existing: string[],
-): Promise<{ persisted: string[]; persistWarnings: string[] }> {
-  const persistWarnings: string[] = [];
-  if (succeeded.length === 0) return { persisted: existing, persistWarnings };
-
-  // Re-read agent for lost-update protection.
-  const freshAgent = (await kvGetAgent(accountId, 'profile')) as Agent | null;
-  if (!freshAgent) {
-    persistWarnings.push('Could not read agent profile to persist platforms');
-    return { persisted: existing, persistWarnings };
-  }
-
-  const merged = [...new Set([...(freshAgent.platforms ?? []), ...succeeded])];
-  freshAgent.platforms = merged;
-
-  const wrote = await writePlatformEntries(walletKey, agentEntries(freshAgent));
-  if (wrote) {
-    clearCache();
-    return { persisted: merged, persistWarnings };
-  }
-  persistWarnings.push('Failed to persist platform registrations');
-  return { persisted: existing, persistWarnings };
-}
-
 /**
  * POST /agents/me/platforms — register on external platforms.
- * Reads agent from FastData, runs external registrations,
- * then persists succeeded platform IDs back to FastData.
+ * Pure passthrough: resolves account, calls external APIs, returns credentials.
+ * Nothing is written to FastData.
  */
 export async function handleRegisterPlatforms(
   walletKey: string,
   wasmBody: Record<string, unknown>,
 ): Promise<NextResponse> {
-  // 1. Load agent profile from FastData
   const accountId = await resolveAccountId(walletKey);
   if (!accountId) {
-    return NextResponse.json(
-      {
-        success: false,
-        error: 'Could not resolve account',
-        code: 'AUTH_FAILED',
-      },
-      { status: 401 },
-    );
-  }
-  const agent = (await kvGetAgent(accountId, 'profile')) as Agent | null;
-  if (!agent) {
-    return NextResponse.json(
-      {
-        success: false,
-        error: 'Agent profile not found — call heartbeat first',
-        code: 'VALIDATION_ERROR',
-      },
-      { status: 400 },
-    );
+    return errJson('AUTH_FAILED', 'Could not resolve account', 401);
   }
 
-  // 2. Run platform registrations
   const requestedIds = Array.isArray(wasmBody.platforms)
     ? wasmBody.platforms.filter((p): p is string => typeof p === 'string')
     : undefined;
-  const ctx = buildPlatformContext(agent, walletKey);
+  const claim =
+    (await mintClaimForWalletKey(walletKey, 'register_platforms')) ?? undefined;
+  const ctx = buildPlatformContext({ account_id: accountId }, walletKey, claim);
   const { platforms, warnings } = await tryPlatformRegistrations(
     ctx,
     requestedIds,
   );
 
-  const succeeded = Object.entries(platforms)
-    .filter(([, r]) => r.success)
-    .map(([id]) => id);
-
-  // 3. Persist — re-reads agent inside for lost-update protection.
-  const { persisted, persistWarnings } = await persistPlatformResults(
-    walletKey,
-    accountId,
-    succeeded,
-    agent.platforms ?? [],
-  );
-  warnings.push(...persistWarnings);
-
   return NextResponse.json({
     success: true,
-    data: { platforms, registered: persisted },
+    data: { platforms },
     ...(warnings.length > 0 ? { warnings } : {}),
   });
 }

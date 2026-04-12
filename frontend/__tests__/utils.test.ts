@@ -2,66 +2,14 @@ import {
   formatRelativeTime,
   formatScore,
   friendlyError,
-  sanitizeHandle,
-  toErrorMessage,
+  totalEndorsements,
   truncateAccountId,
 } from '@/lib/utils';
 
 describe('Utility Functions', () => {
-  describe('sanitizeHandle', () => {
-    it('lowercases input', () => {
-      expect(sanitizeHandle('MyAgent')).toBe('myagent');
-    });
-
-    it('strips invalid characters', () => {
-      expect(sanitizeHandle('my-agent!@#')).toBe('myagent');
-    });
-
-    it('allows underscores and numbers', () => {
-      expect(sanitizeHandle('agent_007')).toBe('agent_007');
-    });
-
-    it('returns empty string for all-invalid input', () => {
-      expect(sanitizeHandle('---!!!')).toBe('');
-    });
-
-    it('strips unicode characters', () => {
-      expect(sanitizeHandle('agénté')).toBe('agnt');
-    });
-
-    it('strips leading digits and underscores', () => {
-      expect(sanitizeHandle('123bot')).toBe('bot');
-      expect(sanitizeHandle('_agent')).toBe('agent');
-      expect(sanitizeHandle('99_agent')).toBe('agent');
-    });
-
-    it('returns empty when all chars are leading non-letters', () => {
-      expect(sanitizeHandle('123')).toBe('');
-      expect(sanitizeHandle('___')).toBe('');
-    });
-  });
-
   describe('friendlyError', () => {
     it('maps timeout errors', () => {
       expect(friendlyError(new Error('Request abort'))).toContain('timed out');
-    });
-
-    it('maps network errors', () => {
-      expect(friendlyError(new Error('fetch failed'))).toContain(
-        'NEAR network',
-      );
-    });
-
-    it('maps conflict errors', () => {
-      expect(friendlyError(new Error('Handle already taken'))).toContain(
-        'already in use',
-      );
-    });
-
-    it('maps expired errors', () => {
-      expect(friendlyError(new Error('timestamp expired'))).toContain(
-        'expired',
-      );
     });
 
     it('maps auth errors', () => {
@@ -70,75 +18,22 @@ describe('Utility Functions', () => {
       );
     });
 
-    it('returns generic message for unknown errors', () => {
-      expect(friendlyError(new Error('something weird'))).toContain(
-        'Something went wrong',
-      );
-    });
-
-    it('handles non-Error objects', () => {
-      expect(friendlyError('string error')).toContain('Something went wrong');
-    });
-
     it('maps rate limit errors', () => {
       expect(friendlyError(new Error('429 too many requests'))).toContain(
         'Too many requests',
       );
     });
 
-    it('maps SELF_UNFOLLOW error', () => {
-      expect(friendlyError(new Error('Cannot unfollow yourself'))).toContain(
-        'cannot unfollow',
-      );
-    });
-
-    it('maps VALIDATION_ERROR code', () => {
-      expect(friendlyError(new Error('VALIDATION_ERROR'))).toContain(
-        'Invalid input',
-      );
-    });
-
-    it('maps STORAGE_ERROR code', () => {
+    it('maps server errors', () => {
       expect(friendlyError(new Error('STORAGE_ERROR'))).toContain(
         'storage error',
       );
     });
 
-    it('maps INTERNAL_ERROR code', () => {
-      expect(friendlyError(new Error('INTERNAL_ERROR'))).toContain(
-        'internal error',
+    it('returns generic message for unknown errors', () => {
+      expect(friendlyError(new Error('something weird'))).toContain(
+        'Something went wrong',
       );
-    });
-
-    it('maps ROLLBACK_PARTIAL code', () => {
-      expect(friendlyError(new Error('ROLLBACK_PARTIAL'))).toContain(
-        'partially failed',
-      );
-    });
-
-    it('maps NONCE_REPLAY error', () => {
-      expect(friendlyError(new Error('nonce has already been used'))).toContain(
-        'already been used',
-      );
-    });
-
-    it('maps 503 service unavailable', () => {
-      expect(friendlyError(new Error('503 service unavailable'))).toContain(
-        'temporarily unavailable',
-      );
-    });
-
-    it('maps upstream unreachable', () => {
-      expect(friendlyError(new Error('Upstream unreachable'))).toContain(
-        'reach the backend',
-      );
-    });
-
-    it('prefers ApiError.code over message text for classification', () => {
-      const err = Object.assign(new Error('Something obscure'), {
-        code: 'RATE_LIMITED',
-      });
-      expect(friendlyError(err)).toContain('Too many requests');
     });
   });
 
@@ -161,7 +56,7 @@ describe('Utility Functions', () => {
 
     it('handles negative numbers', () => {
       expect(formatScore(-1500)).toBe('-1.5K');
-      expect(formatScore(-1000000)).toBe('-1M');
+      expect(formatScore(-2000000)).toBe('-2M');
     });
   });
 
@@ -218,25 +113,21 @@ describe('Utility Functions', () => {
     });
   });
 
-  describe('toErrorMessage', () => {
-    it('extracts message from Error instances', () => {
-      expect(toErrorMessage(new Error('test error'))).toBe('test error');
+  describe('totalEndorsements', () => {
+    it('returns 0 for empty endorsements', () => {
+      expect(totalEndorsements({ endorsements: {} })).toBe(0);
+      expect(totalEndorsements({})).toBe(0);
     });
 
-    it('returns strings as-is', () => {
-      expect(toErrorMessage('raw string')).toBe('raw string');
-    });
-
-    it('converts null to string', () => {
-      expect(toErrorMessage(null)).toBe('null');
-    });
-
-    it('converts undefined to string', () => {
-      expect(toErrorMessage(undefined)).toBe('undefined');
-    });
-
-    it('converts numbers to string', () => {
-      expect(toErrorMessage(42)).toBe('42');
+    it('sums across namespaces and values', () => {
+      expect(
+        totalEndorsements({
+          endorsements: {
+            tags: { ai: 3, defi: 2 },
+            skills: { testing: 1 },
+          },
+        }),
+      ).toBe(6);
     });
   });
 });

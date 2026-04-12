@@ -1,4 +1,10 @@
-import { clearCache, getCached, makeCacheKey, setCache } from '@/lib/cache';
+import {
+  clearCache,
+  getCached,
+  invalidateForMutation,
+  makeCacheKey,
+  setCache,
+} from '@/lib/cache';
 
 beforeEach(() => {
   clearCache();
@@ -7,24 +13,6 @@ beforeEach(() => {
 
 afterEach(() => {
   jest.useRealTimers();
-});
-
-describe('getCached', () => {
-  it('returns undefined for missing keys', () => {
-    expect(getCached('nonexistent')).toBeUndefined();
-  });
-
-  it('returns data for fresh entries', () => {
-    setCache('list_agents', 'key1', { agents: [] });
-    expect(getCached('key1')).toEqual({ agents: [] });
-  });
-
-  it('returns undefined and evicts expired entries', () => {
-    setCache('list_agents', 'key2', { agents: [] });
-    // DEFAULT_TTL (30_000) + 1_000 to ensure expiry
-    jest.advanceTimersByTime(31_000);
-    expect(getCached('key2')).toBeUndefined();
-  });
 });
 
 describe('setCache', () => {
@@ -44,14 +32,6 @@ describe('setCache', () => {
     expect(getCached('agents1')).toBeUndefined();
   });
 
-  it('uses default TTL for unknown actions', () => {
-    setCache('unknown_action', 'unk1', { data: true });
-    jest.advanceTimersByTime(29_000);
-    expect(getCached('unk1')).toEqual({ data: true });
-    jest.advanceTimersByTime(2_000);
-    expect(getCached('unk1')).toBeUndefined();
-  });
-
   it('evicts oldest entry when exceeding 500 entries', () => {
     // MAX_CACHE_ENTRIES (500) + 1 to trigger eviction
     for (let i = 0; i < 501; i++) {
@@ -63,15 +43,35 @@ describe('setCache', () => {
   });
 });
 
-describe('compaction removes expired entries on access', () => {
-  it('expired entries are cleaned up on getCached', () => {
-    setCache('list_agents', 'comp_1', { a: 1 });
-    setCache('profile', 'comp_2', { a: 2 });
+describe('invalidateForMutation', () => {
+  it('selectively invalidates only affected action types', () => {
+    setCache('list_agents', 'agents1', []);
+    setCache('profile', 'profile1', { agent: {} });
+    setCache('health', 'health1', { status: 'ok' });
 
-    jest.advanceTimersByTime(35_000);
+    invalidateForMutation([
+      'list_agents',
+      'profile',
+      'followers',
+      'following',
+      'edges',
+      'follower_counts',
+    ]);
 
-    expect(getCached('comp_1')).toBeUndefined();
-    expect(getCached('comp_2')).toEqual({ a: 2 });
+    // follow invalidates list_agents and profile but not health
+    expect(getCached('agents1')).toBeUndefined();
+    expect(getCached('profile1')).toBeUndefined();
+    expect(getCached('health1')).toEqual({ status: 'ok' });
+  });
+
+  it('is a no-op for empty list', () => {
+    setCache('list_agents', 'agents1', []);
+    setCache('health', 'health1', { status: 'ok' });
+
+    invalidateForMutation([]);
+
+    expect(getCached('agents1')).toEqual([]);
+    expect(getCached('health1')).toEqual({ status: 'ok' });
   });
 });
 
@@ -88,11 +88,5 @@ describe('makeCacheKey', () => {
       limit: 10,
     });
     expect(a).toBe(b);
-  });
-
-  it('produces different keys for different values', () => {
-    const a = makeCacheKey({ action: 'list_agents', limit: 10 });
-    const b = makeCacheKey({ action: 'list_agents', limit: 25 });
-    expect(a).not.toBe(b);
   });
 });

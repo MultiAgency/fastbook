@@ -8,8 +8,8 @@ export type StepStatus = 'idle' | 'loading' | 'success' | 'error';
 // Authentication
 // ---------------------------------------------------------------------------
 
-export interface Nep413Auth {
-  near_account_id: string;
+export interface VerifiableClaim {
+  account_id: string;
   public_key: string;
   signature: string;
   nonce: string;
@@ -26,26 +26,25 @@ export interface AgentCapabilities {
 }
 
 export interface Agent {
-  handle: string;
   name: string | null;
   description: string;
-  avatar_url: string | null;
+  image: string | null;
   tags: string[];
   capabilities: AgentCapabilities;
   endorsements: Record<string, Record<string, number>>;
-  platforms: string[];
-  near_account_id: string;
+  endorsement_count?: number;
+  account_id: string;
   follower_count: number;
   following_count: number;
   created_at: number;
   last_active: number;
 }
 
-export interface AgentSummary {
-  handle: string;
+interface AgentSummary {
+  account_id: string;
   name?: string | null;
   description: string;
-  avatar_url?: string | null;
+  image?: string | null;
 }
 
 export interface Edge extends Agent {
@@ -75,47 +74,13 @@ export interface NetworkCounts {
 }
 
 // ---------------------------------------------------------------------------
-// Request types
-// ---------------------------------------------------------------------------
-
-export interface RegisterAgentForm {
-  handle?: string;
-  description?: string;
-  tags?: string[];
-  capabilities?: AgentCapabilities;
-  verifiable_claim?: Nep413Auth;
-  platforms?: string[];
-}
-
-// ---------------------------------------------------------------------------
 // Response types
 // ---------------------------------------------------------------------------
-
-export interface OnboardingContext {
-  welcome: string;
-  profile_completeness: number;
-  steps: { action: string; hint: string }[];
-  suggested: SuggestedAgent[];
-}
 
 export interface PlatformResult {
   success: boolean;
   credentials?: Record<string, unknown>;
   error?: string;
-}
-
-export interface RegistrationResponse {
-  agent: Agent;
-  near_account_id?: string;
-  onboarding?: OnboardingContext;
-  /** Credentials from auto-registration, keyed by platform ID. */
-  platform_credentials?: Record<string, Record<string, unknown>>;
-  funded?: boolean;
-  next_step?: 'fund_wallet';
-  fund_amount?: string;
-  fund_token?: string;
-  fund_url?: string;
-  warnings?: string[];
 }
 
 export interface GetMeResponse {
@@ -156,15 +121,24 @@ export interface SuggestedResponse {
 }
 
 export interface FollowResponse {
-  action: 'followed' | 'already_following';
-  followed?: { account_id: string };
+  results: {
+    account_id: string;
+    action: 'followed' | 'already_following' | 'error';
+    code?: string;
+    error?: string;
+  }[];
   your_network?: NetworkCounts;
   next_suggestion?: SuggestedAgent;
   warnings?: string[];
 }
 
 export interface UnfollowResponse {
-  action: 'unfollowed' | 'not_following';
+  results: {
+    account_id: string;
+    action: 'unfollowed' | 'not_following' | 'error';
+    code?: string;
+    error?: string;
+  }[];
   your_network?: NetworkCounts;
   warnings?: string[];
 }
@@ -192,20 +166,34 @@ export interface NetworkResponse {
 }
 
 export interface EndorseResponse {
-  action: 'endorsed' | 'unendorsed';
-  account_id: string;
-  agent: Agent;
-  endorsed?: Record<string, string[]>;
-  already_endorsed?: Record<string, string[]>;
-  removed?: Record<string, string[]>;
+  results: {
+    account_id: string;
+    action: 'endorsed' | 'error';
+    endorsed?: Record<string, string[]>;
+    already_endorsed?: Record<string, string[]>;
+    skipped?: { value: string; reason: 'ambiguous' | 'not_found' }[];
+    code?: string;
+    error?: string;
+  }[];
   warnings?: string[];
 }
 
-export interface EndorserEntry {
-  handle: string;
-  near_account_id: string;
+export interface UnendorseResponse {
+  results: {
+    account_id: string;
+    action: 'unendorsed' | 'error';
+    removed?: Record<string, string[]>;
+    code?: string;
+    error?: string;
+  }[];
+  warnings?: string[];
+}
+
+interface EndorserEntry {
+  account_id: string;
+  name?: string | null;
   description?: string;
-  avatar_url?: string | null;
+  image?: string | null;
   reason?: string;
   at?: number;
 }
@@ -215,8 +203,8 @@ export interface EndorsersResponse {
   endorsers: Record<string, Record<string, EndorserEntry[]>>;
 }
 
-export interface DeregisterResponse {
-  action: 'deregistered';
+export interface DelistMeResponse {
+  action: 'delisted';
   account_id: string;
   warnings?: string[];
 }

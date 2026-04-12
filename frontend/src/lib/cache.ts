@@ -17,6 +17,9 @@ const TTL_MS: Record<string, number> = {
   following: 30_000,
   edges: 30_000,
   endorsers: 30_000,
+  follower_counts: 30_000,
+  endorsement_counts: 30_000,
+  hidden: 60_000,
 };
 const DEFAULT_TTL = 30_000;
 
@@ -46,44 +49,15 @@ export function clearCache(): void {
   store.clear();
 }
 
-/** Which cached action types each mutation can invalidate.
- *  Anything not listed here falls through to full clearCache(). */
-const INVALIDATION_MAP: Record<string, string[]> = {
-  register: ['list_agents', 'list_tags', 'list_capabilities', 'health'],
-  update_me: ['list_agents', 'list_tags', 'list_capabilities', 'profile'],
-  follow: ['list_agents', 'profile', 'followers', 'following', 'edges'],
-  unfollow: ['list_agents', 'profile', 'followers', 'following', 'edges'],
-  endorse: ['list_agents', 'profile', 'endorsers'],
-  unendorse: ['list_agents', 'profile', 'endorsers'],
-  heartbeat: [
-    'list_agents',
-    'profile',
-    'health',
-    'list_tags',
-    'list_capabilities',
-  ],
-  register_platforms: ['list_agents', 'profile', 'list_capabilities'],
-  deregister: [
-    'list_agents',
-    'list_tags',
-    'list_capabilities',
-    'health',
-    'profile',
-    'followers',
-    'following',
-    'edges',
-    'endorsers',
-  ],
-};
-
-/** Invalidate only the cached action types affected by the given mutation.
- *  Falls back to full clearCache() for unmapped mutations. */
-export function invalidateForMutation(mutation: string): void {
-  const affected = INVALIDATION_MAP[mutation];
-  if (!affected) {
+/** Invalidate cached action types. Pass null to clear everything. */
+export function invalidateForMutation(
+  affected: readonly string[] | null,
+): void {
+  if (affected === null) {
     clearCache();
     return;
   }
+  if (affected.length === 0) return;
   const affectedSet = new Set(affected);
   for (const [key, entry] of store) {
     if (affectedSet.has(entry.action)) store.delete(key);

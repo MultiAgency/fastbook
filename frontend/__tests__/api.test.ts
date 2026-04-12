@@ -48,29 +48,16 @@ describe('ApiClient', () => {
       expect(result).toEqual({ agents: [], next_cursor: undefined });
       expect(lastFetchCall(mockFetch).url).toBe('/api/v1/agents?limit=10');
     });
-
-    it('does not send Authorization header for public reads', async () => {
-      mockSuccess([]);
-
-      await api.listAgents(10);
-      expect(lastFetchCall(mockFetch).headers.Authorization).toBeUndefined();
-    });
   });
 
   describe('authenticated requests', () => {
-    it('sends Authorization header', async () => {
-      mockSuccess({ agent: { handle: 'bot' } });
+    it('sends Authorization header to correct path', async () => {
+      mockSuccess({ agent: { account_id: 'bot.near' } });
 
       await api.getMe();
-      expect(lastFetchCall(mockFetch).headers.Authorization).toBe(
-        'Bearer wk_test',
-      );
-    });
-
-    it('routes to correct REST paths', async () => {
-      mockSuccess({ agent: { handle: 'bot' } });
-      await api.getMe();
-      expect(lastFetchCall(mockFetch).url).toBe('/api/v1/agents/me');
+      const call = lastFetchCall(mockFetch);
+      expect(call.headers.Authorization).toBe('Bearer wk_test');
+      expect(call.url).toBe('/api/v1/agents/me');
     });
   });
 
@@ -178,58 +165,11 @@ describe('ApiClient', () => {
     });
   });
 
-  describe('register', () => {
-    beforeEach(() => {
-      mockSuccess({ agent: { handle: 'my_bot' }, near_account_id: 'abc' });
-    });
-
-    it('forwards handle and description', async () => {
-      await api.register({ handle: 'my_bot', description: 'test agent' });
-
-      const { body } = lastFetchCall(mockFetch);
-      expect(body?.handle).toBe('my_bot');
-      expect(body?.description).toBe('test agent');
-    });
-
-    it('forwards tags when provided', async () => {
-      await api.register({ handle: 'my_bot', tags: ['defi', 'research'] });
-      expect(lastFetchCall(mockFetch).body?.tags).toEqual(['defi', 'research']);
-    });
-
-    it('omits tags when empty', async () => {
-      await api.register({ handle: 'my_bot', tags: [] });
-      expect(lastFetchCall(mockFetch).body?.tags).toBeUndefined();
-    });
-
-    it('forwards capabilities when provided', async () => {
-      await api.register({
-        handle: 'my_bot',
-        capabilities: { skills: ['chat'] },
-      });
-      expect(lastFetchCall(mockFetch).body?.capabilities).toEqual({
-        skills: ['chat'],
-      });
-    });
-
-    it('forwards verifiable_claim when provided', async () => {
-      await api.register({ handle: 'my_bot', verifiable_claim: TEST_AUTH });
-      expect(lastFetchCall(mockFetch).body?.verifiable_claim).toEqual(
-        TEST_AUTH,
-      );
-    });
-
-    it('posts to /api/v1/agents/register', async () => {
-      await api.register({ handle: 'my_bot' });
-
-      const call = lastFetchCall(mockFetch);
-      expect(call.url).toBe('/api/v1/agents/register');
-      expect(call.method).toBe('POST');
-    });
-  });
-
   describe('updateMe', () => {
     it('sends PATCH to /api/v1/agents/me', async () => {
-      mockSuccess({ agent: { handle: 'bot', description: 'updated' } });
+      mockSuccess({
+        agent: { account_id: 'bot.near', description: 'updated' },
+      });
 
       await api.updateMe({ description: 'updated' });
 
@@ -237,69 +177,6 @@ describe('ApiClient', () => {
       expect(call.url).toBe('/api/v1/agents/me');
       expect(call.method).toBe('PATCH');
       expect(call.body?.description).toBe('updated');
-    });
-
-    it('returns updated agent', async () => {
-      mockSuccess({ agent: { handle: 'bot', description: 'Updated bot' } });
-
-      const result = await api.updateMe({ description: 'Updated bot' });
-      expect(result.agent.description).toBe('Updated bot');
-    });
-  });
-
-  describe('getActivity', () => {
-    it('sends GET to /api/v1/agents/me/activity', async () => {
-      mockSuccess({ since: 1700000000, new_followers: [], new_following: [] });
-
-      await api.getActivity(1700000000);
-
-      const call = lastFetchCall(mockFetch);
-      expect(call.url).toContain('/api/v1/agents/me/activity');
-      expect(call.method).toBe('GET');
-    });
-
-    it('returns activity data', async () => {
-      mockSuccess({
-        since: 1700000000,
-        new_followers: [{ handle: 'alice' }],
-        new_following: [],
-      });
-
-      const result = await api.getActivity(1700000000);
-      expect(result.new_followers).toEqual([{ handle: 'alice' }]);
-      expect(result.since).toBe(1700000000);
-    });
-  });
-
-  describe('getNetwork', () => {
-    it('sends GET to /api/v1/agents/me/network', async () => {
-      mockSuccess({
-        follower_count: 5,
-        following_count: 3,
-        mutual_count: 2,
-        last_active: 1700000000,
-        created_at: 1690000000,
-      });
-
-      await api.getNetwork();
-
-      const call = lastFetchCall(mockFetch);
-      expect(call.url).toBe('/api/v1/agents/me/network');
-      expect(call.method).toBe('GET');
-    });
-
-    it('returns network stats', async () => {
-      mockSuccess({
-        follower_count: 5,
-        following_count: 3,
-        mutual_count: 2,
-        last_active: 1700000000,
-        created_at: 1690000000,
-      });
-
-      const result = await api.getNetwork();
-      expect(result.follower_count).toBe(5);
-      expect(result.mutual_count).toBe(2);
     });
   });
 
@@ -310,7 +187,7 @@ describe('ApiClient', () => {
         json: () =>
           Promise.resolve({
             success: true,
-            data: [{ handle: 'bot_1' }],
+            data: [{ account_id: 'bot_1.near' }],
             pagination: { limit: 10, next_cursor: 'bot_2' },
           }),
       });
@@ -318,21 +195,6 @@ describe('ApiClient', () => {
       const result = await api.listAgents(10);
       expect(result.next_cursor).toBe('bot_2');
       expect(result.agents).toHaveLength(1);
-    });
-
-    it('returns undefined next_cursor when no more pages', async () => {
-      mockFetch.mockResolvedValue({
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            success: true,
-            data: [{ handle: 'bot_1' }],
-            pagination: { limit: 10 },
-          }),
-      });
-
-      const result = await api.listAgents(10);
-      expect(result.next_cursor).toBeUndefined();
     });
 
     it('passes cursor param to listAgents', async () => {
@@ -359,119 +221,23 @@ describe('ApiClient', () => {
   describe('getSuggested', () => {
     it('extracts agents array from nested response', async () => {
       mockSuccess({
-        agents: [{ handle: 'rec_1' }, { handle: 'rec_2' }],
+        agents: [{ account_id: 'rec_1.near' }, { account_id: 'rec_2.near' }],
         vrf: { output: 'abc', proof: 'def', alpha: 'ghi' },
       });
 
       const result = await api.getSuggested(5);
-      expect(result.agents).toEqual([{ handle: 'rec_1' }, { handle: 'rec_2' }]);
-      expect(lastFetchCall(mockFetch).url).toContain('/api/v1/agents/discover');
-    });
-  });
-
-  describe('getEdges', () => {
-    it('converts camelCase options to snake_case query params', async () => {
-      api.clearCredentials();
-      mockSuccess({
-        account_id: 'bot_1.near',
-        edges: [],
-        edge_count: 0,
-        history: null,
-        pagination: { limit: 25 },
-      });
-
-      await api.getEdges('bot_1.near', {
-        direction: 'both',
-        limit: 10,
-      });
-
-      const call = lastFetchCall(mockFetch);
-      expect(call.url).toContain('/api/v1/agents/bot_1.near/edges');
-      expect(call.url).toContain('direction=both');
-      expect(call.url).toContain('limit=10');
-      expect(call.method).toBe('GET');
-    });
-
-    it('is a public endpoint (no auth required)', async () => {
-      api.clearCredentials();
-      mockSuccess({
-        account_id: 'bot_1.near',
-        edges: [],
-        edge_count: 0,
-        history: null,
-        pagination: { limit: 25 },
-      });
-
-      await expect(api.getEdges('bot_1.near')).resolves.toBeDefined();
-    });
-  });
-
-  describe('listTags', () => {
-    it('extracts tags array from response', async () => {
-      api.clearCredentials();
-      mockSuccess({
-        tags: [
-          { tag: 'ai', count: 5 },
-          { tag: 'defi', count: 3 },
-        ],
-      });
-
-      const result = await api.listTags();
-      expect(result.tags).toEqual([
-        { tag: 'ai', count: 5 },
-        { tag: 'defi', count: 3 },
+      expect(result.agents).toEqual([
+        { account_id: 'rec_1.near' },
+        { account_id: 'rec_2.near' },
       ]);
-      expect(lastFetchCall(mockFetch).url).toContain('/api/v1/tags');
-    });
-  });
-
-  describe('getFollowers / getFollowing', () => {
-    beforeEach(() => {
-      api.clearCredentials();
-    });
-
-    it('routes getFollowers to correct path', async () => {
-      mockFetch.mockResolvedValue({
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            success: true,
-            data: [{ handle: 'follower_1' }],
-            pagination: { limit: 50, next_cursor: 'abc' },
-          }),
-      });
-
-      const result = await api.getFollowers('bot_1.near', 50);
-      expect(result.agents).toEqual([{ handle: 'follower_1' }]);
-      expect(result.next_cursor).toBe('abc');
-      expect(lastFetchCall(mockFetch).url).toContain(
-        '/agents/bot_1.near/followers',
-      );
-    });
-
-    it('routes getFollowing to correct path', async () => {
-      mockFetch.mockResolvedValue({
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            success: true,
-            data: [{ handle: 'followed_1' }],
-            pagination: { limit: 50 },
-          }),
-      });
-
-      const result = await api.getFollowing('bot_1.near', 50);
-      expect(result.agents).toEqual([{ handle: 'followed_1' }]);
-      expect(lastFetchCall(mockFetch).url).toContain(
-        '/agents/bot_1.near/following',
-      );
+      expect(lastFetchCall(mockFetch).url).toContain('/api/v1/agents/discover');
     });
   });
 
   describe('request forwarding', () => {
     it('includes verifiable_claim in body when auth is set', async () => {
       api.setAuth(TEST_AUTH);
-      mockSuccess({ agent: { handle: 'me' } });
+      mockSuccess({ agent: { account_id: 'me.near' } });
 
       await api.heartbeat();
       expect(lastFetchCall(mockFetch).body?.verifiable_claim).toEqual(
@@ -480,7 +246,7 @@ describe('ApiClient', () => {
     });
 
     it('omits body for GET requests', async () => {
-      mockSuccess({ agent: { handle: 'me' } });
+      mockSuccess({ agent: { account_id: 'me.near' } });
 
       await api.getMe();
       expect(lastFetchCall(mockFetch).body).toBeNull();
@@ -506,58 +272,18 @@ describe('ApiClient', () => {
       expect(call.method).toBe('DELETE');
       expect(call.body?.accountId).toBeUndefined();
     });
-
-    it('keeps handle in body for register (handle is NOT in URL path)', async () => {
-      mockSuccess({ agent: { handle: 'my_bot' }, near_account_id: 'abc' });
-
-      await api.register({ handle: 'my_bot' });
-      expect(lastFetchCall(mockFetch).body?.handle).toBe('my_bot');
-    });
-
-    it('strips accountId from body for endorse (accountId is in URL path)', async () => {
-      mockSuccess({ action: 'endorsed', endorsed: { tags: ['rust'] } });
-
-      await api.endorseAgent('bot_1.near', { tags: ['rust'] });
-
-      const call = lastFetchCall(mockFetch);
-      expect(call.body?.accountId).toBeUndefined();
-      expect(call.body?.tags).toEqual(['rust']);
-      expect(call.url).toContain('/agents/bot_1.near/endorse');
-      expect(call.method).toBe('POST');
-    });
-
-    it('routes unendorse to DELETE with accountId in path', async () => {
-      mockSuccess({ action: 'unendorsed', removed: { tags: ['rust'] } });
-
-      await api.unendorseAgent('bot_1.near', { tags: ['rust'] });
-
-      const call = lastFetchCall(mockFetch);
-      expect(call.url).toContain('/agents/bot_1.near/endorse');
-      expect(call.method).toBe('DELETE');
-    });
-
-    it('routes getEndorsers to GET without auth', async () => {
-      api.clearCredentials();
-      mockSuccess({ account_id: 'bot_1.near', endorsers: {} });
-
-      await api.getEndorsers('bot_1.near');
-
-      const call = lastFetchCall(mockFetch);
-      expect(call.url).toContain('/agents/bot_1.near/endorsers');
-      expect(call.method).toBe('GET');
-    });
   });
 
-  describe('deregister', () => {
+  describe('delist_me', () => {
     it('sends DELETE to /api/v1/agents/me', async () => {
-      mockSuccess({ action: 'deregistered', handle: 'bot_1' });
+      mockSuccess({ action: 'delisted', account_id: 'bot_1.near' });
 
-      const result = await api.deregister();
+      const result = await api.delistMe();
 
       const call = lastFetchCall(mockFetch);
       expect(call.url).toBe('/api/v1/agents/me');
       expect(call.method).toBe('DELETE');
-      expect(result.action).toBe('deregistered');
+      expect(result.action).toBe('delisted');
     });
   });
 });

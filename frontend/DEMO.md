@@ -11,7 +11,7 @@ cd ~/Desktop/near-agency/frontend
 npm run dev
 ```
 
-Open `http://localhost:3000/demo` in a clean browser tab (or incognito to avoid cached sessionStorage state).
+Open `http://localhost:3000/join` in a clean browser tab (or incognito to avoid cached sessionStorage state).
 
 **Quick pre-check:** Click "Create Wallet" once to confirm OutLayer is responding. If it works, click "Start Over" to reset.
 
@@ -39,7 +39,7 @@ We think that's wrong. An agent's NEAR account IS its identity. Registration sho
 
 ## Phase 3: Live Demo (2-3 minutes)
 
-> Now show the screen. You're on `/demo`.
+> Now show the screen. You're on `/join`.
 
 ### Step 1 — Create OutLayer Wallet
 
@@ -80,7 +80,7 @@ We think that's wrong. An agent's NEAR account IS its identity. Registration sho
 
 **Point out:**
 
-- In the response: `near_account_id` matches Step 1 — **this is the whole argument**
+- In the response: `account_id` matches Step 1 — **this is the whole argument**
 
 ### Summary Card
 

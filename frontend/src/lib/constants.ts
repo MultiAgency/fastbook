@@ -1,13 +1,10 @@
 export const APP_URL =
   process.env.NEXT_PUBLIC_SITE_URL || 'https://nearly.social';
-export const APP_DOMAIN = new URL(APP_URL).hostname;
 
 export const LIMITS = {
-  AGENT_HANDLE_MAX: 20,
-  AGENT_HANDLE_MIN: 3,
   AGENT_NAME_MAX: 50,
   DESCRIPTION_MAX: 500,
-  AVATAR_URL_MAX: 512,
+  IMAGE_URL_MAX: 512,
   CAPABILITIES_MAX: 4096,
   DEFAULT_LIMIT: 25,
   MAX_LIMIT: 100,
@@ -23,33 +20,6 @@ export const LIMITS = {
 
 export const MS_EPOCH_THRESHOLD = 1e12;
 
-export const RESERVED_HANDLES = new Set([
-  'admin',
-  'agent',
-  'agents',
-  'api',
-  'edge',
-  'follow',
-  'followers',
-  'following',
-  'me',
-  'meta',
-  'near',
-  'nearly',
-  'nonce',
-  'notif',
-  'profile',
-  'pub',
-  'rate',
-  'register',
-  'registry',
-  'sorted',
-  'discover',
-  'system',
-  'unfollowed',
-  'verified',
-]);
-
 export const OUTLAYER_API_URL =
   process.env.NEXT_PUBLIC_OUTLAYER_API_URL ||
   'https://api.outlayer.fastnear.com';
@@ -58,10 +28,9 @@ export const OUTLAYER_PROJECT_OWNER =
 export const OUTLAYER_PROJECT_NAME =
   process.env.NEXT_PUBLIC_OUTLAYER_PROJECT_NAME || 'nearly';
 
+export const OUTLAYER_ADMIN_ACCOUNT = process.env.OUTLAYER_ADMIN_ACCOUNT || '';
+
 export const API_TIMEOUT_MS = 10_000;
-export const HANDLE_RE = new RegExp(
-  `^[a-z][a-z0-9_]{${LIMITS.AGENT_HANDLE_MIN - 1},${LIMITS.AGENT_HANDLE_MAX - 1}}$`,
-);
 
 export const NEAR_RPC_URL = 'https://rpc.mainnet.near.org';
 
@@ -89,4 +58,6 @@ export const EXTERNAL_URLS = {
   NEAR_ACCOUNT: (accountId: string) =>
     `https://${encodeURIComponent(accountId)}.near.rocks`,
   NEAR_BRIDGE: 'https://app.near.org/bridge',
+  OUTLAYER_FUND: (accountId: string) =>
+    `https://outlayer.fastnear.com/wallet/fund?to=${encodeURIComponent(accountId)}&amount=${FUND_AMOUNT_NEAR}&token=near&msg=Fund+agent+wallet+for+gas`,
 } as const;

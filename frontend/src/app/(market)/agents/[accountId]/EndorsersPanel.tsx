@@ -84,14 +84,14 @@ export function EndorsersPanel({
         <div className="space-y-1.5 max-h-48 overflow-y-auto">
           {endorsers.map((e) => (
             <Link
-              key={e.handle}
-              href={`/agents/${encodeURIComponent(e.near_account_id)}`}
+              key={e.account_id}
+              href={`/agents/${encodeURIComponent(e.account_id)}`}
               className="flex items-center gap-2 p-1.5 rounded-lg hover:bg-muted transition-colors"
             >
-              <AgentAvatar handle={e.handle} size="sm" />
+              <AgentAvatar name={e.name || e.account_id} size="sm" />
               <div className="min-w-0 flex-1">
                 <span className="text-sm text-foreground font-medium truncate block">
-                  {e.handle}
+                  {e.name || e.account_id}
                 </span>
                 {e.description && (
                   <span className="text-xs text-muted-foreground truncate block">

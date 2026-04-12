@@ -49,7 +49,13 @@ export async function kvGetAgent(
   if (!res.ok) return null;
   const data = (await res.json()) as KvListResponse;
   const entry = data.entries?.[0];
-  if (!entry || entry.value === null || entry.value === undefined) return null;
+  if (
+    !entry ||
+    entry.value === null ||
+    entry.value === undefined ||
+    entry.value === ''
+  )
+    return null;
   return entry.value;
 }
 
@@ -78,7 +84,11 @@ async function kvPaginate(
     );
     if (!res.ok) break;
     const data = (await res.json()) as KvListResponse;
-    all.push(...(data.entries ?? []));
+    // Filter out soft-deleted entries: FastData returns value "" for null-writes.
+    const live = (data.entries ?? []).filter(
+      (e) => e.value !== null && e.value !== undefined && e.value !== '',
+    );
+    all.push(...live);
     if (!data.page_token || (limit !== undefined && all.length >= limit)) break;
     pageToken = data.page_token;
   }
@@ -112,7 +122,7 @@ export async function kvListAgent(
 export async function kvGetAll(key: string): Promise<KvEntry[]> {
   return kvPaginate(`${FASTDATA_URL}/v0/latest/${NAMESPACE}`, {
     key,
-    limit: PAGE_SIZE,
+    limit: FASTDATA_PAGE_SIZE,
   });
 }
 
@@ -126,7 +136,7 @@ export async function kvListAll(
 ): Promise<KvEntry[]> {
   return kvPaginate(
     `${FASTDATA_URL}/v0/latest/${NAMESPACE}`,
-    { key_prefix: prefix, limit: limit ?? PAGE_SIZE },
+    { key_prefix: prefix, limit: limit ?? FASTDATA_PAGE_SIZE },
     limit,
   );
 }
@@ -134,8 +144,6 @@ export async function kvListAll(
 // ---------------------------------------------------------------------------
 // Multi-agent batch reads (/v0/multi — known predecessors)
 // ---------------------------------------------------------------------------
-
-const MULTI_BATCH_SIZE = FASTDATA_MULTI_BATCH_SIZE;
 
 /**
  * Batch lookup for multiple agent keys. Returns values aligned to input.
@@ -147,8 +155,8 @@ export async function kvMultiAgent(
   if (lookups.length === 0) return [];
 
   const results: (unknown | null)[] = new Array(lookups.length).fill(null);
-  for (let i = 0; i < lookups.length; i += MULTI_BATCH_SIZE) {
-    const chunk = lookups.slice(i, i + MULTI_BATCH_SIZE);
+  for (let i = 0; i < lookups.length; i += FASTDATA_MULTI_BATCH_SIZE) {
+    const chunk = lookups.slice(i, i + FASTDATA_MULTI_BATCH_SIZE);
     const keys = chunk.map((l) => `${NAMESPACE}/${l.accountId}/${l.key}`);
     const res = await fetchWithTimeout(
       `${FASTDATA_URL}/v0/multi`,
@@ -164,7 +172,9 @@ export async function kvMultiAgent(
     for (let j = 0; j < (data.entries ?? []).length; j++) {
       const e = data.entries[j];
       results[i + j] =
-        e && e.value !== null && e.value !== undefined ? e.value : null;
+        e && e.value !== null && e.value !== undefined && e.value !== ''
+          ? e.value
+          : null;
     }
   }
   return results;
@@ -174,5 +184,4 @@ export async function kvMultiAgent(
 // Constants
 // ---------------------------------------------------------------------------
 
-const PAGE_SIZE = FASTDATA_PAGE_SIZE;
 const MAX_PAGES = 50;

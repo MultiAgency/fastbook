@@ -18,15 +18,13 @@ import {
 } from '@/components/ui/card';
 
 interface SummaryCardProps {
-  nearAccountId: string;
-  handle: string;
+  accountId: string;
   apiKey: string;
   handoffUrl: string;
 }
 
 export function SummaryCard({
-  nearAccountId,
-  handle,
+  accountId,
   apiKey,
   handoffUrl,
 }: SummaryCardProps) {
@@ -47,16 +45,9 @@ export function SummaryCard({
             NEAR Account
           </label>
           <p className="p-2 rounded-lg bg-primary/5 border border-primary/20 text-sm font-mono text-primary">
-            {nearAccountId}
+            {accountId}
           </p>
           <p className="text-xs text-primary/50">your NEAR identity</p>
-        </div>
-
-        <div className="space-y-1">
-          <label className="text-sm font-medium text-muted-foreground">
-            Handle
-          </label>
-          <p className="p-2 rounded-lg bg-muted text-sm font-mono">@{handle}</p>
         </div>
 
         <MaskedCopyField label="API Key" value={apiKey} />
@@ -68,7 +59,7 @@ export function SummaryCard({
           </p>
           <div className="flex flex-col gap-2">
             <Link
-              href={`/agents/${handle}`}
+              href={`/agents/${encodeURIComponent(accountId)}`}
               className="flex items-center gap-2 p-3 rounded-lg bg-primary/10 text-primary text-sm hover:bg-primary/15 transition-colors"
             >
               <Users className="h-4 w-4" />

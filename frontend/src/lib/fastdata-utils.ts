@@ -3,12 +3,30 @@
  *
  * Key schema (per-predecessor — each agent writes under their NEAR account):
  *   profile              → full AgentRecord
- *   tag/{tag}            → {score: follower_count} (per-tag ranking)
- *   cap/{ns}/{value}     → {score: follower_count} (per-capability ranking)
+ *   tag/{tag}            → true (existence index)
+ *   cap/{ns}/{value}     → true (existence index)
  */
 
 import type { Agent } from '@/types';
-import type { KvEntry } from './fastdata';
+import { type KvEntry, kvGetAll, kvListAgent } from './fastdata';
+
+/**
+ * Count an account's followers and following by scanning the live follow graph.
+ * Used on write responses (which need freshness) and alongside endorsement
+ * fetches on read paths that overlay live counts onto a stored profile.
+ */
+export async function liveNetworkCounts(
+  accountId: string,
+): Promise<{ follower_count: number; following_count: number }> {
+  const [followerEntries, followingEntries] = await Promise.all([
+    kvGetAll(`graph/follow/${accountId}`),
+    kvListAgent(accountId, 'graph/follow/'),
+  ]);
+  return {
+    follower_count: followerEntries.length,
+    following_count: followingEntries.length,
+  };
+}
 
 /** Type-safe null filter for agent profile arrays. */
 export function filterAgents(profiles: (unknown | null)[]): Agent[] {
@@ -42,14 +60,15 @@ export function buildEndorsementCounts(
 
 /** Build per-agent KV entries for profile, tags, and capabilities. */
 export function agentEntries(agent: Agent): Record<string, unknown> {
+  const { follower_count: _, following_count: __, ...rest } = agent;
   const entries: Record<string, unknown> = {
-    profile: agent,
+    profile: { ...rest, follower_count: 0, following_count: 0 },
   };
   for (const tag of agent.tags) {
-    entries[`tag/${tag}`] = { score: agent.follower_count };
+    entries[`tag/${tag}`] = true;
   }
   for (const [ns, val] of extractCapabilityPairs(agent.capabilities)) {
-    entries[`cap/${ns}/${val}`] = { score: agent.follower_count };
+    entries[`cap/${ns}/${val}`] = true;
   }
   return entries;
 }
@@ -104,18 +123,16 @@ export function endorsementKey(
 
 /** Compact agent summary for activity feeds and follower lists. */
 export function profileSummary(agent: Agent): {
-  handle: string;
+  account_id: string;
   name: string | null;
-  near_account_id: string;
   description: string;
-  avatar_url: string | null;
+  image: string | null;
 } {
   return {
-    handle: agent.handle,
+    account_id: agent.account_id,
     name: agent.name,
-    near_account_id: agent.near_account_id,
     description: agent.description,
-    avatar_url: agent.avatar_url,
+    image: agent.image,
   };
 }
 
@@ -158,8 +175,10 @@ const GAP_SCORE: Record<string, number> = {
   capabilities: 40,
 };
 
-/** Compute profile completeness from agent data (matches wasm/src/agent.rs). */
-export function profileCompleteness(agent: Agent): number {
+/** Compute profile completeness from agent data. */
+export function profileCompleteness(
+  agent: Parameters<typeof profileGaps>[0],
+): number {
   const gaps = profileGaps(agent);
   const total = Object.values(GAP_SCORE).reduce((a, b) => a + b, 0);
   const lost = gaps.reduce((s, g) => s + (GAP_SCORE[g] ?? 0), 0);

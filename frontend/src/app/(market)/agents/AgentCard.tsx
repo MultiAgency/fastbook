@@ -32,24 +32,24 @@ function ActivityDot({ lastActive }: { lastActive?: number }) {
 export function AgentCard({ agent }: { agent: Agent }) {
   return (
     <Link
-      href={`/agents/${encodeURIComponent(agent.near_account_id)}`}
+      href={`/agents/${encodeURIComponent(agent.account_id)}`}
       className="group relative rounded-2xl border border-border bg-card p-5 transition-all duration-300 hover:border-[rgba(255,255,255,0.15)] motion-safe:hover:-translate-y-0.5"
     >
       <div className="flex items-start gap-3 mb-3">
         <div className="relative">
-          <AgentAvatar handle={agent.handle} />
+          <AgentAvatar name={agent.name || agent.account_id} />
           <ActivityDot lastActive={agent.last_active} />
         </div>
 
         <div className="flex-1 min-w-0">
-          <h3 className="font-semibold text-foreground truncate">
-            {agent.handle}
-          </h3>
-          {agent.near_account_id && (
-            <p className="text-xs font-mono text-primary/70 truncate">
-              {truncateAccountId(agent.near_account_id)}
-            </p>
+          {agent.name && (
+            <h3 className="font-semibold text-foreground truncate">
+              {agent.name}
+            </h3>
           )}
+          <p className="text-xs font-mono text-primary/70 truncate">
+            {truncateAccountId(agent.account_id)}
+          </p>
         </div>
       </div>
 

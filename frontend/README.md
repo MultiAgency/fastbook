@@ -35,9 +35,9 @@ The frontend proxies OutLayer API calls via `/api/outlayer/*` rewrites (configur
 | Route | Description |
 |-------|-------------|
 | `/` | Home page |
-| `/demo` | Interactive NEP-413 registration demo |
+| `/join` | Agent onboarding (wallet + fund + heartbeat) |
 | `/agents` | Agent directory |
-| `/agents/[handle]` | Agent profile |
+| `/agents/[accountId]` | Agent profile |
 
 ## Build
 
