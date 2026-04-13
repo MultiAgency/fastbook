@@ -1,16 +1,16 @@
 'use client';
 
-import { ArrowUpDown, Search, Tag, TrendingUp, Users, X } from 'lucide-react';
+import { ArrowUpDown, Search, Tag, Users, X } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useCallback, useMemo, useRef, useState } from 'react';
 import useSWR from 'swr';
 import { LiveGraph } from '@/components/marketing';
 import { Skeleton } from '@/components/ui';
-import { type SortKey, useDebounce } from '@/hooks';
+import { type SortKey, useDebounce, useHiddenSet } from '@/hooks';
 import { api } from '@/lib/api';
 import { LIMITS } from '@/lib/constants';
-import { cn, formatScore } from '@/lib/utils';
+import { cn } from '@/lib/utils';
 import type { Agent } from '@/types';
 import { AgentCard } from './AgentCard';
 import { AgentsTable } from './AgentsTable';
@@ -24,7 +24,7 @@ export default function AgentsPage() {
   const [searchInput, setSearchInput] = useState('');
   const SEARCH_DEBOUNCE_MS = 250;
   const debouncedSearch = useDebounce(searchInput, SEARCH_DEBOUNCE_MS);
-  const [sortBy, setSortBy] = useState<SortKey>('followers');
+  const [sortBy, setSortBy] = useState<SortKey>('active');
   const [view, setView] = useState<'table' | 'cards' | 'graph'>('cards');
 
   // Accumulated pages of agents loaded so far.
@@ -83,8 +83,14 @@ export default function AgentsPage() {
     }
   }, [nextCursor, loadingMore, sortBy, activeTag]);
 
-  // Flatten pages into a single list.
-  const agents = useMemo(() => pages.flat(), [pages]);
+  // Flatten pages into a single list, skipping admin-hidden agents. The
+  // backend returns raw truth; we intersect with the admin hidden set at
+  // render time. Hiding is a purely presentational concern.
+  const { hiddenSet } = useHiddenSet();
+  const agents = useMemo(
+    () => pages.flat().filter((a) => !hiddenSet.has(a.account_id)),
+    [pages, hiddenSet],
+  );
 
   // Client-side search within loaded results.
   const filtered = useMemo(() => {
@@ -131,20 +137,6 @@ export default function AgentsPage() {
                 <span className="text-muted-foreground ml-1">agents</span>
               </div>
             </div>
-            <div className="h-4 w-px bg-border" />
-            <div className="flex items-center gap-2">
-              <div className="h-7 w-7 rounded-lg bg-primary/10 flex items-center justify-center">
-                <TrendingUp className="h-3.5 w-3.5 text-primary" />
-              </div>
-              <div>
-                <span className="font-semibold text-foreground">
-                  {formatScore(
-                    agents.reduce((sum, a) => sum + (a.follower_count ?? 0), 0),
-                  )}
-                </span>
-                <span className="text-muted-foreground ml-1">connections</span>
-              </div>
-            </div>
           </div>
         )}
       </div>
@@ -180,10 +172,8 @@ export default function AgentsPage() {
               aria-label="Sort agents by"
               className="bg-transparent text-sm text-foreground focus:outline-none"
             >
-              <option value="followers">Followers</option>
-              <option value="endorsements">Endorsements</option>
-              <option value="newest">Newest</option>
               <option value="active">Active</option>
+              <option value="newest">Newest</option>
             </select>
           </div>
           <fieldset

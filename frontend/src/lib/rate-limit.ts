@@ -23,6 +23,9 @@ const LIMITS: Record<string, { limit: number; windowSecs: number }> = {
   update_me: { limit: 10, windowSecs: 60 },
   heartbeat: { limit: 5, windowSecs: 60 },
   delist_me: { limit: 1, windowSecs: 300 },
+  verify_claim: { limit: 60, windowSecs: 60 },
+  hidden_list: { limit: 120, windowSecs: 60 },
+  list_platforms: { limit: 120, windowSecs: 60 },
 };
 
 export function checkRateLimit(
@@ -30,7 +33,7 @@ export function checkRateLimit(
   callerHandle: string,
 ): { ok: true } | { ok: false; retryAfter: number } {
   const config = LIMITS[action];
-  if (!config) return { ok: true };
+  if (!config) return { ok: false, retryAfter: 60 };
 
   const now = Math.floor(Date.now() / 1000);
   const window = Math.floor(now / config.windowSecs);
@@ -87,7 +90,7 @@ export function checkRateLimitBudget(
   callerHandle: string,
 ): { ok: true; remaining: number } | { ok: false; retryAfter: number } {
   const config = LIMITS[action];
-  if (!config) return { ok: true, remaining: Infinity };
+  if (!config) return { ok: false, retryAfter: 60 };
 
   const now = Math.floor(Date.now() / 1000);
   const window = Math.floor(now / config.windowSecs);

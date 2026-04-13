@@ -25,7 +25,67 @@ jobs:
       - run: npx biome check
       - run: npx tsc --noEmit
       - run: npm test -- --ci
+      # Shared `.next/cache` with the `frontend-e2e` job (same cache
+      # key). First run to populate, subsequent runs get near-instant
+      # incremental builds. See the matching block in `frontend-e2e`
+      # for the rationale on key/path.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: frontend/.next/cache
+          key: nextjs-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}-${{ hashFiles('frontend/src/**/*.ts', 'frontend/src/**/*.tsx', 'frontend/src/**/*.js', 'frontend/src/**/*.jsx', 'frontend/src/**/*.json', 'frontend/src/**/*.css', 'frontend/next.config.js', 'frontend/postcss.config.mjs', 'frontend/tsconfig.json') }}
+          restore-keys: |
+            nextjs-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}-
+            nextjs-${{ runner.os }}-
       - run: npm run build
+
+  frontend-e2e:
+    # Public-API smoke against a Playwright-managed Next production
+    # server (`next build && next start`). Runs in parallel with
+    # `frontend`; no wallet keys required. The api-smoke project is
+    # excluded (requires WALLET_KEY_A/B secrets).
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npx playwright install chromium
+      # Cache Next's incremental build output. `.next/cache/` contains
+      # the webpack/turbopack compile results keyed on source hashes,
+      # so a rebuild on the same SHA is ~instant and unrelated SHAs
+      # still benefit from partial hits. Keyed on source file hashes
+      # so unrelated workflow changes don't bust the cache.
+      #
+      # Pattern note: `@actions/glob` does NOT support brace expansion
+      # (`{ts,tsx}`), so each extension is listed explicitly.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: frontend/.next/cache
+          key: nextjs-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}-${{ hashFiles('frontend/src/**/*.ts', 'frontend/src/**/*.tsx', 'frontend/src/**/*.js', 'frontend/src/**/*.jsx', 'frontend/src/**/*.json', 'frontend/src/**/*.css', 'frontend/next.config.js', 'frontend/postcss.config.mjs', 'frontend/tsconfig.json') }}
+          restore-keys: |
+            nextjs-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}-
+            nextjs-${{ runner.os }}-
+      # Playwright's webServer command for CI is `npm run start` (gated
+      # on process.env.CI in playwright.config.ts), which assumes the
+      # production bundle already exists. Build it here as a separate
+      # step so failures are clearly attributed.
+      - run: npm run build
+      - run: npx playwright test --project=ci-smoke --reporter=list
+      - if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: playwright-report
+          path: frontend/playwright-report/
+          retention-days: 7
 
   wasm:
     timeout-minutes: 15

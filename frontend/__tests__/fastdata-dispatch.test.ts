@@ -1,7 +1,12 @@
 import { clearCache } from '@/lib/cache';
 import * as fastdata from '@/lib/fastdata';
 import { dispatchFastData } from '@/lib/fastdata-dispatch';
-import { profileCompleteness, profileGaps } from '@/lib/fastdata-utils';
+import {
+  agentEntries,
+  profileCompleteness,
+  profileGaps,
+} from '@/lib/fastdata-utils';
+import type { Agent } from '@/types';
 import { AGENT_ALICE } from './fixtures';
 
 jest.mock('@/lib/constants', () => ({
@@ -126,6 +131,53 @@ describe('profileCompleteness', () => {
         AGENT_ALICE as Parameters<typeof profileCompleteness>[0],
       ),
     ).toBe(60);
+  });
+});
+
+describe('agentEntries', () => {
+  // Load-bearing invariant: stored profile is canonical self-authored state.
+  // Counts are derived at read time via liveNetworkCounts / withLiveCounts
+  // and never written to FastData. Regressing this pollutes storage
+  // persistently — a downstream "list endpoints omit counts" test would
+  // catch nothing if storage already holds stale counts. See the project
+  // plan's "Storage invariant enforced" entry and the Do-not rule against
+  // re-introducing bulk count enrichment.
+  it('strips derived count and endorsement fields before write', () => {
+    const agent: Agent = {
+      account_id: 'alice.near',
+      name: 'Alice',
+      description: 'Test agent with a sufficient description',
+      image: null,
+      tags: ['ai'],
+      capabilities: { skills: ['testing'] },
+      created_at: 1700000000,
+      last_active: 1700001000,
+      follower_count: 42,
+      following_count: 7,
+      endorsement_count: 3,
+      endorsements: { skills: { testing: 2 } },
+    };
+
+    const entries = agentEntries(agent);
+    const stored = entries.profile as Record<string, unknown>;
+
+    expect(stored).not.toHaveProperty('follower_count');
+    expect(stored).not.toHaveProperty('following_count');
+    expect(stored).not.toHaveProperty('endorsement_count');
+    expect(stored).not.toHaveProperty('endorsements');
+
+    // Canonical fields are preserved.
+    expect(stored.account_id).toBe('alice.near');
+    expect(stored.name).toBe('Alice');
+    expect(stored.description).toBe('Test agent with a sufficient description');
+    expect(stored.tags).toEqual(['ai']);
+    expect(stored.capabilities).toEqual({ skills: ['testing'] });
+    expect(stored.created_at).toBe(1700000000);
+    expect(stored.last_active).toBe(1700001000);
+
+    // Tag and capability index keys are still written alongside profile.
+    expect(entries['tag/ai']).toBe(true);
+    expect(entries['cap/skills/testing']).toBe(true);
   });
 });
 
@@ -318,38 +370,6 @@ describe('dispatchFastData', () => {
   });
 
   describe('list_agents', () => {
-    it('fetches profiles and sorts by follower count', async () => {
-      const bob = {
-        ...AGENT_ALICE,
-        account_id: 'bob.near',
-      };
-      mockKvGetAll.mockReset();
-      mockKvGetAll.mockImplementation(async (key: string) => {
-        if (key === 'profile')
-          return [
-            entry('bob.near', 'profile', bob),
-            entry('alice.near', 'profile', AGENT_ALICE),
-          ];
-        return []; // deregistered/* checks
-      });
-      // Alice has 3 followers, Bob has 1 — drives sort order via getFollowerCountMap
-      mockKvListAll.mockResolvedValue([
-        entry('f1.near', 'graph/follow/alice.near', { at: 1000 }),
-        entry('f2.near', 'graph/follow/alice.near', { at: 1001 }),
-        entry('f3.near', 'graph/follow/alice.near', { at: 1002 }),
-        entry('f4.near', 'graph/follow/bob.near', { at: 1003 }),
-      ]);
-
-      const data = expectData(
-        await dispatchFastData('list_agents', { sort: 'followers', limit: 25 }),
-      ) as Record<string, unknown>;
-      const agents = data.agents as Record<string, unknown>[];
-      expect(agents).toHaveLength(2);
-      // Alice (3 followers) should sort before Bob (1 follower)
-      expect(agents[0].account_id).toBe('alice.near');
-      expect(agents[1].account_id).toBe('bob.near');
-    });
-
     it('filters by tag', async () => {
       mockKvGetAll.mockResolvedValue([
         entry('alice.near', 'tag/ai', { score: 10 }),
@@ -377,7 +397,7 @@ describe('dispatchFastData', () => {
       expect(mockKvGetAll).toHaveBeenCalledWith('cap/skills/testing');
     });
 
-    it('excludes hidden accounts from results', async () => {
+    it('keeps hidden agents in list_agents results without a hidden flag', async () => {
       const bob = { ...AGENT_ALICE, account_id: 'bob.near' };
       mockKvGetAll.mockReset();
       mockKvGetAll.mockImplementation(async (key: string) => {
@@ -388,7 +408,8 @@ describe('dispatchFastData', () => {
           ];
         return [];
       });
-      // Admin has hidden bob
+      // Admin has hidden bob — hiding is a presentation concern, not a data
+      // one. The backend returns raw graph truth; no flag is stamped.
       mockKvListAgent.mockImplementation(async (id: string, prefix: string) => {
         if (id === 'admin.near' && prefix === 'hidden/')
           return [entry('admin.near', 'hidden/bob.near', { at: 1000 })];
@@ -399,8 +420,11 @@ describe('dispatchFastData', () => {
         await dispatchFastData('list_agents', { limit: 25 }),
       ) as Record<string, unknown>;
       const agents = data.agents as Record<string, unknown>[];
-      expect(agents).toHaveLength(1);
-      expect(agents[0].account_id).toBe('alice.near');
+      expect(agents).toHaveLength(2);
+      const byId = Object.fromEntries(agents.map((a) => [a.account_id, a]));
+      expect(byId['bob.near']).toBeDefined();
+      expect(byId['bob.near'].hidden).toBeUndefined();
+      expect(byId['alice.near'].hidden).toBeUndefined();
     });
 
     it('sorts by newest (created_at descending)', async () => {
@@ -451,45 +475,6 @@ describe('dispatchFastData', () => {
       const agents = data.agents as Record<string, unknown>[];
       expect(agents).toHaveLength(2);
       // Bob (last_active: 1700005000) is more recent than Alice (1700001000)
-      expect(agents[0].account_id).toBe('bob.near');
-      expect(agents[1].account_id).toBe('alice.near');
-    });
-
-    it('sorts by endorsements descending', async () => {
-      const bob = { ...AGENT_ALICE, account_id: 'bob.near' };
-      const alice = { ...AGENT_ALICE };
-      mockKvGetAll.mockReset();
-      mockKvGetAll.mockImplementation(async (key: string) => {
-        if (key === 'profile')
-          return [
-            entry('alice.near', 'profile', alice),
-            entry('bob.near', 'profile', bob),
-          ];
-        return [];
-      });
-      // Live endorsement counts are overlaid from a cross-predecessor
-      // scan of `endorsing/`: 3 endorsements for bob, 1 for alice.
-      mockKvListAll.mockImplementation(async (prefix: string) => {
-        if (prefix === 'endorsing/') {
-          return [
-            entry('x.near', 'endorsing/bob.near/tags/ai', { at: 1 }),
-            entry('y.near', 'endorsing/bob.near/tags/ai', { at: 1 }),
-            entry('z.near', 'endorsing/bob.near/tags/defi', { at: 1 }),
-            entry('x.near', 'endorsing/alice.near/tags/ai', { at: 1 }),
-          ];
-        }
-        return [];
-      });
-
-      const data = expectData(
-        await dispatchFastData('list_agents', {
-          sort: 'endorsements',
-          limit: 25,
-        }),
-      ) as Record<string, unknown>;
-      const agents = data.agents as Record<string, unknown>[];
-      expect(agents).toHaveLength(2);
-      // Bob (3 live endorsements) sorts before Alice (1)
       expect(agents[0].account_id).toBe('bob.near');
       expect(agents[1].account_id).toBe('alice.near');
     });

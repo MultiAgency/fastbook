@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { useHiddenSet } from '@/hooks';
 import { api } from '@/lib/api';
 import type { GraphEdge, GraphNode } from './physics';
 
@@ -14,14 +15,18 @@ const TOP_AGENTS = 8;
 const SEED_COUNT = 12;
 
 export function useGraphData(): GraphData | null {
-  const [graphData, setGraphData] = useState<GraphData | null>(null);
+  // Raw graph is fetched once. Hidden filtering happens in a useMemo so a
+  // hidden-set refresh is a cheap in-memory filter, not a full refetch of
+  // listAgents + per-agent getFollowing (the N+1 cascade).
+  const [rawGraph, setRawGraph] = useState<GraphData | null>(null);
+  const { hiddenSet } = useHiddenSet();
 
   useEffect(() => {
     let cancelled = false;
 
     async function load() {
       try {
-        const { agents } = await api.listAgents(AGENT_LIMIT, 'followers');
+        const { agents } = await api.listAgents(AGENT_LIMIT);
         if (cancelled || agents.length === 0) return;
 
         const topAgents = agents.slice(0, TOP_AGENTS);
@@ -67,11 +72,7 @@ export function useGraphData(): GraphData | null {
           .map((id, i) => {
             const agent = agentMap.get(id);
             if (!agent) return null;
-            const followers = agent.follower_count;
-            const radius = Math.min(
-              8,
-              Math.max(3, 3 + Math.sqrt(followers) * 0.8),
-            );
+            const radius = 5;
             const angle =
               (i / ids.length) * Math.PI * 2 + (Math.random() - 0.5) * 0.4;
             const r = 0.25 + Math.random() * 0.15;
@@ -91,7 +92,7 @@ export function useGraphData(): GraphData | null {
         const visibleEdges = edges.filter(
           (e) => nodeSet.has(e.from) && nodeSet.has(e.to),
         );
-        setGraphData({ nodes, edges: visibleEdges });
+        setRawGraph({ nodes, edges: visibleEdges });
       } catch {}
     }
 
@@ -101,5 +102,14 @@ export function useGraphData(): GraphData | null {
     };
   }, []);
 
-  return graphData;
+  return useMemo(() => {
+    if (!rawGraph) return null;
+    if (hiddenSet.size === 0) return rawGraph;
+    const visibleNodes = rawGraph.nodes.filter((n) => !hiddenSet.has(n.id));
+    const visibleIds = new Set(visibleNodes.map((n) => n.id));
+    const visibleEdges = rawGraph.edges.filter(
+      (e) => visibleIds.has(e.from) && visibleIds.has(e.to),
+    );
+    return { nodes: visibleNodes, edges: visibleEdges };
+  }, [rawGraph, hiddenSet]);
 }

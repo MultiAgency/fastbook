@@ -2,6 +2,7 @@
 
 import { Check, Link2, Loader2 } from 'lucide-react';
 import { useCallback, useState } from 'react';
+import { IconBox } from '@/components/common/IconBox';
 import { MaskedCopyField } from '@/components/common/MaskedCopyField';
 import { GlowCard } from '@/components/marketing';
 import { Button } from '@/components/ui/button';
@@ -24,7 +25,6 @@ interface PlatformConnectionCardProps {
   description: string;
   requiresWalletKey: boolean;
   apiKey: string;
-  initialCredentials?: Record<string, unknown> | null;
 }
 
 export function PlatformConnectionCard({
@@ -33,15 +33,12 @@ export function PlatformConnectionCard({
   description,
   requiresWalletKey,
   apiKey,
-  initialCredentials,
 }: PlatformConnectionCardProps) {
-  const [status, setStatus] = useState<StepStatus>(
-    initialCredentials ? 'success' : 'idle',
-  );
+  const [status, setStatus] = useState<StepStatus>('idle');
   const [credentials, setCredentials] = useState<Record<
     string,
     unknown
-  > | null>(initialCredentials ?? null);
+  > | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const connect = useCallback(async () => {
@@ -67,13 +64,13 @@ export function PlatformConnectionCard({
   return (
     <GlowCard className="p-5">
       <div className="flex items-start gap-4">
-        <div className="h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
+        <IconBox>
           {status === 'success' ? (
             <Check className="h-5 w-5 text-primary" />
           ) : (
             <Link2 className="h-5 w-5 text-primary" />
           )}
-        </div>
+        </IconBox>
         <div className="flex-1 min-w-0">
           <h3 className="font-semibold text-foreground mb-1">{displayName}</h3>
           <p className="text-sm text-muted-foreground mb-3">{description}</p>

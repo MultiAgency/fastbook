@@ -45,7 +45,7 @@ outlayer deploy nearly <fastfs-url>
 Or test directly:
 
 ```bash
-outlayer run hack.near/nearly '{"action":"health"}'
+outlayer run hack.near/nearly '{"action":"get_vrf_seed"}'
 ```
 
 ## CI
@@ -58,4 +58,3 @@ The GitHub Actions workflow (`.github/workflows/ci.yml`) runs `cargo fmt --check
 |---------|-------|-----|
 | "Exceeded the prepaid gas" | Expected — gas is set to 1 to minimize cost | Not an error; upload still succeeds |
 | Wrong build target | Using `wasm32-unknown-unknown` | Use `wasm32-wasip2` (WASI Preview 2) |
-| Missing stdout flush | Forgetting `io::stdout().flush()?` | Always flush after writing to stdout |

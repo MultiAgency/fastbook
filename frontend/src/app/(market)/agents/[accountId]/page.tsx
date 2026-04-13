@@ -14,6 +14,7 @@ import { useParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import useSWR from 'swr';
 import { GlowCard } from '@/components/marketing';
+import { useHiddenSet } from '@/hooks';
 import { api } from '@/lib/api';
 import { EXTERNAL_URLS, NEAR_RPC_URL } from '@/lib/constants';
 import {
@@ -29,6 +30,7 @@ import { EndorsersPanel } from './EndorsersPanel';
 export default function AgentProfilePage() {
   const params = useParams();
   const accountId = decodeURIComponent(params.accountId as string);
+  const { hiddenSet, isLoading: hiddenLoading } = useHiddenSet();
 
   const {
     data: agent,
@@ -42,8 +44,15 @@ export default function AgentProfilePage() {
     },
   );
 
+  // Gate the balance fetch on the hidden set being fully loaded. On first
+  // paint `hiddenSet` is the empty fallback, which would otherwise let the
+  // NEAR RPC fire for a profile that turns out to be hidden. Once the set
+  // resolves, either the profile is visible (fetch fires) or it's hidden
+  // (key stays null, fetch never fires).
   const { data: balance } = useSWR<string | null>(
-    accountId ? `balance:${accountId}` : null,
+    accountId && !hiddenLoading && !hiddenSet.has(accountId)
+      ? `balance:${accountId}`
+      : null,
     async () => {
       const r = await fetch(NEAR_RPC_URL, {
         method: 'POST',
@@ -137,6 +146,22 @@ export default function AgentProfilePage() {
     );
   }
 
+  if (hiddenSet.has(accountId)) {
+    return (
+      <div className="max-w-4xl mx-auto px-6 pt-24 pb-16 text-center">
+        <p className="text-muted-foreground mb-3">
+          This agent has been hidden.
+        </p>
+        <Link
+          href="/agents"
+          className="inline-flex items-center gap-2 px-4 py-2 rounded-full border border-border text-sm text-muted-foreground hover:text-foreground transition-colors"
+        >
+          <ArrowLeft className="h-3.5 w-3.5" /> Back to directory
+        </Link>
+      </div>
+    );
+  }
+
   const endorsementTotal = totalEndorsements(agent);
 
   return (
@@ -173,7 +198,7 @@ export default function AgentProfilePage() {
           >
             <Users className="h-3.5 w-3.5 text-muted-foreground" />
             <span className="font-medium text-foreground">
-              {formatScore(agent.follower_count)}
+              {formatScore(agent.follower_count ?? 0)}
             </span>
             <span className="text-muted-foreground">followers</span>
             <ChevronDown
@@ -188,7 +213,7 @@ export default function AgentProfilePage() {
             className="flex items-center gap-1 hover:text-primary transition-colors"
           >
             <span className="font-medium text-foreground">
-              {formatScore(agent.following_count)}
+              {formatScore(agent.following_count ?? 0)}
             </span>
             <span className="text-muted-foreground">following</span>
             <ChevronDown
@@ -217,21 +242,20 @@ export default function AgentProfilePage() {
               ) : !listData?.length && !listLoading ? (
                 <p className="text-xs text-muted-foreground">None yet</p>
               ) : (
-                listData.map((a) => (
-                  <Link
-                    key={a.account_id}
-                    href={`/agents/${encodeURIComponent(a.account_id)}`}
-                    className="flex items-center gap-2 p-1.5 rounded-lg hover:bg-muted/50 transition-colors"
-                  >
-                    <AgentAvatar name={a.name || a.account_id} size="sm" />
-                    <span className="text-sm text-foreground truncate">
-                      {a.name || a.account_id}
-                    </span>
-                    <span className="text-xs text-muted-foreground ml-auto shrink-0">
-                      {formatScore(a.follower_count ?? 0)} followers
-                    </span>
-                  </Link>
-                ))
+                listData
+                  .filter((a) => !hiddenSet.has(a.account_id))
+                  .map((a) => (
+                    <Link
+                      key={a.account_id}
+                      href={`/agents/${encodeURIComponent(a.account_id)}`}
+                      className="flex items-center gap-2 p-1.5 rounded-lg hover:bg-muted/50 transition-colors"
+                    >
+                      <AgentAvatar name={a.name || a.account_id} size="sm" />
+                      <span className="text-sm text-foreground truncate">
+                        {a.name || a.account_id}
+                      </span>
+                    </Link>
+                  ))
               )}
               {listLoading && (
                 <div className="flex justify-center py-2">

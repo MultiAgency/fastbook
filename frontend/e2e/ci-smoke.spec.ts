@@ -26,13 +26,24 @@ test('list_agents', async ({ request }) => {
   const json = await res.json();
   expect(json.success).toBe(true);
   expect(Array.isArray(json.data.agents)).toBe(true);
+  // Smoke test is meaningless if the backend returns empty — the prototype
+  // always has registered agents in FastData. Catch total infra failure.
+  expect(json.data.agents.length).toBeGreaterThan(0);
 });
 
 test('list_agents — sort options', async ({ request }) => {
-  for (const sort of ['followers', 'endorsements', 'newest', 'active']) {
+  for (const sort of ['newest', 'active']) {
     const res = await request.get(`agents?limit=1&sort=${sort}`);
     expect(res.ok()).toBe(true);
   }
+});
+
+test('list_agents — sort=followers returns 400', async ({ request }) => {
+  const res = await request.get('agents?sort=followers');
+  expect(res.status()).toBe(400);
+  const json = await res.json();
+  expect(json.success).toBe(false);
+  expect(json.code).toBe('VALIDATION_ERROR');
 });
 
 test('list_tags', async ({ request }) => {
@@ -41,6 +52,7 @@ test('list_tags', async ({ request }) => {
   const json = await res.json();
   expect(json.success).toBe(true);
   expect(Array.isArray(json.data.tags)).toBe(true);
+  expect(json.data.tags.length).toBeGreaterThan(0);
 });
 
 test('list_capabilities', async ({ request }) => {
@@ -78,7 +90,7 @@ test('get_profile — 404 for nonexistent account', async ({ request }) => {
 // ── Social graph (public) ─────────────────────────────────────────────
 
 test('get_followers — public', async ({ request }) => {
-  const listRes = await request.get('agents?limit=1&sort=followers');
+  const listRes = await request.get('agents?limit=1&sort=active');
   const agents = (await listRes.json()).data?.agents ?? [];
   test.skip(agents.length === 0, 'No agents registered');
 
@@ -92,7 +104,7 @@ test('get_followers — public', async ({ request }) => {
 });
 
 test('get_following — public', async ({ request }) => {
-  const listRes = await request.get('agents?limit=1&sort=followers');
+  const listRes = await request.get('agents?limit=1&sort=active');
   const agents = (await listRes.json()).data?.agents ?? [];
   test.skip(agents.length === 0, 'No agents registered');
 
@@ -106,7 +118,7 @@ test('get_following — public', async ({ request }) => {
 });
 
 test('get_edges — public', async ({ request }) => {
-  const listRes = await request.get('agents?limit=1&sort=followers');
+  const listRes = await request.get('agents?limit=1&sort=active');
   const agents = (await listRes.json()).data?.agents ?? [];
   test.skip(agents.length === 0, 'No agents registered');
 
@@ -117,10 +129,18 @@ test('get_edges — public', async ({ request }) => {
   const json = await res.json();
   expect(json.success).toBe(true);
   expect(Array.isArray(json.data.edges)).toBe(true);
+  // Non-empty is required: the Edge schema pin below is only meaningful
+  // when at least one edge is inspected. Prototype state has a connected
+  // graph, so empty here means infra failure, not legitimate isolation.
+  expect(json.data.edges.length).toBeGreaterThan(0);
+  for (const edge of json.data.edges) {
+    expect(edge).toHaveProperty('account_id');
+    expect(['incoming', 'outgoing', 'mutual']).toContain(edge.direction);
+  }
 });
 
 test('get_endorsers — public', async ({ request }) => {
-  const listRes = await request.get('agents?limit=1&sort=endorsements');
+  const listRes = await request.get('agents?limit=1&sort=active');
   const agents = (await listRes.json()).data?.agents ?? [];
   test.skip(agents.length === 0, 'No agents registered');
 

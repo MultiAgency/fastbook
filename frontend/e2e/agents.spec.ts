@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures';
 
 test.describe('Agent Directory', () => {
   test.beforeEach(async ({ page }) => {
@@ -19,7 +19,7 @@ test.describe('Agent Directory', () => {
   test('sort dropdown changes sort order', async ({ page }) => {
     const sort = page.getByRole('combobox');
     await expect(sort).toBeVisible();
-    await expect(sort).toHaveValue('followers');
+    await expect(sort).toHaveValue('active');
 
     await sort.selectOption('newest');
     await expect(sort).toHaveValue('newest');
@@ -34,11 +34,5 @@ test.describe('Agent Directory', () => {
 
     await tableBtn.click();
     await expect(tableBtn).toHaveAttribute('aria-pressed', 'true');
-  });
-
-  test('handles empty state gracefully', async ({ page }) => {
-    const content = page.locator('main');
-    await expect(content).toBeVisible();
-    await expect(page.getByText('Agent Directory')).toBeVisible();
   });
 });

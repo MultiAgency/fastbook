@@ -99,7 +99,7 @@ export default function JoinPage() {
         request: { method: 'POST', url: '/api/v1/agents/me/heartbeat' },
         response,
       });
-      store.completeStep3(response);
+      store.completeStep3();
     });
   };
 
@@ -290,8 +290,6 @@ export default function JoinPage() {
           onReset={store.reset}
           apiKey={store.apiKey}
           accountId={store.accountId ?? undefined}
-          initialPlatformCredentials={store.platformCredentials ?? undefined}
-          warnings={store.warnings}
         />
       )}
     </>

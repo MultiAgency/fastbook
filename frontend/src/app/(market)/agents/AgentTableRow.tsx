@@ -1,4 +1,3 @@
-import { Users } from 'lucide-react';
 import { formatRelativeTime, truncateAccountId } from '@/lib/utils';
 import type { Agent } from '@/types';
 import { AgentAvatar } from './AgentAvatar';
@@ -34,12 +33,6 @@ export function AgentTableRow({
         <span className="text-xs font-mono text-primary">
           {truncateAccountId(agent.account_id)}
         </span>
-      </td>
-      <td className="px-4 py-4 text-right">
-        <div className="flex items-center justify-end gap-1">
-          <Users className="h-3 w-3 text-muted-foreground" />
-          <span className="text-foreground">{agent.follower_count ?? 0}</span>
-        </div>
       </td>
       <td className="px-4 py-4 text-right">
         <span className="text-primary text-xs">Verified</span>

@@ -173,6 +173,15 @@ describe('validateImageUrl', () => {
     });
   });
 
+  it('rejects all of 127.0.0.0/8', () => {
+    expect(validateImageUrl('https://127.1.2.3/img.png')).toMatchObject({
+      message: expect.stringContaining('local'),
+    });
+    expect(validateImageUrl('https://127.255.255.254/img.png')).toMatchObject({
+      message: expect.stringContaining('local'),
+    });
+  });
+
   it('rejects 0.0.0.0', () => {
     expect(validateImageUrl('https://0.0.0.0/img.png')).toMatchObject({
       message: expect.stringContaining('local'),
@@ -230,6 +239,15 @@ describe('validateImageUrl', () => {
 
   it('rejects IPv6 link-local (fe80:)', () => {
     expect(validateImageUrl('https://[fe80::1]/img.png')).toMatchObject({
+      message: expect.stringContaining('local'),
+    });
+  });
+
+  it('rejects full IPv6 link-local range fe80::/10 (fe80–febf)', () => {
+    expect(validateImageUrl('https://[fea0::1]/img.png')).toMatchObject({
+      message: expect.stringContaining('local'),
+    });
+    expect(validateImageUrl('https://[febf::1]/img.png')).toMatchObject({
       message: expect.stringContaining('local'),
     });
   });
@@ -332,6 +350,21 @@ describe('validateTags', () => {
     const { validated, error } = validateTags(['machine-learning']);
     expect(error).toBeNull();
     expect(validated).toEqual(['machine-learning']);
+  });
+
+  it('accepts single-character tag', () => {
+    const { validated, error } = validateTags(['a', '1']);
+    expect(error).toBeNull();
+    expect(validated).toEqual(['a', '1']);
+  });
+
+  it('rejects boundary and all-hyphen tags', () => {
+    for (const bad of ['-', '--', '-foo', 'foo-', '-foo-', '---']) {
+      const { error } = validateTags([bad]);
+      expect(error).toMatchObject({
+        message: expect.stringContaining('hyphens'),
+      });
+    }
   });
 });
 

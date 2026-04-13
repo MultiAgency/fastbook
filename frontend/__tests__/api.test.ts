@@ -13,6 +13,11 @@ const { mockFetch, restore } = setupFetchMock();
 afterAll(restore);
 
 beforeEach(() => {
+  // Defensive re-install: other suites (e.g. verify-claim.test.ts) swap
+  // global.fetch in their own setup and may leave it pointing elsewhere
+  // by the time this suite runs. Rebinding here keeps the suite resilient
+  // to cross-file pollution of global state.
+  global.fetch = mockFetch;
   jest.clearAllMocks();
   api.clearCredentials();
   api.setApiKey('wk_test');
@@ -117,7 +122,6 @@ describe('ApiClient', () => {
     it.each([
       ['VALIDATION_ERROR maps to 400', 'VALIDATION_ERROR', 400],
       ['STORAGE_ERROR maps to 500', 'STORAGE_ERROR', 500],
-      ['ROLLBACK_PARTIAL maps to 500', 'ROLLBACK_PARTIAL', 500],
     ])('%s', async (_label, code, expected) => {
       mockWasmError('error', code);
       try {
@@ -187,8 +191,7 @@ describe('ApiClient', () => {
         json: () =>
           Promise.resolve({
             success: true,
-            data: [{ account_id: 'bot_1.near' }],
-            pagination: { limit: 10, next_cursor: 'bot_2' },
+            data: { agents: [{ account_id: 'bot_1.near' }], cursor: 'bot_2' },
           }),
       });
 

@@ -208,10 +208,16 @@ record_latency() {
 # Fetches the endpoint and checks jq_expr == expected. Fails loudly on mismatch.
 verify() {
   local label="$1" path="$2" jq_expr="$3" expected="$4"
-  local body
-  body=$(curl -s --max-time 30 -H "Authorization: Bearer $API_KEY" "${NEARLY_API}${path}")
-  local actual
-  actual=$(echo "$body" | jq -r "$jq_expr" 2>/dev/null)
+  local body actual
+  # Retry briefly to absorb FastData indexer lag (writes land on-chain before
+  # the KV index observes the block — typically <2s). wk_ reads bypass the
+  # public cache, so per-instance stale reads are not a concern here.
+  for attempt in $(seq 1 5); do
+    body=$(curl -s --max-time 30 -H "Authorization: Bearer $API_KEY" "${NEARLY_API}${path}")
+    actual=$(echo "$body" | jq -r "$jq_expr" 2>/dev/null)
+    [[ "$actual" == "$expected" ]] && break
+    sleep 1
+  done
   if [[ "$actual" == "$expected" ]]; then
     printf "${C_GREEN}    ✓ verify:${C_RESET} %s\n" "$label"
   else
@@ -302,6 +308,27 @@ if [[ -z "$ACCOUNT_ID" ]]; then
     '.accounts[$acct] = {api_key:$key,account_id:$acct}' \
     "$CREDS_FILE" > "$tmp" && mv "$tmp" "$CREDS_FILE"
   info "Credentials saved to $CREDS_FILE"
+
+  info "Funding wallet with 0.02 NEAR from hack.near..."
+  if ! near tokens hack.near send-near "$ACCOUNT_ID" '0.02 NEAR' \
+      network-config mainnet sign-with-legacy-keychain send >/dev/null 2>&1; then
+    fail_report "fund_wallet" "transfer from hack.near to succeed" \
+      "near-cli-rs transfer failed" \
+      "near tokens hack.near send-near $ACCOUNT_ID '0.02 NEAR' network-config mainnet sign-with-legacy-keychain send" \
+      "Verify hack.near keychain (~/.near-credentials/mainnet/hack.near.json) and balance"
+  fi
+  info "Polling OutLayer balance until wallet is funded..."
+  for attempt in $(seq 1 30); do
+    bal=$(curl -s --max-time 10 \
+      -H "Authorization: Bearer $API_KEY" \
+      "${OUTLAYER_API}/wallet/v1/balance?chain=near" \
+      | jq -r '.balance // "0"' 2>/dev/null)
+    if [[ "$bal" != "0" && "$bal" != "null" && -n "$bal" ]]; then
+      info "Balance observed: $bal yoctoNEAR (after ${attempt}s)"
+      break
+    fi
+    sleep 1
+  done
 fi
 
 banner "Update Profile"
@@ -312,13 +339,21 @@ update_body=$(jq -n \
     tags: ["diagnostics", "testing"],
     capabilities: {"skills": ["api-testing", "diagnostics"], "languages": ["bash"]}}')
 
-api_call PATCH "/agents/me" "$update_body"
+# Retry on transient STORAGE_ERROR — newly funded wallets sometimes race
+# OutLayer's internal state even after balance is observable.
+for attempt in 1 2 3 4 5; do
+  api_call PATCH "/agents/me" "$update_body"
+  if [[ "$RESP_CODE" == "200" ]]; then break; fi
+  if ! echo "$RESP_BODY" | grep -q STORAGE_ERROR; then break; fi
+  info "update_me STORAGE_ERROR (attempt $attempt) — retrying in 3s..."
+  sleep 3
+done
 record_latency "update_me" "$RESP_MS"
 
 if [[ "$RESP_CODE" != "200" ]]; then
   fail_report "update_me" "HTTP 200" "HTTP $RESP_CODE: $RESP_BODY" \
     "curl -s -X PATCH ${NEARLY_API}/agents/me -H 'Authorization: Bearer \$KEY' -d '...'" \
-    "If 402: wallet unfunded — send ≥0.01 NEAR, then re-run"
+    "If 402: wallet has insufficient balance — send ≥0.01 NEAR, then re-run"
 fi
 
 completeness=$(echo "$RESP_BODY" | jq -r '.data.profile_completeness // 0' 2>/dev/null)
@@ -355,7 +390,7 @@ banner "Follow"
 STEP_NAME="follow"
 
 if [[ -z "$FOLLOW_TARGET" ]]; then
-  api_call GET "/agents?sort=followers&limit=1"
+  api_call GET "/agents?limit=1"
   FOLLOW_TARGET=$(echo "$RESP_BODY" | jq -r '.data.agents[0].account_id // empty' 2>/dev/null)
 fi
 
@@ -372,7 +407,7 @@ else
       "Check follow handler and rate limits"
   fi
 
-  action=$(echo "$RESP_BODY" | jq -r '.data.action // empty' 2>/dev/null)
+  action=$(echo "$RESP_BODY" | jq -r '.data.results[0].action // .data.action // empty' 2>/dev/null)
   if [[ "$action" == "followed" || "$action" == "already_following" ]]; then
     pass "Follow $FOLLOW_TARGET: $action (${RESP_MS}ms)"
   else
@@ -408,7 +443,7 @@ else
         "Check endorse handler"
     fi
 
-    endorse_action=$(echo "$RESP_BODY" | jq -r '.data.action // empty' 2>/dev/null)
+    endorse_action=$(echo "$RESP_BODY" | jq -r '.data.results[0].action // .data.action // empty' 2>/dev/null)
     pass "Endorse $FOLLOW_TARGET tag=$target_tag: $endorse_action (${RESP_MS}ms)"
 
     # Verify our account appears in target's endorsers for this tag
@@ -465,7 +500,7 @@ else
       "Check unfollow handler"
   fi
 
-  unfollow_action=$(echo "$RESP_BODY" | jq -r '.data.action // empty' 2>/dev/null)
+  unfollow_action=$(echo "$RESP_BODY" | jq -r '.data.results[0].action // .data.action // empty' 2>/dev/null)
   pass "Unfollow $FOLLOW_TARGET: $unfollow_action (${RESP_MS}ms)"
 
   # Verify caller no longer in target's followers list
@@ -489,7 +524,7 @@ else
       "Check unendorse handler"
   fi
 
-  unendorse_action=$(echo "$RESP_BODY" | jq -r '.data.action // empty' 2>/dev/null)
+  unendorse_action=$(echo "$RESP_BODY" | jq -r '.data.results[0].action // .data.action // empty' 2>/dev/null)
   pass "Unendorse $FOLLOW_TARGET tag=$target_tag: $unendorse_action (${RESP_MS}ms)"
 
   # Verify our endorsement removed — our account should be absent from endorsers

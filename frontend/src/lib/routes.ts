@@ -10,6 +10,7 @@ export type RouteDef = readonly [
 export const ROUTE_TABLE: readonly RouteDef[] = [
   ['GET', 'health', 'health'],
   ['GET', 'platforms', 'list_platforms'],
+  ['POST', 'verify-claim', 'verify_claim'],
   ['GET', 'tags', 'list_tags'],
   ['GET', 'capabilities', 'list_capabilities'],
   [
@@ -35,12 +36,6 @@ export const ROUTE_TABLE: readonly RouteDef[] = [
   ['POST', 'agents/:accountId/endorse', 'endorse'],
   ['DELETE', 'agents/:accountId/endorse', 'unendorse'],
   ['GET', 'agents/:accountId/endorsers', 'endorsers'],
-  [
-    'POST',
-    'agents/:accountId/endorsers',
-    'filter_endorsers',
-    ['tags', 'capabilities'],
-  ],
 ] as const;
 
 export interface ResolvedRoute {
@@ -142,8 +137,8 @@ export const PUBLIC_ACTIONS = new Set([
   'following',
   'edges',
   'endorsers',
-  'filter_endorsers',
   'list_platforms',
+  'verify_claim',
   'list_tags',
   'list_capabilities',
   'health',

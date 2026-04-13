@@ -12,6 +12,7 @@ import {
   handleUnendorse,
   handleUnfollow,
   handleUpdateMe,
+  writeToFastData,
 } from '@/lib/fastdata-write';
 import * as fetchLib from '@/lib/fetch';
 import * as rateLimit from '@/lib/rate-limit';
@@ -78,6 +79,60 @@ beforeEach(() => {
   mockKvGetAll.mockResolvedValue([]);
   mockKvListAgent.mockResolvedValue([]);
   mockFetchWithTimeout.mockResolvedValue({ ok: true } as Response);
+});
+
+// ---------------------------------------------------------------------------
+// writeToFastData — direct unit coverage for the WriteOutcome contract.
+// Handler tests only assert on the handler-level response code, so the
+// shape distinctions (status, detail, network vs HTTP) are covered here.
+// ---------------------------------------------------------------------------
+
+describe('writeToFastData', () => {
+  it('returns {ok: true} on a 2xx response', async () => {
+    mockFetchWithTimeout.mockResolvedValue({
+      ok: true,
+      status: 200,
+    } as Response);
+
+    const outcome = await writeToFastData(WK, { profile: { name: 'x' } });
+    expect(outcome).toEqual({ ok: true });
+  });
+
+  it('returns {ok: false, status} on a non-2xx response', async () => {
+    // Detail is read for the log line but intentionally not exposed on
+    // the WriteOutcome — callers classify by status alone (see the
+    // `status === 402` check in resolveCallerOrInit).
+    mockFetchWithTimeout.mockResolvedValue({
+      ok: false,
+      status: 402,
+      text: () => Promise.resolve('insufficient balance to cover storage'),
+    } as unknown as Response);
+
+    const outcome = await writeToFastData(WK, { profile: { name: 'x' } });
+    expect(outcome).toEqual({ ok: false, status: 402 });
+  });
+
+  it('returns {ok: false, status: null} on a network error', async () => {
+    mockFetchWithTimeout.mockRejectedValue(new Error('ECONNRESET'));
+
+    const outcome = await writeToFastData(WK, { profile: { name: 'x' } });
+    expect(outcome).toEqual({ ok: false, status: null });
+  });
+
+  it('stays on the HTTP-error branch when res.text() itself rejects', async () => {
+    // Defensive `.catch(() => '')` on `res.text()` matters: without it,
+    // an aborted response body would throw from the await, fall through
+    // to the outer catch, and flip the classification from HTTP-error
+    // (status present) to network-error (status null).
+    mockFetchWithTimeout.mockResolvedValue({
+      ok: false,
+      status: 500,
+      text: () => Promise.reject(new Error('aborted')),
+    } as unknown as Response);
+
+    const outcome = await writeToFastData(WK, { profile: { name: 'x' } });
+    expect(outcome).toEqual({ ok: false, status: 500 });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -201,7 +256,16 @@ describe('idempotency', () => {
 describe('storage error handling', () => {
   it('handleFollow returns storage error per-item when writeToFastData fails', async () => {
     mockProfile('bob.near');
-    mockFetchWithTimeout.mockResolvedValue({ ok: false } as Response);
+    // Mock must include `status` and `text` so writeToFastData enters
+    // the HTTP-error branch (non-ok Response) rather than the outer
+    // catch (network error). Otherwise the test silently exercises
+    // network-error classification instead of the intended HTTP-error
+    // path.
+    mockFetchWithTimeout.mockResolvedValue({
+      ok: false,
+      status: 500,
+      text: () => Promise.resolve('internal error'),
+    } as unknown as Response);
 
     const result = await handleFollow(
       WK,
@@ -219,7 +283,11 @@ describe('storage error handling', () => {
   });
 
   it('handleUpdateMe returns STORAGE_ERROR when writeToFastData fails', async () => {
-    mockFetchWithTimeout.mockResolvedValue({ ok: false } as Response);
+    mockFetchWithTimeout.mockResolvedValue({
+      ok: false,
+      status: 500,
+      text: () => Promise.resolve('internal error'),
+    } as unknown as Response);
 
     const result = await handleUpdateMe(
       WK,
@@ -231,6 +299,71 @@ describe('storage error handling', () => {
       code: 'STORAGE_ERROR',
       status: 500,
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleUpdateMe index cleanup — removed tags/capabilities must null-write
+// their existence indexes or list_tags/list_capabilities ghost them forever.
+// ---------------------------------------------------------------------------
+
+describe('handleUpdateMe index cleanup', () => {
+  function writeArgs(): Record<string, unknown> {
+    const writeCall = mockFetchWithTimeout.mock.calls[0];
+    const body = JSON.parse(writeCall[1]!.body as string);
+    return body.args as Record<string, unknown>;
+  }
+
+  it('nulls removed tag indexes and keeps retained ones', async () => {
+    mockProfile('alice.near', { tags: ['ai', 'defi'] });
+
+    const result = await handleUpdateMe(
+      WK,
+      { tags: ['defi'] },
+      resolveAccountId,
+    );
+    expect(result).toMatchObject({ success: true });
+
+    const args = writeArgs();
+    expect(args['tag/ai']).toBeNull();
+    expect(args['tag/defi']).toBe(true);
+  });
+
+  it('nulls removed capability indexes and keeps retained ones', async () => {
+    mockProfile('alice.near', {
+      capabilities: { skills: ['rust', 'go'] },
+    });
+
+    const result = await handleUpdateMe(
+      WK,
+      { capabilities: { skills: ['rust'] } },
+      resolveAccountId,
+    );
+    expect(result).toMatchObject({ success: true });
+
+    const args = writeArgs();
+    expect(args['cap/skills/go']).toBeNull();
+    expect(args['cap/skills/rust']).toBe(true);
+  });
+
+  it('does not delete indexes when the field is not in the update', async () => {
+    mockProfile('alice.near', {
+      tags: ['ai'],
+      capabilities: { skills: ['rust'] },
+    });
+
+    const result = await handleUpdateMe(
+      WK,
+      { description: 'Updated bio that is long enough' },
+      resolveAccountId,
+    );
+    expect(result).toMatchObject({ success: true });
+
+    const args = writeArgs();
+    // agentEntries rewrites the existence indexes as `true`; the cleanup
+    // blocks only emit `null` when body.tags / body.capabilities is present.
+    expect(args['tag/ai']).toBe(true);
+    expect(args['cap/skills/rust']).toBe(true);
   });
 });
 
@@ -264,9 +397,13 @@ describe('first-write heartbeat', () => {
     expect(result).toMatchObject({ success: false, code: 'AUTH_FAILED' });
   });
 
-  it('returns INSUFFICIENT_BALANCE with funding meta when wallet unfunded', async () => {
+  it('returns INSUFFICIENT_BALANCE with funding meta when wallet has no balance', async () => {
     mockKvGetAgent.mockResolvedValue(null);
-    mockFetchWithTimeout.mockResolvedValue({ ok: false } as Response);
+    mockFetchWithTimeout.mockResolvedValue({
+      ok: false,
+      status: 402,
+      text: () => Promise.resolve('insufficient balance to cover storage'),
+    } as unknown as Response);
 
     const result = await handleHeartbeat(WK, resolveAccountId);
     expect(result).toMatchObject({
@@ -279,6 +416,22 @@ describe('first-write heartbeat', () => {
         fund_token: 'NEAR',
         fund_url: expect.stringContaining('alice.near'),
       },
+    });
+  });
+
+  it('returns STORAGE_ERROR (not INSUFFICIENT_BALANCE) on transient write failure', async () => {
+    mockKvGetAgent.mockResolvedValue(null);
+    mockFetchWithTimeout.mockResolvedValue({
+      ok: false,
+      status: 502,
+      text: () => Promise.resolve('bad gateway'),
+    } as unknown as Response);
+
+    const result = await handleHeartbeat(WK, resolveAccountId);
+    expect(result).toMatchObject({
+      success: false,
+      code: 'STORAGE_ERROR',
+      status: 500,
     });
   });
 });
@@ -296,7 +449,7 @@ function kvEntry(overrides: {
     predecessor_id: overrides.predecessor_id ?? 'test.near',
     current_account_id: 'contextual.near',
     block_height: 100000,
-    block_timestamp: 1700000000000000000,
+    block_timestamp: 1_700_000_000_000,
     key: overrides.key,
     value: overrides.value,
   };

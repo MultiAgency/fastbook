@@ -5,7 +5,7 @@ export interface OutlayerRegisterResponse {
   api_key: string;
   near_account_id: string;
   handoff_url: string;
-  trial: boolean;
+  trial: { calls_remaining: number };
 }
 
 export async function registerOutlayer(): Promise<OutlayerRegisterResponse> {

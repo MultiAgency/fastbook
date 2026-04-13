@@ -34,7 +34,8 @@ import {
   endorsePrefix,
   entryAt,
   extractCapabilityPairs,
-  filterAgents,
+  fetchProfile,
+  fetchProfiles,
   liveNetworkCounts,
   nowSecs,
   profileCompleteness,
@@ -151,10 +152,12 @@ function targetGuardError(
 // FastData KV write (awaitable — primary write path, not fire-and-forget)
 // ---------------------------------------------------------------------------
 
+export type WriteOutcome = { ok: true } | { ok: false; status: number | null };
+
 export async function writeToFastData(
   walletKey: string,
   entries: Record<string, unknown>,
-): Promise<boolean> {
+): Promise<WriteOutcome> {
   const url = `${OUTLAYER_API_URL}/wallet/v1/call`;
   try {
     const res = await fetchWithTimeout(
@@ -175,10 +178,15 @@ export async function writeToFastData(
       },
       15_000,
     );
-    return res.ok;
+    if (res.ok) return { ok: true };
+    const detail = await res.text().catch(() => '');
+    console.error(
+      `[fastdata-write] http ${res.status}: ${detail.slice(0, 200)}`,
+    );
+    return { ok: false, status: res.status };
   } catch (err) {
-    console.error('[fastdata-write] failed:', err);
-    return false;
+    console.error('[fastdata-write] network error:', err);
+    return { ok: false, status: null };
   }
 }
 
@@ -198,7 +206,7 @@ async function resolveCaller(
   const accountId = await resolveAccountId(walletKey);
   if (!accountId) return fail('AUTH_FAILED', 'Could not resolve account', 401);
 
-  const agent = (await kvGetAgent(accountId, 'profile')) as Agent | null;
+  const agent = await fetchProfile(accountId);
   if (!agent) return fail('NOT_REGISTERED', 'Agent profile not found', 404);
 
   return { accountId, agent };
@@ -216,7 +224,7 @@ interface TargetIdentity {
 async function resolveTargetAgent(
   accountId: string,
 ): Promise<TargetIdentity | WriteResult> {
-  const agent = (await kvGetAgent(accountId, 'profile')) as Agent | null;
+  const agent = await fetchProfile(accountId);
   if (!agent) return fail('NOT_FOUND', 'Agent not found', 404);
   return { accountId, agent };
 }
@@ -235,8 +243,6 @@ function defaultAgent(accountId: string): Agent {
     capabilities: {},
     endorsements: {},
     account_id: accountId,
-    follower_count: 0,
-    following_count: 0,
     created_at: ts,
     last_active: ts,
   };
@@ -253,13 +259,19 @@ async function resolveCallerOrInit(
   const accountId = await resolveAccountId(walletKey);
   if (!accountId) return fail('AUTH_FAILED', 'Could not resolve account', 401);
 
-  const existing = (await kvGetAgent(accountId, 'profile')) as Agent | null;
+  const existing = await fetchProfile(accountId);
   if (existing) return { accountId, agent: existing };
 
-  // First-write: create default profile. The write itself checks funding.
+  // First-write: create default profile. OutLayer returns 402 Payment
+  // Required for underfunded wallets; any other status is a transient
+  // storage error, not a funding problem.
   const agent = defaultAgent(accountId);
   const wrote = await writeToFastData(walletKey, agentEntries(agent));
-  if (!wrote) return insufficientBalance(accountId);
+  if (!wrote.ok) {
+    return wrote.status === 402
+      ? insufficientBalance(accountId)
+      : fail('STORAGE_ERROR', 'Failed to write to FastData', 500);
+  }
 
   return { accountId, agent };
 }
@@ -321,10 +333,7 @@ export async function handleFollow(
       continue;
     }
 
-    const targetAgent = (await kvGetAgent(
-      targetAccountId,
-      'profile',
-    )) as Agent | null;
+    const targetAgent = await fetchProfile(targetAccountId);
     if (!targetAgent) {
       results.push({
         account_id: targetAccountId,
@@ -349,7 +358,7 @@ export async function handleFollow(
       [`graph/follow/${targetAccountId}`]: { at: ts, reason: reason ?? null },
     };
     const wrote = await writeToFastData(walletKey, entries);
-    if (!wrote) {
+    if (!wrote.ok) {
       results.push({
         account_id: targetAccountId,
         action: 'error',
@@ -430,7 +439,7 @@ export async function handleUnfollow(
       [`graph/follow/${targetAccountId}`]: null,
     };
     const wrote = await writeToFastData(walletKey, entries);
-    if (!wrote) {
+    if (!wrote.ok) {
       results.push({
         account_id: targetAccountId,
         action: 'error',
@@ -623,7 +632,7 @@ export async function handleEndorse(
 
     if (Object.keys(endorsed).length > 0) {
       const wrote = await writeToFastData(walletKey, entries);
-      if (!wrote) {
+      if (!wrote.ok) {
         results.push({
           account_id: targetAccountId,
           action: 'error',
@@ -739,7 +748,7 @@ export async function handleUnendorse(
 
     if (Object.keys(removed).length > 0) {
       const wrote = await writeToFastData(walletKey, entries);
-      if (!wrote) {
+      if (!wrote.ok) {
         results.push({
           account_id: targetAccountId,
           action: 'error',
@@ -842,13 +851,37 @@ export async function handleUpdateMe(
     }
   }
 
+  // Delete old capability keys if capabilities changed — otherwise a
+  // dropped cap/{ns}/{value} existence index ghosts into list_capabilities.
+  if (body.capabilities !== undefined) {
+    const newCapKeys = new Set(
+      extractCapabilityPairs(agent.capabilities).map(
+        ([ns, val]) => `${ns}/${val}`,
+      ),
+    );
+    for (const [ns, val] of extractCapabilityPairs(caller.agent.capabilities)) {
+      const key = `${ns}/${val}`;
+      if (!newCapKeys.has(key)) {
+        entries[`cap/${key}`] = null;
+      }
+    }
+  }
+
   const wrote = await writeToFastData(walletKey, entries);
-  if (!wrote) return fail('STORAGE_ERROR', 'Failed to write to FastData', 500);
+  if (!wrote.ok) {
+    return fail('STORAGE_ERROR', 'Failed to write to FastData', 500);
+  }
 
   incrementRateLimit('update_me', caller.accountId);
 
-  const completeness = profileCompleteness(agent);
-  return ok({ agent, profile_completeness: completeness });
+  // Overlay live counts on the response so clients receive the same agent
+  // shape as heartbeat returns (stored profiles don't carry count fields).
+  const counts = await liveNetworkCounts(caller.accountId);
+  const responseAgent: Agent = { ...agent, ...counts };
+  return ok({
+    agent: responseAgent,
+    profile_completeness: profileCompleteness(responseAgent),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -861,7 +894,7 @@ export async function handleHeartbeat(
 ): Promise<WriteResult> {
   // First-write: creates default profile if none exists (agent-paid).
   const caller = await resolveCallerOrInit(walletKey, resolveAccountId);
-  if (!('accountId' in caller)) return caller;
+  if ('success' in caller) return caller;
 
   const rl = checkRateLimit('heartbeat', caller.accountId);
   if (!rl.ok) return rateLimited(rl.retryAfter);
@@ -878,8 +911,6 @@ export async function handleHeartbeat(
       kvListAll(endorsePrefix(caller.accountId)),
     ],
   );
-  agent.follower_count = followerEntries.length;
-  agent.following_count = followingEntries.length;
   agent.endorsements = buildEndorsementCounts(endorseEntries, caller.accountId);
 
   // New followers since last heartbeat
@@ -895,30 +926,36 @@ export async function handleHeartbeat(
     return at >= previousActive;
   }).length;
 
-  // Batch-fetch profiles for new follower summaries
-  const followerProfiles =
-    newFollowerAccounts.length > 0
-      ? await kvMultiAgent(
-          newFollowerAccounts.map((a) => ({ accountId: a, key: 'profile' })),
-        )
-      : [];
-  const newFollowers = filterAgents(followerProfiles).map(profileSummary);
+  // Batch-fetch profiles for new follower summaries. `fetchProfiles`
+  // enforces the trust-boundary override so the summaries always carry
+  // the authoritative account_id from the predecessor namespace.
+  const newFollowers = (await fetchProfiles(newFollowerAccounts)).map(
+    profileSummary,
+  );
 
   // Write updated profile + tag/cap indexes
   const entries = agentEntries(agent);
   const wrote = await writeToFastData(walletKey, entries);
-  if (!wrote) return fail('STORAGE_ERROR', 'Failed to write to FastData', 500);
+  if (!wrote.ok) {
+    return fail('STORAGE_ERROR', 'Failed to write to FastData', 500);
+  }
 
   incrementRateLimit('heartbeat', caller.accountId);
 
+  const responseAgent: Agent = {
+    ...agent,
+    follower_count: followerEntries.length,
+    following_count: followingEntries.length,
+  };
+
   return ok({
-    agent,
+    agent: responseAgent,
     delta: {
       since: previousActive,
       new_followers: newFollowers,
       new_followers_count: newFollowers.length,
       new_following_count: newFollowingCount,
-      profile_completeness: profileCompleteness(agent),
+      profile_completeness: profileCompleteness(responseAgent),
     },
   });
 }
@@ -965,7 +1002,9 @@ export async function handleDelistMe(
   }
 
   const wrote = await writeToFastData(walletKey, entries);
-  if (!wrote) return fail('STORAGE_ERROR', 'Failed to write to FastData', 500);
+  if (!wrote.ok) {
+    return fail('STORAGE_ERROR', 'Failed to write to FastData', 500);
+  }
 
   incrementRateLimit('delist_me', caller.accountId);
 
@@ -980,61 +1019,12 @@ export async function handleDelistMe(
 // Unmapped actions invalidate all cached action types (safe default).
 // ---------------------------------------------------------------------------
 
-// Admin hide/unhide share the same blast radius — every cached read that
-// filters hidden agents, plus the self-cached hidden set itself.
-const HIDDEN_STATE_INVALIDATES = [
-  'hidden',
-  'list_agents',
-  'profile',
-  'followers',
-  'following',
-  'endorsers',
-  'filter_endorsers',
-  'edges',
-];
-
 const INVALIDATION_MAP: Record<string, readonly string[]> = {
-  update_me: [
-    'list_agents',
-    'list_tags',
-    'list_capabilities',
-    'profile',
-    'followers',
-    'following',
-    'edges',
-    'endorsers',
-    'filter_endorsers',
-  ],
-  follow: [
-    'list_agents',
-    'profile',
-    'followers',
-    'following',
-    'edges',
-    'follower_counts',
-  ],
-  unfollow: [
-    'list_agents',
-    'profile',
-    'followers',
-    'following',
-    'edges',
-    'follower_counts',
-  ],
-  endorse: [
-    'list_agents',
-    'profile',
-    'endorsers',
-    'filter_endorsers',
-    'endorsement_counts',
-  ],
-  unendorse: [
-    'list_agents',
-    'profile',
-    'endorsers',
-    'filter_endorsers',
-    'endorsement_counts',
-  ],
+  update_me: ['list_agents', 'list_tags', 'list_capabilities', 'profile'],
+  follow: ['profile', 'followers', 'following', 'edges'],
+  unfollow: ['profile', 'followers', 'following', 'edges'],
+  endorse: ['profile', 'endorsers'],
+  unendorse: ['profile', 'endorsers'],
   heartbeat: [
     'list_agents',
     'profile',
@@ -1052,12 +1042,9 @@ const INVALIDATION_MAP: Record<string, readonly string[]> = {
     'following',
     'edges',
     'endorsers',
-    'filter_endorsers',
-    'follower_counts',
-    'endorsement_counts',
   ],
-  hide_agent: HIDDEN_STATE_INVALIDATES,
-  unhide_agent: HIDDEN_STATE_INVALIDATES,
+  hide_agent: ['hidden'],
+  unhide_agent: ['hidden'],
 };
 
 /** Cached reads that a given mutation stales. Null means "clear everything". */

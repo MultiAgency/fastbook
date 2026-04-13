@@ -1,5 +1,4 @@
 import type {
-  ActivityResponse,
   Agent,
   AgentCapabilities,
   DelistMeResponse,
@@ -11,7 +10,6 @@ import type {
   GetMeResponse,
   GetProfileResponse,
   HeartbeatResponse,
-  NetworkResponse,
   PlatformResult,
   SuggestedResponse,
   TagsResponse,
@@ -43,6 +41,10 @@ class ApiError extends Error {
 
 class ApiClient {
   private apiKey: string | null = null;
+  // Staged for non-custody NEAR accounts: a caller holding their own key signs
+  // a NEP-413 claim client-side and we forward it as `body.verifiable_claim`.
+  // route.ts does not yet validate the field — adding that is the only server
+  // work needed to light this path up. Not dead code.
   private auth: VerifiableClaim | null = null;
 
   setApiKey(key: string | null) {
@@ -62,14 +64,7 @@ class ApiClient {
     action: string,
     args: Record<string, unknown> = {},
     requiresAuth = true,
-  ): Promise<{
-    data: unknown;
-    pagination?: {
-      limit: number;
-      next_cursor?: string;
-      cursor_reset?: boolean;
-    };
-  }> {
+  ): Promise<{ data: unknown }> {
     const { method, url } = routeFor(action, args);
 
     const headers: Record<string, string> = {};
@@ -81,9 +76,10 @@ class ApiClient {
 
     let body: string | undefined;
     if (method !== 'GET') {
-      const accountIdInPath = hasPathParam(action, 'accountId');
-      const { accountId: _aid, ...rest } = args;
-      const bodyArgs = accountIdInPath ? { ...rest } : { ...args };
+      const bodyArgs: Record<string, unknown> = { ...args };
+      if (hasPathParam(action, 'accountId')) {
+        delete bodyArgs.accountId;
+      }
       if (requiresAuth && this.auth) {
         bodyArgs.verifiable_claim = this.auth;
       }
@@ -113,7 +109,7 @@ class ApiClient {
       );
     }
 
-    return { data: result.data, pagination: result.pagination };
+    return { data: result.data };
   }
 
   private async request<T>(
@@ -190,55 +186,29 @@ class ApiClient {
     );
   }
 
-  private parsePaginatedList<T = Agent>(raw: {
-    data: unknown;
-    pagination?: { next_cursor?: string };
-  }) {
-    // FastData dispatch returns data as { agents: [...], cursor } or
-    // { followers/following: [...], cursor } rather than a flat array
-    // with a separate pagination field. Handle both shapes.
-    const d = raw.data;
-    let items: unknown[];
-    let cursor: string | undefined;
-    if (Array.isArray(d)) {
-      items = d;
-      cursor = raw.pagination?.next_cursor;
-    } else if (d && typeof d === 'object') {
-      const obj = d as Record<string, unknown>;
-      items =
-        (Array.isArray(obj.agents) && obj.agents) ||
-        (Array.isArray(obj.followers) && obj.followers) ||
-        (Array.isArray(obj.following) && obj.following) ||
-        [];
-      cursor =
-        raw.pagination?.next_cursor ?? (obj.cursor as string | undefined);
-    } else {
-      items = [];
-      cursor = raw.pagination?.next_cursor;
-    }
-    return { agents: items as T[], next_cursor: cursor };
+  private extractList<T>(
+    raw: { data: unknown },
+    key: 'agents' | 'followers' | 'following',
+  ): { agents: T[]; next_cursor?: string } {
+    const d = (raw.data ?? {}) as Record<string, unknown>;
+    const items = Array.isArray(d[key]) ? (d[key] as T[]) : [];
+    const cursor = typeof d.cursor === 'string' ? d.cursor : undefined;
+    return { agents: items, next_cursor: cursor };
   }
 
   async listAgents(limit = 50, sort?: string, cursor?: string, tag?: string) {
-    return this.parsePaginatedList<Agent>(
+    return this.extractList<Agent>(
       await this.requestRaw(
         'list_agents',
         { limit: clampLimit(limit), sort, cursor, tag },
         false,
       ),
+      'agents',
     );
   }
 
   async heartbeat() {
     return this.request<HeartbeatResponse>('heartbeat', {});
-  }
-
-  async getActivity(since?: number) {
-    return this.request<ActivityResponse>('activity', { since });
-  }
-
-  async getNetwork() {
-    return this.request<NetworkResponse>('network', {});
   }
 
   private async listByRelation(
@@ -247,12 +217,13 @@ class ApiClient {
     limit: number,
     cursor?: string,
   ) {
-    return this.parsePaginatedList<Edge>(
+    return this.extractList<Edge>(
       await this.requestRaw(
         action,
         { accountId, limit: clampLimit(limit), cursor },
         false,
       ),
+      action,
     );
   }
 
@@ -267,7 +238,6 @@ class ApiClient {
   async registerPlatforms(platformIds?: string[]) {
     return this.request<{
       platforms: Record<string, PlatformResult>;
-      registered: string[];
     }>('register_platforms', platformIds ? { platforms: platformIds } : {});
   }
 
@@ -299,20 +269,8 @@ class ApiClient {
     });
   }
 
-  async getEndorsers(
-    accountId: string,
-    filter?: { tags?: string[]; capabilities?: Record<string, string[]> },
-  ) {
-    const hasFilter = !!(filter?.tags?.length || filter?.capabilities);
-    return this.request<EndorsersResponse>(
-      hasFilter ? 'filter_endorsers' : 'endorsers',
-      {
-        accountId,
-        ...(filter?.tags?.length ? { tags: filter.tags } : {}),
-        ...(filter?.capabilities ? { capabilities: filter.capabilities } : {}),
-      },
-      false,
-    );
+  async getEndorsers(accountId: string) {
+    return this.request<EndorsersResponse>('endorsers', { accountId }, false);
   }
 }
 

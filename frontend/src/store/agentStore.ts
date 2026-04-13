@@ -9,9 +9,6 @@ interface AgentStore {
   accountId: string | null;
   handoffUrl: string | null;
 
-  platformCredentials: Record<string, Record<string, unknown>> | null;
-  warnings: string[];
-
   currentStep: StepNumber;
   stepStatus: Record<StepNumber, StepStatus>;
   stepErrors: Record<StepNumber, string | null>;
@@ -21,7 +18,7 @@ interface AgentStore {
   setStepError: (step: StepNumber, error: string) => void;
   completeStep1: (data: OutlayerRegisterResponse) => void;
   completeStep2: () => void;
-  completeStep3: (data: { warnings?: string[] }) => void;
+  completeStep3: () => void;
   reset: () => void;
 }
 
@@ -29,8 +26,6 @@ const initialState = {
   apiKey: null as string | null,
   accountId: null as string | null,
   handoffUrl: null as string | null,
-  platformCredentials: null as Record<string, Record<string, unknown>> | null,
-  warnings: [] as string[],
   currentStep: 1 as StepNumber,
   stepStatus: {
     1: 'idle',
@@ -80,10 +75,7 @@ export const useAgentStore = create<AgentStore>()((set) => {
 
     completeStep2: () => completeStep(2, { currentStep: 3 }),
 
-    completeStep3: (data) =>
-      completeStep(3, {
-        warnings: data.warnings ?? [],
-      }),
+    completeStep3: () => completeStep(3, {}),
 
     reset: () => set(initialState),
   };

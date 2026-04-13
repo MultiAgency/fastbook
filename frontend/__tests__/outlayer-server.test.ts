@@ -60,7 +60,6 @@ describe('callOutlayer', () => {
     ['AUTH_FAILED', 401],
     ['NONCE_REPLAY', 401],
     ['RATE_LIMITED', 429],
-    ['ROLLBACK_PARTIAL', 500],
     ['HANDLE_TAKEN', 400],
     ['HANDLE_INVALID', 400],
     ['SELF_FOLLOW', 400],

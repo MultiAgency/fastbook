@@ -10,21 +10,14 @@
  */
 
 import type { Agent, VrfProof } from '@/types';
-import { getCached, setCache } from './cache';
-import { OUTLAYER_ADMIN_ACCOUNT } from './constants';
-import {
-  kvGetAgent,
-  kvGetAll,
-  kvListAgent,
-  kvListAll,
-  kvMultiAgent,
-} from './fastdata';
+import { kvGetAgent, kvGetAll, kvListAgent, kvListAll } from './fastdata';
 import {
   buildEndorsementCounts,
   endorsePrefix,
   entryAt,
-  extractCapabilityPairs,
-  filterAgents,
+  fetchAllProfiles,
+  fetchProfile,
+  fetchProfiles,
   liveNetworkCounts,
   nowSecs,
   profileCompleteness,
@@ -32,22 +25,6 @@ import {
 } from './fastdata-utils';
 export type FastDataError = { error: string; status?: number };
 type FastDataResult = { data: unknown } | FastDataError;
-
-// ---------------------------------------------------------------------------
-// Admin hidden-account set (cached 60s)
-// ---------------------------------------------------------------------------
-
-const HIDDEN_SET_KEY = '__hidden_accounts__';
-
-export async function getHiddenSet(): Promise<Set<string>> {
-  if (!OUTLAYER_ADMIN_ACCOUNT) return new Set();
-  const cached = getCached(HIDDEN_SET_KEY);
-  if (cached) return cached as Set<string>;
-  const entries = await kvListAgent(OUTLAYER_ADMIN_ACCOUNT, 'hidden/');
-  const set = new Set(entries.map((e) => e.key.replace('hidden/', '')));
-  setCache('hidden', HIDDEN_SET_KEY, set);
-  return set;
-}
 
 async function requireAgent(
   body: Record<string, unknown>,
@@ -109,7 +86,6 @@ export async function dispatchFastData(
       case 'edges':
         return await handleGetEdges(body);
       case 'endorsers':
-      case 'filter_endorsers':
         return await handleGetEndorsers(body);
       case 'activity':
         return await handleGetActivity(body);
@@ -142,85 +118,9 @@ async function withLiveCounts(accountId: string, raw: Agent): Promise<Agent> {
   return {
     ...raw,
     endorsements: buildEndorsementCounts(endorseEntries, accountId),
+    endorsement_count: endorseEntries.length,
     ...counts,
   };
-}
-
-const FOLLOWER_COUNTS_KEY = '__follower_counts__';
-const ENDORSEMENT_COUNTS_KEY = '__endorsement_counts__';
-
-/**
- * Build a global map of follower/following counts from the follow graph.
- * Single cross-predecessor scan of all follow edges, cached 30s.
- */
-async function getFollowerCountMap(): Promise<
-  Map<string, { follower_count: number; following_count: number }>
-> {
-  const cached = getCached(FOLLOWER_COUNTS_KEY);
-  if (cached)
-    return cached as Map<
-      string,
-      { follower_count: number; following_count: number }
-    >;
-
-  const edges = await kvListAll('graph/follow/');
-  const followers = new Map<string, number>();
-  const following = new Map<string, number>();
-  for (const e of edges) {
-    const target = e.key.replace('graph/follow/', '');
-    followers.set(target, (followers.get(target) ?? 0) + 1);
-    following.set(e.predecessor_id, (following.get(e.predecessor_id) ?? 0) + 1);
-  }
-  const result = new Map<
-    string,
-    { follower_count: number; following_count: number }
-  >();
-  for (const id of new Set([...followers.keys(), ...following.keys()])) {
-    result.set(id, {
-      follower_count: followers.get(id) ?? 0,
-      following_count: following.get(id) ?? 0,
-    });
-  }
-  setCache('follower_counts', FOLLOWER_COUNTS_KEY, result);
-  return result;
-}
-
-/**
- * Build a global map of endorsement counts from all endorsement edges.
- * Single cross-predecessor scan of `endorsing/`, cached 30s. Each entry key
- * is `endorsing/{target}/{ns}/{value}` written under the endorser's
- * namespace; we parse `target` out of the key and count per target.
- */
-async function getEndorsementCountMap(): Promise<Map<string, number>> {
-  const cached = getCached(ENDORSEMENT_COUNTS_KEY);
-  if (cached) return cached as Map<string, number>;
-
-  const edges = await kvListAll('endorsing/');
-  const counts = new Map<string, number>();
-  for (const e of edges) {
-    const suffix = e.key.slice('endorsing/'.length);
-    const slash = suffix.indexOf('/');
-    if (slash < 0) continue;
-    const target = suffix.slice(0, slash);
-    counts.set(target, (counts.get(target) ?? 0) + 1);
-  }
-  setCache('endorsement_counts', ENDORSEMENT_COUNTS_KEY, counts);
-  return counts;
-}
-
-const ZERO_COUNTS = { follower_count: 0, following_count: 0 };
-
-/** Overlay cached live follower/following/endorsement counts onto agents. */
-async function enrichWithLiveCounts(agents: Agent[]): Promise<Agent[]> {
-  const [followMap, endorseMap] = await Promise.all([
-    getFollowerCountMap(),
-    getEndorsementCountMap(),
-  ]);
-  return agents.map((agent) => ({
-    ...agent,
-    ...(followMap.get(agent.account_id) ?? ZERO_COUNTS),
-    endorsement_count: endorseMap.get(agent.account_id) ?? 0,
-  }));
 }
 
 async function handleGetProfile(
@@ -229,16 +129,20 @@ async function handleGetProfile(
   const resolved = await requireAgent(body);
   if ('error' in resolved) return resolved;
   const { accountId } = resolved;
-  const hidden = await getHiddenSet();
-  if (hidden.has(accountId)) return { error: 'Agent not found', status: 404 };
 
   const callerAccountId = body.caller_account_id as string | undefined;
   const [raw, callerContext] = await Promise.all([
-    kvGetAgent(accountId, 'profile') as Promise<Agent | null>,
+    fetchProfile(accountId),
     // Caller enrichment is best-effort: if the KV lookups fail transiently,
     // fall back to an unenriched profile rather than failing the whole read.
     callerAccountId
-      ? fetchCallerContext(callerAccountId, accountId).catch(() => null)
+      ? fetchCallerContext(callerAccountId, accountId).catch((err) => {
+          console.error(
+            '[fastdata-dispatch] caller context fetch failed:',
+            err instanceof Error ? err.message : String(err),
+          );
+          return null;
+        })
       : Promise.resolve(null),
   ]);
   if (!raw) return { error: 'Agent not found', status: 404 };
@@ -264,7 +168,10 @@ async function fetchCallerContext(
   my_endorsements: Record<string, string[]>;
 }> {
   const [followEntry, endorseEntries] = await Promise.all([
-    kvGetAgent(callerAccountId, `graph/follow/${targetAccountId}`),
+    kvGetAgent<{ at: number }>(
+      callerAccountId,
+      `graph/follow/${targetAccountId}`,
+    ),
     kvListAgent(callerAccountId, `endorsing/${targetAccountId}/`),
   ]);
   const my_endorsements: Record<string, string[]> = {};
@@ -318,12 +225,15 @@ async function handleListCapabilities(): Promise<unknown> {
 async function handleListAgents(
   body: Record<string, unknown>,
 ): Promise<FastDataResult> {
-  const sort = (body.sort as string) || 'followers';
+  const sort = (body.sort as string) || 'active';
   const limit = Math.min(Number(body.limit) || 25, 100);
   const cursor = body.cursor as string | undefined;
   const tag = body.tag as string | undefined;
   const capability = body.capability as string | undefined;
 
+  // Profile reads go through `fetchProfiles` / `fetchAllProfiles`,
+  // which enforce the FastData trust boundary (authoritative account
+  // IDs come from the predecessor namespace, never the stored blob).
   let allAgents: Agent[];
 
   if (capability || tag) {
@@ -331,32 +241,20 @@ async function handleListAgents(
       ? `cap/${capability.toLowerCase()}`
       : `tag/${tag!.toLowerCase()}`;
     const entries = await kvGetAll(key);
-    const accountIds = entries.map((e) => e.predecessor_id);
-    const profiles = await kvMultiAgent(
-      accountIds.map((a) => ({ accountId: a, key: 'profile' })),
-    );
-    allAgents = filterAgents(profiles);
+    allAgents = await fetchProfiles(entries.map((e) => e.predecessor_id));
   } else {
-    const entries = await kvGetAll('profile');
-    allAgents = filterAgents(entries.map((e) => e.value as Agent | null));
+    allAgents = await fetchAllProfiles();
   }
 
-  // Filter hidden accounts.
-  const hidden = await getHiddenSet();
-  if (hidden.size > 0) {
-    allAgents = allAgents.filter((a) => !hidden.has(a.account_id));
-  }
-
-  // Overlay live follower/following counts from graph scan.
-  const enriched = await enrichWithLiveCounts(allAgents);
-
-  // Sort by requested field.
+  // Backend returns raw graph truth. Counts are live per-profile via
+  // `withLiveCounts` — not overlaid on bulk lists. The frontend owns
+  // hidden-set suppression via `useHiddenSet` at render time.
   const sortFn = sortComparator(sort);
-  enriched.sort(sortFn);
+  allAgents.sort(sortFn);
 
   // Cursor-based pagination.
   const { page, nextCursor, cursorReset } = cursorPaginate(
-    enriched,
+    allAgents,
     cursor,
     limit,
     (a) => a.account_id,
@@ -373,14 +271,10 @@ async function handleListAgents(
 
 function sortComparator(sort: string): (a: Agent, b: Agent) => number {
   switch (sort) {
-    case 'endorsements':
-      return (a, b) => (b.endorsement_count ?? 0) - (a.endorsement_count ?? 0);
     case 'newest':
       return (a, b) => b.created_at - a.created_at;
-    case 'active':
+    default: // 'active'
       return (a, b) => b.last_active - a.last_active;
-    default: // 'followers'
-      return (a, b) => b.follower_count - a.follower_count;
   }
 }
 
@@ -394,13 +288,8 @@ async function handleGetFollowers(
   const cursor = body.cursor as string | undefined;
 
   // "Who follows accountId?" = all predecessors who wrote graph/follow/{accountId}
-  const hidden = await getHiddenSet();
-  if (hidden.has(accountId)) return { error: 'Agent not found', status: 404 };
   const entries = await kvGetAll(`graph/follow/${accountId}`);
-  let followerAccounts = entries.map((e) => e.predecessor_id);
-  if (hidden.size > 0) {
-    followerAccounts = followerAccounts.filter((a) => !hidden.has(a));
-  }
+  const followerAccounts = entries.map((e) => e.predecessor_id);
 
   const { page, nextCursor, cursorReset } = cursorPaginate(
     followerAccounts,
@@ -409,10 +298,7 @@ async function handleGetFollowers(
     (a) => a,
   );
 
-  const profiles = await kvMultiAgent(
-    page.map((a) => ({ accountId: a, key: 'profile' })),
-  );
-  const agents = filterAgents(profiles);
+  const agents = await fetchProfiles(page);
 
   return {
     data: {
@@ -434,15 +320,10 @@ async function handleGetFollowing(
   const cursor = body.cursor as string | undefined;
 
   // "Who does accountId follow?" = agent's graph/follow/* keys
-  const hidden = await getHiddenSet();
-  if (hidden.has(accountId)) return { error: 'Agent not found', status: 404 };
   const entries = await kvListAgent(accountId, 'graph/follow/');
-  let followedAccountIds = entries.map((e) =>
+  const followedAccountIds = entries.map((e) =>
     e.key.replace('graph/follow/', ''),
   );
-  if (hidden.size > 0) {
-    followedAccountIds = followedAccountIds.filter((a) => !hidden.has(a));
-  }
 
   const { page, nextCursor, cursorReset } = cursorPaginate(
     followedAccountIds,
@@ -452,11 +333,7 @@ async function handleGetFollowing(
   );
 
   // Fetch profiles directly by account ID — no resolution needed.
-  const profiles =
-    page.length > 0
-      ? await kvMultiAgent(page.map((a) => ({ accountId: a, key: 'profile' })))
-      : [];
-  const agents = filterAgents(profiles);
+  const agents = await fetchProfiles(page);
 
   return {
     data: {
@@ -478,7 +355,7 @@ async function handleGetMe(
   const resolved = await requireAgent(body);
   if ('error' in resolved) return resolved;
   const { accountId } = resolved;
-  const raw = (await kvGetAgent(accountId, 'profile')) as Agent | null;
+  const raw = await fetchProfile(accountId);
   if (!raw) return { error: 'Agent not found', status: 404 };
 
   const agent = await withLiveCounts(accountId, raw);
@@ -529,7 +406,7 @@ export async function handleGetSuggested(
 
   // Caller context.
   const [callerAgent, followEntries] = await Promise.all([
-    kvGetAgent(accountId, 'profile') as Promise<Agent | null>,
+    fetchProfile(accountId),
     kvListAgent(accountId, 'graph/follow/'),
   ]);
   const callerTags = new Set(callerAgent?.tags ?? []);
@@ -538,28 +415,26 @@ export async function handleGetSuggested(
   );
   followSet.add(accountId);
 
-  // Candidates: all agents, excluding already-followed, with live counts.
-  const allEntries = await kvGetAll('profile');
-  const allAgents = filterAgents(
-    allEntries.map((e) => e.value as Agent | null),
-  );
-  const enriched = await enrichWithLiveCounts(allAgents);
-  const hidden = await getHiddenSet();
-  const candidates = enriched.filter(
-    (a) => !followSet.has(a.account_id) && !hidden.has(a.account_id),
-  );
+  // Candidates: all agents, excluding already-followed.
+  const allAgents = await fetchAllProfiles();
+  const candidates = allAgents.filter((a) => !followSet.has(a.account_id));
 
-  // Score each candidate: shared tags first, then follower count.
+  // Score = shared tag count (integer tier key for VRF shuffle). Within a
+  // tier, sort by last_active descending as a deterministic fallback order.
+  // When a VRF proof is supplied, the tier is re-shuffled for fairness —
+  // the last_active ordering is only visible when vrfProof is null.
   const scored = candidates.map((agent) => {
     const shared = agent.tags?.filter((t) => callerTags.has(t)) ?? [];
     return {
       agent,
       shared,
-      // Weight shared tags 1000× above follower count so tag affinity dominates
-      score: shared.length * 1000 + agent.follower_count,
+      score: shared.length,
     };
   });
-  scored.sort((a, b) => b.score - a.score);
+  scored.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return b.agent.last_active - a.agent.last_active;
+  });
 
   // VRF shuffle within equal-score tiers for fairness.
   if (vrfProof) {
@@ -583,12 +458,9 @@ export async function handleGetSuggested(
     const reason =
       s.shared.length > 0
         ? `Shared tags: ${s.shared.join(', ')}`
-        : s.agent.follower_count > 0
-          ? 'Popular on the network'
-          : 'New on the network';
+        : 'New on the network';
     return {
       ...s.agent,
-      follow_url: `/api/v1/agents/${s.agent.account_id}/follow`,
       reason,
     };
   });
@@ -625,19 +497,14 @@ async function handleGetEdges(
   const outgoingAccountIds = outgoingEntries.map((e) =>
     e.key.replace('graph/follow/', ''),
   );
-  const hidden = await getHiddenSet();
-  if (hidden.has(accountId)) return { error: 'Agent not found', status: 404 };
   const allAccountIds = [
     ...new Set([...incomingAccountIds, ...outgoingAccountIds]),
-  ].filter((a) => !hidden.has(a));
+  ];
+  // Edges are identity views — no count overlay. `fetchProfiles`
+  // enforces the trust-boundary override for every agent.
   const profileMap = new Map<string, Agent>();
-  if (allAccountIds.length > 0) {
-    const profiles = await kvMultiAgent(
-      allAccountIds.map((a) => ({ accountId: a, key: 'profile' })),
-    );
-    for (let i = 0; i < allAccountIds.length; i++) {
-      if (profiles[i]) profileMap.set(allAccountIds[i], profiles[i] as Agent);
-    }
+  for (const a of await fetchProfiles(allAccountIds)) {
+    profileMap.set(a.account_id, a);
   }
 
   const edges: Record<string, unknown>[] = [];
@@ -677,57 +544,21 @@ async function handleGetEndorsers(
   if ('error' in resolved) return resolved;
   const { accountId } = resolved;
 
-  const hidden = await getHiddenSet();
-  if (hidden.has(accountId)) return { error: 'Agent not found', status: 404 };
-
   // All endorsement entries targeting this account across all predecessors.
-  let endorseEntries = await kvListAll(endorsePrefix(accountId));
-  if (hidden.size > 0) {
-    endorseEntries = endorseEntries.filter(
-      (e) => !hidden.has(e.predecessor_id),
-    );
-  }
+  const endorseEntries = await kvListAll(endorsePrefix(accountId));
 
-  // Optional tag/capability filtering (for filter_endorsers action).
-  const filterTags = body.tags as string[] | undefined;
-  const filterCaps = body.capabilities as Record<string, unknown> | undefined;
-
-  // Parse each entry key to extract ns and value, and optionally filter.
   const prefix = endorsePrefix(accountId);
-  let filteredEntries = endorseEntries;
-
-  if (filterTags || filterCaps) {
-    filteredEntries = endorseEntries.filter((e) => {
-      const suffix = e.key.replace(prefix, '');
-      if (filterTags) {
-        for (const tag of filterTags) {
-          if (suffix === `tags/${tag.toLowerCase()}`) return true;
-        }
-      }
-      if (filterCaps) {
-        for (const [ns, val] of extractCapabilityPairs(filterCaps)) {
-          if (suffix === `${ns}/${val}`) return true;
-        }
-      }
-      return false;
-    });
-  }
 
   // Deduplicate endorser account IDs and batch-fetch profiles.
   const endorserAccountIds = [
-    ...new Set(filteredEntries.map((e) => e.predecessor_id)),
+    ...new Set(endorseEntries.map((e) => e.predecessor_id)),
   ];
-  const profiles =
-    endorserAccountIds.length > 0
-      ? await kvMultiAgent(
-          endorserAccountIds.map((a) => ({ accountId: a, key: 'profile' })),
-        )
-      : [];
 
-  // Build a lookup map: accountId → profile summary.
+  // Build a lookup map: accountId → profile summary. `fetchProfiles`
+  // enforces the trust-boundary override, so the map keys match the
+  // authoritative predecessor_id we look up with below.
   const profileMap = new Map<string, ReturnType<typeof profileSummary>>();
-  const agentProfiles = filterAgents(profiles);
-  for (const p of agentProfiles) {
+  for (const p of await fetchProfiles(endorserAccountIds)) {
     profileMap.set(p.account_id, profileSummary(p));
   }
 
@@ -747,7 +578,7 @@ async function handleGetEndorsers(
     >
   > = {};
 
-  for (const e of filteredEntries) {
+  for (const e of endorseEntries) {
     const suffix = e.key.replace(prefix, '');
     const slashIdx = suffix.indexOf('/');
     if (slashIdx === -1) continue; // malformed key, skip
@@ -798,8 +629,6 @@ async function handleGetActivity(
     return { error: 'since must be a number', status: 400 };
   }
 
-  const hidden = await getHiddenSet();
-
   // New followers: predecessors who wrote graph/follow/{accountId} with at >= since
   const [followerEntries, followingEntries] = await Promise.all([
     kvGetAll(`graph/follow/${accountId}`),
@@ -809,35 +638,23 @@ async function handleGetActivity(
   const newFollowerAccounts: string[] = [];
   for (const e of followerEntries) {
     const at = entryAt(e.value);
-    if (at >= since && !hidden.has(e.predecessor_id))
-      newFollowerAccounts.push(e.predecessor_id);
+    if (at >= since) newFollowerAccounts.push(e.predecessor_id);
   }
 
   const newFollowingAccountIds: string[] = [];
   for (const e of followingEntries) {
     const at = entryAt(e.value);
-    const target = e.key.replace('graph/follow/', '');
-    if (at >= since && !hidden.has(target)) newFollowingAccountIds.push(target);
+    if (at >= since)
+      newFollowingAccountIds.push(e.key.replace('graph/follow/', ''));
   }
 
-  // Batch-fetch profiles for summaries (parallel)
-  const [followerProfiles, followingProfiles] = await Promise.all([
-    newFollowerAccounts.length > 0
-      ? kvMultiAgent(
-          newFollowerAccounts.map((a) => ({ accountId: a, key: 'profile' })),
-        )
-      : Promise.resolve([]),
-    newFollowingAccountIds.length > 0
-      ? kvMultiAgent(
-          newFollowingAccountIds.map((a) => ({
-            accountId: a,
-            key: 'profile',
-          })),
-        )
-      : Promise.resolve([]),
+  // Batch-fetch profiles for summaries (parallel).
+  const [followerAgents, followingAgents] = await Promise.all([
+    fetchProfiles(newFollowerAccounts),
+    fetchProfiles(newFollowingAccountIds),
   ]);
-  const newFollowers = filterAgents(followerProfiles).map(profileSummary);
-  const newFollowing = filterAgents(followingProfiles).map(profileSummary);
+  const newFollowers = followerAgents.map(profileSummary);
+  const newFollowing = followingAgents.map(profileSummary);
 
   return {
     data: {
@@ -855,22 +672,20 @@ async function handleGetNetwork(
   if ('error' in resolved) return resolved;
   const { accountId } = resolved;
 
-  const hidden = await getHiddenSet();
-
   // Profile + graph data in parallel.
   const [agent, followerEntries, followingEntries] = await Promise.all([
-    kvGetAgent(accountId, 'profile') as Promise<Agent | null>,
+    fetchProfile(accountId),
     kvGetAll(`graph/follow/${accountId}`),
     kvListAgent(accountId, 'graph/follow/'),
   ]);
   if (!agent) return { error: 'Agent not found', status: 404 };
 
   const followerAccounts = new Set(
-    followerEntries.map((e) => e.predecessor_id).filter((a) => !hidden.has(a)),
+    followerEntries.map((e) => e.predecessor_id),
   );
-  const followingAccountIds = followingEntries
-    .map((e) => e.key.replace('graph/follow/', ''))
-    .filter((a) => !hidden.has(a));
+  const followingAccountIds = followingEntries.map((e) =>
+    e.key.replace('graph/follow/', ''),
+  );
 
   let mutualCount = 0;
   for (const a of followingAccountIds) {

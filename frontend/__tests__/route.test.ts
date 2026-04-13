@@ -23,14 +23,27 @@ jest.mock('@/lib/fastdata-dispatch', () => ({
 }));
 
 const mockDispatchWrite = jest.fn();
+const mockWriteToFastData = jest.fn().mockResolvedValue({ ok: true });
 jest.mock('@/lib/fastdata-write', () => ({
   dispatchWrite: (...args: unknown[]) => mockDispatchWrite(...args),
-  writeToFastData: jest.fn().mockResolvedValue({ ok: true }),
+  writeToFastData: (...args: unknown[]) => mockWriteToFastData(...args),
+  invalidatesFor: jest.fn().mockReturnValue(['hidden']),
 }));
 
 const mockKvGetAgent = jest.fn().mockResolvedValue(null);
 jest.mock('@/lib/fastdata', () => ({
   kvGetAgent: (...args: unknown[]) => mockKvGetAgent(...args),
+}));
+
+const mockGetHiddenSet = jest.fn().mockResolvedValue(new Set<string>());
+jest.mock('@/lib/fastdata-utils', () => ({
+  ...jest.requireActual('@/lib/fastdata-utils'),
+  getHiddenSet: (...args: unknown[]) => mockGetHiddenSet(...args),
+}));
+
+jest.mock('@/lib/constants', () => ({
+  ...jest.requireActual('@/lib/constants'),
+  OUTLAYER_ADMIN_ACCOUNT: 'admin.near',
 }));
 
 jest.mock('@/lib/cache', () => ({
@@ -40,6 +53,16 @@ jest.mock('@/lib/cache', () => ({
   makeCacheKey: jest.fn((body: Record<string, unknown>) =>
     JSON.stringify(body),
   ),
+}));
+
+const mockCheckRateLimit = jest.fn().mockReturnValue({ ok: true });
+const mockIncrementRateLimit = jest.fn();
+jest.mock('@/lib/rate-limit', () => ({
+  checkRateLimit: (...args: unknown[]) => mockCheckRateLimit(...args),
+  incrementRateLimit: (...args: unknown[]) => mockIncrementRateLimit(...args),
+  checkRateLimitBudget: jest
+    .fn()
+    .mockReturnValue({ ok: true, remaining: Number.POSITIVE_INFINITY }),
 }));
 
 import { NextResponse } from 'next/server';
@@ -84,6 +107,9 @@ beforeEach(() => {
   // Authenticated GETs resolve caller account via resolveAccountId.
   // For tests that use wk_ keys, mock kvGetAgent to return a profile.
   mockKvGetAgent.mockResolvedValue('test_agent');
+  // Rate limit defaults to pass-through; individual tests can override
+  // via `mockReturnValueOnce` to simulate a 429.
+  mockCheckRateLimit.mockReturnValue({ ok: true });
 });
 
 afterEach(() => {
@@ -140,17 +166,6 @@ describe('sanitizePublic', () => {
     expect(result.direction).toBeUndefined();
     expect(result.since).toBeUndefined();
   });
-
-  it('allows structured values for endorser filters', () => {
-    const result = sanitizePublic({
-      action: 'filter_endorsers',
-      account_id: 'alice.near',
-      tags: ['rust', 'ai'],
-      capabilities: { skills: ['chat'] },
-    });
-    expect(result.tags).toEqual(['rust', 'ai']);
-    expect(result.capabilities).toEqual({ skills: ['chat'] });
-  });
 });
 
 describe('route resolution', () => {
@@ -173,7 +188,6 @@ describe('route resolution', () => {
     ['POST', 'agents/alice.near/endorse', 'endorse'],
     ['DELETE', 'agents/alice.near/endorse', 'unendorse'],
     ['GET', 'agents/alice.near/endorsers', 'endorsers'],
-    ['POST', 'agents/alice.near/endorsers', 'filter_endorsers'],
   ])('%s %s → %s', async (method: string, path: string, expectedAction: string) => {
     const handlers: Record<string, typeof GET> = { GET, POST, PATCH, DELETE };
     const handler = handlers[method]!;
@@ -273,6 +287,16 @@ describe('query params', () => {
 
     const body = mockDispatchFastData.mock.calls[0][1];
     expect(body.limit).toBeUndefined();
+  });
+
+  it('rejects unsupported sort values with 400', async () => {
+    const [req, params] = makeRequest('GET', 'agents?sort=followers');
+    const res = await GET(req, params);
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.code).toBe('VALIDATION_ERROR');
+    expect(body.error).toContain('Invalid sort');
+    expect(mockDispatchFastData).not.toHaveBeenCalled();
   });
 });
 
@@ -677,5 +701,172 @@ describe('direct write dispatch for wk_ keys', () => {
     expect(invalidateForMutation).toHaveBeenCalledWith(
       expect.arrayContaining(['list_agents', 'profile']),
     );
+  });
+});
+
+describe('admin /admin/hidden', () => {
+  const mockResolveAccountId = jest.requireMock('@/lib/outlayer-server')
+    .resolveAccountId as jest.Mock;
+
+  // Default every admin-path call to "caller is admin" so tests that issue
+  // multiple writes don't silently fall back to the outer test.near default
+  // and hit a 403 on the second call. Individual tests override via
+  // `mockResolvedValueOnce` when they need a non-admin caller.
+  beforeEach(() => {
+    mockResolveAccountId.mockResolvedValue('admin.near');
+  });
+
+  describe('GET /admin/hidden (public)', () => {
+    it('returns the hidden set as an array', async () => {
+      mockGetHiddenSet.mockResolvedValueOnce(
+        new Set(['spam.near', 'bot.near']),
+      );
+      const [req, params] = makeRequest('GET', 'admin/hidden');
+      const res = await GET(req, params);
+      expect(res.status).toBe(200);
+      const body = await json(res);
+      expect(body.success).toBe(true);
+      expect(body.data.hidden).toEqual(
+        expect.arrayContaining(['spam.near', 'bot.near']),
+      );
+      expect(body.data.hidden).toHaveLength(2);
+    });
+
+    it('returns an empty array when nothing is hidden', async () => {
+      mockGetHiddenSet.mockResolvedValueOnce(new Set());
+      const [req, params] = makeRequest('GET', 'admin/hidden');
+      const res = await GET(req, params);
+      expect(res.status).toBe(200);
+      const body = await json(res);
+      expect(body.data.hidden).toEqual([]);
+    });
+
+    it('does not require authentication', async () => {
+      mockGetHiddenSet.mockResolvedValueOnce(new Set());
+      const [req, params] = makeRequest('GET', 'admin/hidden');
+      const res = await GET(req, params);
+      expect(res.status).toBe(200);
+    });
+
+    it('returns 429 with Retry-After header when rate-limited', async () => {
+      mockCheckRateLimit.mockReturnValueOnce({ ok: false, retryAfter: 42 });
+      const [req, params] = makeRequest('GET', 'admin/hidden');
+      const res = await GET(req, params);
+      expect(res.status).toBe(429);
+      expect(res.headers.get('Retry-After')).toBe('42');
+      // The rate-limit check must happen before the upstream read, not
+      // after — 429s should do zero work.
+      expect(mockGetHiddenSet).not.toHaveBeenCalled();
+      expect(mockIncrementRateLimit).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('POST /admin/hidden/{accountId} (admin auth)', () => {
+    it('hides an agent when admin wk_ key is provided', async () => {
+      const [req, params] = makeRequest(
+        'POST',
+        'admin/hidden/spam.near',
+        undefined,
+        { authorization: 'Bearer wk_admin_test' },
+      );
+      const res = await POST(req, params);
+      expect(res.status).toBe(200);
+      const body = await json(res);
+      expect(body.data.action).toBe('hidden');
+      expect(body.data.account_id).toBe('spam.near');
+      expect(mockWriteToFastData).toHaveBeenCalledWith(
+        'wk_admin_test',
+        expect.objectContaining({
+          'hidden/spam.near': expect.objectContaining({
+            at: expect.any(Number),
+          }),
+        }),
+      );
+    });
+
+    it('hides two agents back-to-back in one test (regression: mockResolvedValue stickiness)', async () => {
+      const [req1, params1] = makeRequest(
+        'POST',
+        'admin/hidden/spam1.near',
+        undefined,
+        { authorization: 'Bearer wk_admin_test' },
+      );
+      const res1 = await POST(req1, params1);
+      expect(res1.status).toBe(200);
+
+      const [req2, params2] = makeRequest(
+        'POST',
+        'admin/hidden/spam2.near',
+        undefined,
+        { authorization: 'Bearer wk_admin_test' },
+      );
+      const res2 = await POST(req2, params2);
+      expect(res2.status).toBe(200);
+
+      expect(mockWriteToFastData).toHaveBeenCalledTimes(2);
+    });
+
+    it('rejects writes without auth', async () => {
+      const [req, params] = makeRequest('POST', 'admin/hidden/spam.near');
+      const res = await POST(req, params);
+      expect(res.status).toBe(401);
+      expect(mockWriteToFastData).not.toHaveBeenCalled();
+    });
+
+    it('rejects writes from non-admin wk_ keys', async () => {
+      mockResolveAccountId.mockResolvedValueOnce('not-admin.near');
+      const [req, params] = makeRequest(
+        'POST',
+        'admin/hidden/spam.near',
+        undefined,
+        { authorization: 'Bearer wk_user_test' },
+      );
+      const res = await POST(req, params);
+      expect(res.status).toBe(403);
+      expect(mockWriteToFastData).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('DELETE /admin/hidden/{accountId} (admin auth)', () => {
+    it('unhides an agent when admin wk_ key is provided', async () => {
+      const [req, params] = makeRequest(
+        'DELETE',
+        'admin/hidden/spam.near',
+        undefined,
+        { authorization: 'Bearer wk_admin_test' },
+      );
+      const res = await DELETE(req, params);
+      expect(res.status).toBe(200);
+      const body = await json(res);
+      expect(body.data.action).toBe('unhidden');
+      expect(body.data.account_id).toBe('spam.near');
+      expect(mockWriteToFastData).toHaveBeenCalledWith(
+        'wk_admin_test',
+        expect.objectContaining({
+          'hidden/spam.near': null,
+        }),
+      );
+    });
+  });
+
+  describe('unknown admin paths', () => {
+    it('returns 404 for unknown authed admin subpaths', async () => {
+      const [req, params] = makeRequest(
+        'POST',
+        'admin/unknown/action',
+        undefined,
+        { authorization: 'Bearer wk_admin_test' },
+      );
+      const res = await POST(req, params);
+      expect(res.status).toBe(404);
+    });
+
+    it('404s a write to /admin/hidden without an account id', async () => {
+      const [req, params] = makeRequest('POST', 'admin/hidden', undefined, {
+        authorization: 'Bearer wk_admin_test',
+      });
+      const res = await POST(req, params);
+      expect(res.status).toBe(404);
+    });
   });
 });

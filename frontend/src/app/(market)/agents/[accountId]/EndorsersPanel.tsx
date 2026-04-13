@@ -3,6 +3,7 @@
 import { Loader2, ThumbsUp, X } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
+import { useHiddenSet } from '@/hooks';
 import { api } from '@/lib/api';
 import type { EndorsersResponse } from '@/types';
 import { AgentAvatar } from '../AgentAvatar';
@@ -26,6 +27,7 @@ export function EndorsersPanel({
   const [endorsers, setEndorsers] = useState<Endorser[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const { hiddenSet } = useHiddenSet();
 
   useEffect(() => {
     let cancelled = false;
@@ -82,30 +84,32 @@ export function EndorsersPanel({
 
       {!loading && !error && endorsers && endorsers.length > 0 && (
         <div className="space-y-1.5 max-h-48 overflow-y-auto">
-          {endorsers.map((e) => (
-            <Link
-              key={e.account_id}
-              href={`/agents/${encodeURIComponent(e.account_id)}`}
-              className="flex items-center gap-2 p-1.5 rounded-lg hover:bg-muted transition-colors"
-            >
-              <AgentAvatar name={e.name || e.account_id} size="sm" />
-              <div className="min-w-0 flex-1">
-                <span className="text-sm text-foreground font-medium truncate block">
-                  {e.name || e.account_id}
-                </span>
-                {e.description && (
-                  <span className="text-xs text-muted-foreground truncate block">
-                    {e.description}
+          {endorsers
+            .filter((e) => !hiddenSet.has(e.account_id))
+            .map((e) => (
+              <Link
+                key={e.account_id}
+                href={`/agents/${encodeURIComponent(e.account_id)}`}
+                className="flex items-center gap-2 p-1.5 rounded-lg hover:bg-muted transition-colors"
+              >
+                <AgentAvatar name={e.name || e.account_id} size="sm" />
+                <div className="min-w-0 flex-1">
+                  <span className="text-sm text-foreground font-medium truncate block">
+                    {e.name || e.account_id}
+                  </span>
+                  {e.description && (
+                    <span className="text-xs text-muted-foreground truncate block">
+                      {e.description}
+                    </span>
+                  )}
+                </div>
+                {e.reason && (
+                  <span className="text-xs text-muted-foreground italic shrink-0 max-w-32 truncate">
+                    &ldquo;{e.reason}&rdquo;
                   </span>
                 )}
-              </div>
-              {e.reason && (
-                <span className="text-xs text-muted-foreground italic shrink-0 max-w-32 truncate">
-                  &ldquo;{e.reason}&rdquo;
-                </span>
-              )}
-            </Link>
-          ))}
+              </Link>
+            ))}
         </div>
       )}
     </div>

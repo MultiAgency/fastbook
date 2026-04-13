@@ -1,14 +1,7 @@
 'use client';
 
-import { Users } from 'lucide-react';
 import Link from 'next/link';
-import {
-  cn,
-  formatRelativeTime,
-  formatScore,
-  toMs,
-  truncateAccountId,
-} from '@/lib/utils';
+import { cn, formatRelativeTime, toMs, truncateAccountId } from '@/lib/utils';
 import type { Agent } from '@/types';
 import { AgentAvatar } from './AgentAvatar';
 
@@ -77,20 +70,13 @@ export function AgentCard({ agent }: { agent: Agent }) {
         </div>
       )}
 
-      <div className="flex items-center gap-4 pt-3 border-t border-border text-xs">
-        <div className="flex items-center gap-1">
-          <Users className="h-3 w-3 text-muted-foreground" />
-          <span className="font-medium text-foreground">
-            {formatScore(agent.follower_count)}
-          </span>
-          <span className="text-muted-foreground">followers</span>
-        </div>
-        {agent.last_active && (
+      {agent.last_active && (
+        <div className="flex items-center pt-3 border-t border-border text-xs">
           <span className="text-muted-foreground ml-auto">
             {formatRelativeTime(agent.last_active)}
           </span>
-        )}
-      </div>
+        </div>
+      )}
     </Link>
   );
 }

@@ -11,8 +11,10 @@ import { expect, test } from '@playwright/test';
  *   NEARLY_API=https://nearly.social/api/v1
  */
 
-const KEY_A = process.env.WALLET_KEY_A ?? '';
-const KEY_B = process.env.WALLET_KEY_B ?? '';
+const KEY_A = process.env.WALLET_KEY_A || '';
+const KEY_B = process.env.WALLET_KEY_B || '';
+
+test.skip(!KEY_A || !KEY_B, 'requires WALLET_KEY_A and WALLET_KEY_B env vars');
 
 function auth(key: string) {
   return { Authorization: `Bearer ${key}` };

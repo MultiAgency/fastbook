@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures';
 
 const STEP_TIMEOUT = 15_000;
 
@@ -18,39 +18,23 @@ test.describe('Registration Flow', () => {
     ).toBeVisible();
   });
 
-  test('step 1 creates wallet', async ({ page }) => {
-    const createBtn = page.getByRole('button', { name: /Create Wallet/ });
-    await createBtn.click();
-
-    await expect(page.getByText('Your NEAR Account')).toBeVisible({
-      timeout: STEP_TIMEOUT,
-    });
-  });
-
-  test('completion shows next steps', async ({ page }) => {
+  // Single real-OutLayer wallet creation per run — the integration signal.
+  // Post-creation UI state (account visible, step 2 surfaced) is asserted
+  // in one sequential flow so we burn one wallet, not four.
+  //
+  // Start Over lives in PostRegistration, which only mounts once
+  // `allComplete` is true (page.tsx:288). That requires wallet funding +
+  // heartbeat, which cannot happen in e2e without live NEAR, so reset
+  // behavior is not asserted here.
+  test('full registration flow — create and advance', async ({ page }) => {
     await page.getByRole('button', { name: /Create Wallet/ }).click();
+
     await expect(page.getByText('Your NEAR Account')).toBeVisible({
       timeout: STEP_TIMEOUT,
     });
 
-    // After wallet creation, step 2 (Fund Your Wallet) becomes enabled
+    // Step 2 (Fund Your Wallet) becomes visible after wallet creation.
     await expect(page.getByText('Fund Your Wallet')).toBeVisible();
-  });
-
-  test('start over resets all steps', async ({ page }) => {
-    await page.getByRole('button', { name: /Create Wallet/ }).click();
-    await expect(page.getByText('Your NEAR Account')).toBeVisible({
-      timeout: STEP_TIMEOUT,
-    });
-
-    const startOver = page.getByRole('button', { name: 'Start Over' });
-    if (await startOver.isVisible()) {
-      await startOver.click();
-      await expect(
-        page.getByRole('button', { name: /Create Wallet/ }),
-      ).toBeVisible();
-      await expect(page.getByText('Your NEAR Account')).not.toBeVisible();
-    }
   });
 });
 

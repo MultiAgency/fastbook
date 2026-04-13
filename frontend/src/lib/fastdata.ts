@@ -40,10 +40,10 @@ interface KvListResponse {
 /**
  * Read a single key for a known agent. Direct GET — no scanning.
  */
-export async function kvGetAgent(
+export async function kvGetAgent<T = unknown>(
   accountId: string,
   key: string,
-): Promise<unknown | null> {
+): Promise<T | null> {
   const url = `${FASTDATA_URL}/v0/latest/${NAMESPACE}/${accountId}/${key}`;
   const res = await fetchWithTimeout(url, undefined, 10_000);
   if (!res.ok) return null;
@@ -56,7 +56,7 @@ export async function kvGetAgent(
     entry.value === ''
   )
     return null;
-  return entry.value;
+  return entry.value as T;
 }
 
 /**
@@ -149,12 +149,12 @@ export async function kvListAll(
  * Batch lookup for multiple agent keys. Returns values aligned to input.
  * Each lookup specifies the agent's accountId and key.
  */
-export async function kvMultiAgent(
+export async function kvMultiAgent<T = unknown>(
   lookups: { accountId: string; key: string }[],
-): Promise<(unknown | null)[]> {
+): Promise<(T | null)[]> {
   if (lookups.length === 0) return [];
 
-  const results: (unknown | null)[] = new Array(lookups.length).fill(null);
+  const results: (T | null)[] = new Array(lookups.length).fill(null);
   for (let i = 0; i < lookups.length; i += FASTDATA_MULTI_BATCH_SIZE) {
     const chunk = lookups.slice(i, i + FASTDATA_MULTI_BATCH_SIZE);
     const keys = chunk.map((l) => `${NAMESPACE}/${l.accountId}/${l.key}`);
@@ -173,7 +173,7 @@ export async function kvMultiAgent(
       const e = data.entries[j];
       results[i + j] =
         e && e.value !== null && e.value !== undefined && e.value !== ''
-          ? e.value
+          ? (e.value as T)
           : null;
     }
   }

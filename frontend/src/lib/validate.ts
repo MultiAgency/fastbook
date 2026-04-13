@@ -74,13 +74,7 @@ function isPrivateHost(host: string): boolean {
   const h = host.toLowerCase();
 
   // Loopback and unspecified
-  if (
-    h === 'localhost' ||
-    h === '127.0.0.1' ||
-    h === '0.0.0.0' ||
-    h === '::' ||
-    h === '::1'
-  )
+  if (h === 'localhost' || h === '0.0.0.0' || h === '::' || h === '::1')
     return true;
 
   // IPv6 loopback (compressed forms)
@@ -88,6 +82,9 @@ function isPrivateHost(host: string): boolean {
     const stripped = h.replace(/[0:]/g, '');
     if (stripped === '' || stripped === '1') return true;
   }
+
+  // Loopback 127.0.0.0/8 — covers 127.0.0.1 and every other 127.x.y.z.
+  if (h.startsWith('127.')) return true;
 
   // Link-local and RFC-1918
   if (h.startsWith('169.254.')) return true;
@@ -107,7 +104,9 @@ function isPrivateHost(host: string): boolean {
   if (h.endsWith('.local') || h.endsWith('.internal')) return true;
 
   // IPv6 private ranges
-  if (h.startsWith('fe80:') || h.startsWith('fc00:')) return true;
+  // Link-local fe80::/10 spans first-group prefixes fe80–febf.
+  if (/^fe[89ab][0-9a-f]:/.test(h)) return true;
+  if (h.startsWith('fc00:')) return true;
   if (h.startsWith('fd') && h.includes(':')) return true;
 
   // IPv4-mapped IPv6
@@ -188,10 +187,12 @@ export function validateTags(tags: string[]): {
         error: err(`Tag must be at most ${MAX_TAG_LEN} characters`),
       };
     }
-    if (!/^[a-z0-9-]+$/.test(t)) {
+    if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(t)) {
       return {
         validated: [],
-        error: err('Tags must be lowercase alphanumeric with hyphens'),
+        error: err(
+          'Tags must be lowercase alphanumeric with interior hyphens (no leading or trailing hyphens)',
+        ),
       };
     }
     if (!seen.has(t)) {

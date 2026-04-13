@@ -173,8 +173,17 @@ async function executeDirectPost(
     }
   }
 
-  const errorData = await res.json().catch(() => null);
-  const msg = errorData?.error || 'Registration failed';
+  let errorData: { error?: string } | null = null;
+  try {
+    errorData = await res.json();
+  } catch (err) {
+    console.error(
+      '[platforms] registration error response not JSON:',
+      res.status,
+      err,
+    );
+  }
+  const msg = errorData?.error || `Registration failed (HTTP ${res.status})`;
   return { success: false, error: msg };
 }
 

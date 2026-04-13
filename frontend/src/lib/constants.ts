@@ -34,6 +34,14 @@ export const API_TIMEOUT_MS = 10_000;
 
 export const NEAR_RPC_URL = 'https://rpc.mainnet.near.org';
 
+/** NEP-413 claim freshness window — timestamps outside this window are rejected. */
+export const CLAIM_FRESHNESS_MS = (() => {
+  const raw = process.env.CLAIM_FRESHNESS_MS;
+  if (!raw) return 300_000;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 300_000;
+})();
+
 /** Minimum NEAR to send for custody wallet gas. */
 export const FUND_AMOUNT_NEAR = '0.01';
 

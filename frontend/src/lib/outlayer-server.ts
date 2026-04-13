@@ -5,7 +5,7 @@ import {
   OUTLAYER_PROJECT_NAME,
   OUTLAYER_PROJECT_OWNER,
 } from '@/lib/constants';
-import { fetchWithTimeout } from '@/lib/fetch';
+import { fetchWithTimeout, httpErrorText } from '@/lib/fetch';
 import { PUBLIC_ACTIONS, queryFieldsForAction } from '@/lib/routes';
 import { wasmCodeToStatus } from '@/lib/utils';
 import type { VerifiableClaim } from '@/types';
@@ -104,30 +104,31 @@ export function getOutlayerPaymentKey(): string {
   return key;
 }
 
-// ---------------------------------------------------------------------------
-// Auto-sign: mint a verifiable_claim for trial wallet keys (wk_).
-//
-// Trial wk_ keys don't carry NEAR identity into WASM execution.  To resolve
-// the wallet's account, we call the free /wallet/v1/sign-message endpoint
-// and inject the result as a verifiable_claim before forwarding to WASM.
-//
-// accountCache maps wk_ → account_id (deterministic, never expires).
-// Claims are NOT cached — NEP-413 nonces are single-use, so each WASM
-// call requires a fresh signature from the sign-message endpoint.
-//
-// First request for a new wk_ key costs 2 sign calls (resolve + sign).
-// Subsequent requests with a warm account cache cost 1 sign call.
-// ---------------------------------------------------------------------------
+// Claims can't be cached — NEP-413 nonces are single-use. Account IDs can —
+// they're deterministic per wallet key, so accountCache holds them for the
+// life of the process (cold starts clear it).
 
 const accountCache = new Map<string, string>();
 const SIGN_TIMEOUT_MS = 5_000;
+const CLAIM_DOMAIN = 'nearly.social';
+const CLAIM_VERSION = 1;
+
+function buildClaimMessage(action: string, accountId: string): string {
+  return JSON.stringify({
+    action,
+    domain: CLAIM_DOMAIN,
+    account_id: accountId,
+    version: CLAIM_VERSION,
+    timestamp: Date.now(),
+  });
+}
 
 export async function signMessage(
   walletKey: string,
   message: string,
   format?: 'nep413' | 'raw',
 ): Promise<Record<string, string> | null> {
-  const body: Record<string, string> = { message, recipient: 'nearly.social' };
+  const body: Record<string, string> = { message, recipient: CLAIM_DOMAIN };
   if (format) body.format = format;
   let resp: Response;
   try {
@@ -143,10 +144,18 @@ export async function signMessage(
       },
       SIGN_TIMEOUT_MS,
     );
-  } catch {
+  } catch (err) {
+    console.error('[outlayer-server] signMessage network error:', err);
     return null;
   }
-  if (!resp.ok) return null;
+  if (!resp.ok) {
+    console.error(
+      '[outlayer-server] signMessage http error:',
+      resp.status,
+      await httpErrorText(resp),
+    );
+    return null;
+  }
   try {
     const r = (await resp.json()) as Record<string, unknown>;
     if (
@@ -156,18 +165,20 @@ export async function signMessage(
       typeof r.nonce === 'string'
     ) {
       const result: Record<string, string> = {
-        account_id: r.account_id as string,
-        public_key: r.public_key as string,
-        signature: r.signature as string,
-        nonce: r.nonce as string,
+        account_id: r.account_id,
+        public_key: r.public_key,
+        signature: r.signature,
+        nonce: r.nonce,
       };
       if (typeof r.signature_base64 === 'string') {
-        result.signature_base64 = r.signature_base64 as string;
+        result.signature_base64 = r.signature_base64;
       }
       return result;
     }
+    console.error('[outlayer-server] signMessage malformed response:', r);
     return null;
-  } catch {
+  } catch (err) {
+    console.error('[outlayer-server] signMessage parse error:', err);
     return null;
   }
 }
@@ -179,7 +190,7 @@ export async function resolveAccountId(
   if (cached) return cached;
 
   // Sign a throwaway message just to learn the account_id.
-  const msg = JSON.stringify({ action: 'resolve', domain: 'nearly.social' });
+  const msg = JSON.stringify({ action: 'resolve', domain: CLAIM_DOMAIN });
   const result = await signMessage(walletKey, msg);
   if (!result) return null;
 
@@ -187,10 +198,6 @@ export async function resolveAccountId(
   return result.account_id;
 }
 
-// Each call needs a fresh nonce — NEP-413 nonces are single-use.
-// Caching claims would cause NONCE_REPLAY errors on the second call.
-// The accountCache above is safe: account IDs are deterministic.
-// Cost: one sign-message call per request (~network RTT to OutLayer API).
 export async function mintClaimForWalletKey(
   walletKey: string,
   action: string,
@@ -198,14 +205,7 @@ export async function mintClaimForWalletKey(
   const accountId = await resolveAccountId(walletKey);
   if (!accountId) return null;
 
-  const message = JSON.stringify({
-    action,
-    domain: 'nearly.social',
-    account_id: accountId,
-    version: 1,
-    timestamp: Date.now(),
-  });
-
+  const message = buildClaimMessage(action, accountId);
   const result = await signMessage(walletKey, message);
   if (!result) return null;
 
@@ -224,7 +224,7 @@ const OUTLAYER_RESOURCE_LIMITS = {
   max_execution_seconds: 30,
 } as const;
 
-const STRUCTURED_FIELDS = new Set(['tags', 'capabilities', 'handles']);
+const STRUCTURED_FIELDS = new Set(['tags', 'capabilities']);
 
 export function sanitizePublic(
   body: Record<string, unknown>,

@@ -1,9 +1,10 @@
 'use client';
 
-import { ArrowRight, Users } from 'lucide-react';
+import { ArrowRight } from 'lucide-react';
 import Link from 'next/link';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { AgentAvatar } from '@/app/(market)/agents/AgentAvatar';
+import { useHiddenSet } from '@/hooks';
 import { api } from '@/lib/api';
 import { FadeIn } from './FadeIn';
 import { Section } from './Section';
@@ -11,21 +12,25 @@ import { Section } from './Section';
 interface TopAgent {
   account_id: string;
   name: string | null;
-  followers: number;
+  description: string;
 }
 
 export function CommunitySection() {
-  const [topAgents, setTopAgents] = useState<TopAgent[]>([]);
+  // Raw list kept as-is; hidden filtering happens at render time via useMemo
+  // so a hidden-set refresh (every 60s) is a cheap re-render, not a refetch.
+  const [rawAgents, setRawAgents] = useState<TopAgent[]>([]);
+  const { hiddenSet } = useHiddenSet();
 
   useEffect(() => {
     async function fetchTopAgents() {
       try {
-        const result = await api.listAgents(3);
-        setTopAgents(
+        // Over-fetch so we still have three rows after filtering hidden.
+        const result = await api.listAgents(10);
+        setRawAgents(
           result.agents.map((a) => ({
             account_id: a.account_id,
             name: a.name,
-            followers: a.follower_count || 0,
+            description: a.description,
           })),
         );
       } catch {
@@ -34,6 +39,11 @@ export function CommunitySection() {
     }
     fetchTopAgents();
   }, []);
+
+  const topAgents = useMemo(
+    () => rawAgents.filter((a) => !hiddenSet.has(a.account_id)).slice(0, 3),
+    [rawAgents, hiddenSet],
+  );
 
   if (topAgents.length === 0) return null;
 
@@ -70,12 +80,11 @@ export function CommunitySection() {
                 <div className="text-sm font-medium text-foreground truncate">
                   {agent.name || agent.account_id}
                 </div>
-                <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                  <Users className="h-2.5 w-2.5" />
-                  <span>
-                    {agent.followers?.toLocaleString() || 0} followers
-                  </span>
-                </div>
+                {agent.description && (
+                  <div className="text-xs text-muted-foreground truncate">
+                    {agent.description}
+                  </div>
+                )}
               </div>
             </Link>
           ))}

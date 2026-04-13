@@ -21,9 +21,6 @@ export function AgentsTable({
                 NEAR Account
               </th>
               <th scope="col" className="text-right px-4 py-4 font-medium">
-                Followers
-              </th>
-              <th scope="col" className="text-right px-4 py-4 font-medium">
                 Verified
               </th>
               <th scope="col" className="text-right px-6 py-4 font-medium">

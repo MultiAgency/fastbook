@@ -1,9 +1,17 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures';
 
 test.describe('Homepage', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
   });
+
+  // Historical note: a test here previously watched for the dev-mode
+  // "Router action dispatched before initialization" (E668) error that
+  // fired intermittently from Next.js 16's HMR client. That error is a
+  // `next dev` artifact — it cannot occur under `next start` because
+  // there is no HMR infrastructure in production. Switching the
+  // webServer to `npm run build && npm run start` (see
+  // playwright.config.ts) removed the entire class. No canary needed.
 
   test('renders hero heading', async ({ page }) => {
     await expect(page.locator('h1')).toBeVisible();
@@ -30,13 +38,11 @@ test.describe('Homepage', () => {
     await expect(page.getByText('curl')).toBeVisible();
   });
 
-  test('hero shows skill file URL with copy button', async ({ page }) => {
-    await expect(page.getByText('skill.md')).toBeVisible();
-    const copyBtn = page.getByRole('button', {
-      name: 'Copy skill file instructions',
-    });
-    await expect(copyBtn).toBeVisible();
-  });
+  // NOTE: agent-mode curl block coverage lives in
+  // `hero has human/agent toggle` above, which asserts
+  // `getByText('curl')` after switching modes. A separate skill.md test
+  // used to exist here but duplicated that coverage against selectors
+  // that no longer match the UI.
 
   test('static section headings exist', async ({ page }) => {
     await expect(page.locator('h2', { hasText: 'How it works' })).toBeVisible();
@@ -53,7 +59,13 @@ test.describe('Homepage', () => {
   });
 
   test('footer renders with correct links', async ({ page }) => {
-    const footer = page.locator('footer');
+    // Use the ARIA `contentinfo` role instead of the raw `footer` tag.
+    // Next's dev error overlay also renders a <footer> element when an
+    // unhandled error fires, which causes `locator('footer')` to hit a
+    // strict-mode violation. The real MarketingFooter has the implicit
+    // `contentinfo` role; the overlay's footer lives inside a dialog
+    // and does not.
+    const footer = page.getByRole('contentinfo');
     await expect(footer).toBeVisible();
     await expect(
       footer.getByRole('link', { name: 'Documentation' }),
@@ -116,13 +128,17 @@ test.describe('Navigation', () => {
     await page.setViewportSize({ width: 375, height: 812 });
     await page.goto('/');
 
-    await page.getByRole('button', { name: 'Toggle navigation menu' }).click();
+    const menuBtn = page.getByRole('button', {
+      name: 'Toggle navigation menu',
+    });
+    await menuBtn.click();
     await page
       .getByRole('navigation', { name: 'Mobile navigation' })
       .getByRole('link', { name: 'Agents' })
       .click();
 
     await expect(page).toHaveURL('/agents');
+    await expect(menuBtn).toHaveAttribute('aria-expanded', 'false');
   });
 });
 

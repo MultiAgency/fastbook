@@ -8,7 +8,7 @@ import {
 } from '@/lib/cache';
 import { LIMITS, OUTLAYER_ADMIN_ACCOUNT } from '@/lib/constants';
 import { dispatchFastData, handleGetSuggested } from '@/lib/fastdata-dispatch';
-import { nowSecs, profileGaps } from '@/lib/fastdata-utils';
+import { getHiddenSet, nowSecs, profileGaps } from '@/lib/fastdata-utils';
 import {
   dispatchWrite,
   invalidatesFor,
@@ -22,7 +22,9 @@ import {
   sanitizePublic,
 } from '@/lib/outlayer-server';
 import { handleRegisterPlatforms, PLATFORM_META } from '@/lib/platforms';
+import { checkRateLimit, incrementRateLimit } from '@/lib/rate-limit';
 import { PUBLIC_ACTIONS, type ResolvedRoute, resolveRoute } from '@/lib/routes';
+import { verifyClaim } from '@/lib/verify-claim';
 import type { VrfProof } from '@/types';
 
 /**
@@ -65,7 +67,7 @@ async function resolveCallerAccountId(
 }
 
 const INT_FIELDS = new Set(['limit']);
-const VALID_SORTS = new Set(['followers', 'endorsements', 'newest', 'active']);
+const VALID_SORTS = new Set(['newest', 'active']);
 const VALID_DIRECTIONS = new Set(['incoming', 'outgoing', 'both']);
 const CURSOR_RE = /^[a-z0-9_.:-]{1,64}$|^\d{1,20}$/;
 const MAX_BODY_BYTES = LIMITS.MAX_BODY_BYTES;
@@ -187,8 +189,19 @@ async function dispatch(
   let wasmBody: Record<string, unknown>;
 
   if (request.method === 'GET') {
+    const url = new URL(request.url);
+    if (route.queryFields.includes('sort')) {
+      const sortParam = url.searchParams.get('sort');
+      if (sortParam !== null && !VALID_SORTS.has(sortParam)) {
+        return errJson(
+          'VALIDATION_ERROR',
+          `Invalid sort '${sortParam}'. Valid values: ${[...VALID_SORTS].join(', ')}`,
+          400,
+        );
+      }
+    }
     wasmBody = {
-      ...extractQueryParams(new URL(request.url), route.queryFields),
+      ...extractQueryParams(url, route.queryFields),
       ...route.pathParams,
       action: route.action,
     };
@@ -231,6 +244,10 @@ async function dispatch(
   }
 
   if (isPublic) {
+    // verify_claim is a pure function with rate limiting — handled directly.
+    if (route.action === 'verify_claim') {
+      return handleVerifyClaim(request, wasmBody);
+    }
     // Profile reads become caller-aware when a wallet key is supplied — the
     // response carries `is_following` and `my_endorsements` for that caller.
     // Cache is skipped because the response varies per caller.
@@ -243,7 +260,11 @@ async function dispatch(
 }
 
 // ---------------------------------------------------------------------------
-// Admin — hide/unhide agents. Outside the route table, excluded from openapi.
+// Admin — hide/unhide. Outside the route table.
+//
+//   GET    /api/v1/admin/hidden        — list (public; frontend needs it)
+//   POST   /api/v1/admin/hidden/{id}   — hide   (admin auth)
+//   DELETE /api/v1/admin/hidden/{id}   — unhide (admin auth)
 // ---------------------------------------------------------------------------
 
 async function assertAdminAuth(
@@ -268,20 +289,42 @@ async function handleAdmin(
   request: NextRequest,
   path: string[],
 ): Promise<NextResponse> {
+  // Public read: the frontend fetches this to suppress hidden agents at
+  // render time. Auth is gated per-path, not per-namespace. Rate-limited
+  // by client IP to cap abuse — the legitimate frontend poll is ~1/min.
+  if (request.method === 'GET' && path[1] === 'hidden' && path.length === 2) {
+    const ip =
+      request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
+      request.headers.get('x-real-ip') ||
+      'anon';
+    const rl = checkRateLimit('hidden_list', ip);
+    if (!rl.ok) {
+      const resp = errJson(
+        'RATE_LIMITED',
+        'Too many hidden-list requests',
+        429,
+      );
+      resp.headers.set('Retry-After', String(rl.retryAfter));
+      return resp;
+    }
+    incrementRateLimit('hidden_list', ip);
+    const hidden = await getHiddenSet();
+    return successJson({ hidden: [...hidden] });
+  }
+
+  // Everything below requires admin auth.
   const auth = await assertAdminAuth(request);
   if (auth instanceof NextResponse) return auth;
   const walletKey = auth;
 
-  // POST /api/v1/admin/hide/{accountId} — hide an agent
-  // DELETE /api/v1/admin/hide/{accountId} — unhide an agent
-  if (path[1] === 'hide' && path[2]) {
+  if (path[1] === 'hidden' && path[2]) {
     const targetAccountId = path[2];
 
     if (request.method === 'POST') {
       const wrote = await writeToFastData(walletKey, {
         [`hidden/${targetAccountId}`]: { at: nowSecs() },
       });
-      if (!wrote)
+      if (!wrote.ok)
         return errJson('STORAGE_ERROR', 'Failed to write to FastData', 500);
       invalidateForMutation(invalidatesFor('hide_agent'));
       return successJson({ action: 'hidden', account_id: targetAccountId });
@@ -291,7 +334,7 @@ async function handleAdmin(
       const wrote = await writeToFastData(walletKey, {
         [`hidden/${targetAccountId}`]: null,
       });
-      if (!wrote)
+      if (!wrote.ok)
         return errJson('STORAGE_ERROR', 'Failed to write to FastData', 500);
       invalidateForMutation(invalidatesFor('unhide_agent'));
       return successJson({ action: 'unhidden', account_id: targetAccountId });
@@ -338,25 +381,104 @@ async function dispatchProfileWithCaller(
   return successJson(result.data);
 }
 
+/**
+ * POST /verify-claim — general-purpose NEP-413 verifier.
+ * Public, rate-limited per client IP. Pure function, never writes. Caller
+ * supplies the recipient to pin; optional `expected_domain` tightens the
+ * message-layer check.
+ */
+async function handleVerifyClaim(
+  request: NextRequest,
+  wasmBody: Record<string, unknown>,
+): Promise<NextResponse> {
+  const ip =
+    request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
+    request.headers.get('x-real-ip') ||
+    'anon';
+  const rl = checkRateLimit('verify_claim', ip);
+  if (!rl.ok) {
+    const resp = errJson('RATE_LIMITED', 'Too many verification requests', 429);
+    resp.headers.set('Retry-After', String(rl.retryAfter));
+    return resp;
+  }
+  incrementRateLimit('verify_claim', ip);
+
+  // `dispatch` injects `action: 'verify_claim'` into wasmBody — drop it, plus
+  // the `recipient` / `expected_domain` hints which are inputs to the verifier
+  // but not part of the claim shape.
+  const {
+    action: _action,
+    recipient,
+    expected_domain,
+    ...claimInput
+  } = wasmBody;
+
+  if (
+    typeof recipient !== 'string' ||
+    recipient.length < 1 ||
+    recipient.length > 128
+  ) {
+    return errJson(
+      'VALIDATION_ERROR',
+      '`recipient` must be a string, 1–128 characters',
+      400,
+    );
+  }
+  if (expected_domain !== undefined && typeof expected_domain !== 'string') {
+    return errJson(
+      'VALIDATION_ERROR',
+      '`expected_domain` must be a string',
+      400,
+    );
+  }
+
+  const result = await verifyClaim(claimInput, recipient, expected_domain);
+  const status = !result.valid && result.reason === 'rpc_error' ? 502 : 200;
+  return NextResponse.json(result, { status });
+}
+
 async function dispatchPublic(
-  _request: NextRequest,
+  request: NextRequest,
   route: ResolvedRoute,
   wasmBody: Record<string, unknown>,
 ): Promise<NextResponse> {
   if (route.action === 'list_platforms') {
+    const ip =
+      request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
+      request.headers.get('x-real-ip') ||
+      'anon';
+    const rl = checkRateLimit('list_platforms', ip);
+    if (!rl.ok) {
+      const resp = errJson('RATE_LIMITED', 'Too many platform requests', 429);
+      resp.headers.set('Retry-After', String(rl.retryAfter));
+      return resp;
+    }
+    incrementRateLimit('list_platforms', ip);
     return successJson({ platforms: PLATFORM_META });
   }
 
+  // Authenticated callers bypass the public cache: they're typically reading
+  // their own writes, and the in-memory cache is per-instance so cross-instance
+  // stale reads can last up to TTL after a mutation. The cache exists to absorb
+  // anonymous scrape load, not to degrade UX for wallet holders.
+  const hasWalletKey = request.headers
+    .get('authorization')
+    ?.match(/^Bearer\s+wk_/);
+
   const sanitized = sanitizePublic(wasmBody);
   const cacheKey = makeCacheKey(sanitized);
-  const cached = getCached(cacheKey);
-  if (cached) {
-    return NextResponse.json(cached);
+  if (!hasWalletKey) {
+    const cached = getCached(cacheKey);
+    if (cached) {
+      return NextResponse.json(cached);
+    }
   }
   const result = await dispatchFastData(route.action, sanitized);
   if ('error' in result) return errJsonFromFastData(result);
   const data = { success: true, data: result.data };
-  setCache(route.action, cacheKey, data);
+  if (!hasWalletKey) {
+    setCache(route.action, cacheKey, data);
+  }
   return NextResponse.json(data);
 }
 

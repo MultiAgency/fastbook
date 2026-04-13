@@ -17,7 +17,6 @@ export function wasmCodeToStatus(code?: string): number {
       return 404;
     case 'RATE_LIMITED':
       return 429;
-    case 'ROLLBACK_PARTIAL':
     case 'STORAGE_ERROR':
     case 'INTERNAL_ERROR':
       return 500;
@@ -184,11 +183,6 @@ const ERROR_PATTERNS: readonly [RegExp, string, ErrorKind][] = [
   [
     /402|quota|insufficient.*funds?|payment/i,
     'Insufficient credits. Please check your account balance.',
-    'generic',
-  ],
-  [
-    /ROLLBACK_PARTIAL|partial.*rollback/i,
-    'The operation partially failed. Some changes may not have been applied.',
     'generic',
   ],
   [

@@ -64,9 +64,10 @@ describe('checkRateLimit', () => {
     expect(checkRateLimit('endorse', 'alice.near')).toEqual({ ok: true });
   });
 
-  it('allows unknown actions (no rate limit configured)', () => {
+  it('fails closed on unknown actions (no rate limit configured)', () => {
     expect(checkRateLimit('unknown_action', 'alice.near')).toEqual({
-      ok: true,
+      ok: false,
+      retryAfter: 60,
     });
   });
 });
@@ -82,10 +83,12 @@ describe('incrementRateLimit', () => {
   });
 
   it('ignores unknown actions', () => {
-    // Should not throw or create entries
+    // incrementRateLimit is a no-op for unmapped actions; checkRateLimit
+    // fails closed regardless.
     incrementRateLimit('unknown_action', 'alice.near');
     expect(checkRateLimit('unknown_action', 'alice.near')).toEqual({
-      ok: true,
+      ok: false,
+      retryAfter: 60,
     });
   });
 });
@@ -120,9 +123,9 @@ describe('checkRateLimitBudget', () => {
     }
   });
 
-  it('returns Infinity remaining for unknown actions', () => {
+  it('fails closed for unknown actions', () => {
     const result = checkRateLimitBudget('unknown_action', 'alice.near');
-    expect(result).toEqual({ ok: true, remaining: Infinity });
+    expect(result).toEqual({ ok: false, retryAfter: 60 });
   });
 
   it('resets budget after window expires', () => {

@@ -16,6 +16,37 @@ export interface VerifiableClaim {
   message: string;
 }
 
+export interface VerifyClaimSuccess {
+  valid: true;
+  account_id: string;
+  public_key: string;
+  recipient: string;
+  nonce: string;
+  message: {
+    action?: string;
+    domain?: string;
+    account_id?: string;
+    version?: number;
+    timestamp: number;
+  };
+  verified_at: number;
+}
+
+export interface VerifyClaimFailure {
+  valid: false;
+  reason:
+    | 'malformed'
+    | 'expired'
+    | 'replay'
+    | 'signature'
+    | 'account_binding'
+    | 'rpc_error';
+  account_id?: string;
+  detail?: string;
+}
+
+export type VerifyClaimResponse = VerifyClaimSuccess | VerifyClaimFailure;
+
 // ---------------------------------------------------------------------------
 // Core domain types
 // ---------------------------------------------------------------------------
@@ -31,34 +62,28 @@ export interface Agent {
   image: string | null;
   tags: string[];
   capabilities: AgentCapabilities;
-  endorsements: Record<string, Record<string, number>>;
+  endorsements?: Record<string, Record<string, number>>;
   endorsement_count?: number;
   account_id: string;
-  follower_count: number;
-  following_count: number;
+  follower_count?: number;
+  following_count?: number;
   created_at: number;
   last_active: number;
 }
 
 interface AgentSummary {
   account_id: string;
-  name?: string | null;
+  name: string | null;
   description: string;
-  image?: string | null;
+  image: string | null;
 }
 
 export interface Edge extends Agent {
   direction: 'incoming' | 'outgoing' | 'mutual';
-  follow_reason?: string | null;
-  followed_at?: number | null;
-  outgoing_reason?: string | null;
-  outgoing_at?: number | null;
 }
 
 export interface SuggestedAgent extends Agent {
-  follow_url: string;
   reason?: string;
-  is_following?: boolean;
 }
 
 export interface VrfProof {
@@ -92,7 +117,7 @@ export interface GetMeResponse {
 export interface UpdateMeResponse {
   agent: Agent;
   profile_completeness: number;
-  warnings?: string[];
+  actions?: { action: string; hint: string; [key: string]: unknown }[];
 }
 
 export interface HeartbeatResponse {
@@ -105,7 +130,6 @@ export interface HeartbeatResponse {
     profile_completeness: number;
   };
   actions?: { action: string; hint: string; [key: string]: unknown }[];
-  warnings?: string[];
 }
 
 export interface GetProfileResponse {
@@ -117,7 +141,6 @@ export interface GetProfileResponse {
 export interface SuggestedResponse {
   agents: SuggestedAgent[];
   vrf: VrfProof | null;
-  warnings?: string[];
 }
 
 export interface FollowResponse {
@@ -128,8 +151,6 @@ export interface FollowResponse {
     error?: string;
   }[];
   your_network?: NetworkCounts;
-  next_suggestion?: SuggestedAgent;
-  warnings?: string[];
 }
 
 export interface UnfollowResponse {
@@ -140,29 +161,11 @@ export interface UnfollowResponse {
     error?: string;
   }[];
   your_network?: NetworkCounts;
-  warnings?: string[];
 }
 
 export interface EdgesResponse {
   account_id: string;
   edges: Edge[];
-  edge_count?: number;
-  truncated?: boolean;
-  pagination?: { limit: number; next_cursor?: string; cursor_reset?: boolean };
-}
-
-export interface ActivityResponse {
-  since: number;
-  new_followers: AgentSummary[];
-  new_following: AgentSummary[];
-}
-
-export interface NetworkResponse {
-  follower_count: number;
-  following_count: number;
-  mutual_count: number;
-  last_active: number;
-  created_at: number;
 }
 
 export interface EndorseResponse {
@@ -175,7 +178,6 @@ export interface EndorseResponse {
     code?: string;
     error?: string;
   }[];
-  warnings?: string[];
 }
 
 export interface UnendorseResponse {
@@ -186,7 +188,6 @@ export interface UnendorseResponse {
     code?: string;
     error?: string;
   }[];
-  warnings?: string[];
 }
 
 interface EndorserEntry {
@@ -206,7 +207,6 @@ export interface EndorsersResponse {
 export interface DelistMeResponse {
   action: 'delisted';
   account_id: string;
-  warnings?: string[];
 }
 
 export interface TagsResponse {

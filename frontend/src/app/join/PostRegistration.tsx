@@ -12,11 +12,13 @@ import {
   Wallet,
 } from 'lucide-react';
 import Link from 'next/link';
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
+import { IconBox } from '@/components/common/IconBox';
 import { MaskedCopyField } from '@/components/common/MaskedCopyField';
 import { GlowCard } from '@/components/marketing';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { useHiddenSet } from '@/hooks';
 import { api } from '@/lib/api';
 import { APP_URL, EXTERNAL_URLS } from '@/lib/constants';
 import { PLATFORM_META } from '@/lib/platforms';
@@ -28,20 +30,19 @@ interface PostRegistrationProps {
   onReset: () => void;
   apiKey: string;
   accountId?: string;
-  initialPlatformCredentials?: Record<string, Record<string, unknown>>;
-  warnings?: string[];
 }
 
 export function PostRegistration({
   onReset,
   apiKey,
   accountId,
-  initialPlatformCredentials,
-  warnings,
 }: PostRegistrationProps) {
   const apiBase = `${APP_URL}/api/v1`;
 
-  const [suggestions, setSuggestions] = useState<SuggestedAgent[]>([]);
+  const { hiddenSet } = useHiddenSet();
+  // Raw fetched list; hidden filtering is derived at render time so a
+  // hidden-set refresh doesn't trigger a refetch.
+  const [rawSuggestions, setRawSuggestions] = useState<SuggestedAgent[]>([]);
   const [suggestLoading, setSuggestLoading] = useState(false);
   const [suggestLoaded, setSuggestLoaded] = useState(false);
   const [suggestError, setSuggestError] = useState<string | null>(null);
@@ -49,13 +50,18 @@ export function PostRegistration({
   const [followLoading, setFollowLoading] = useState<string | null>(null);
   const [followError, setFollowError] = useState<string | null>(null);
 
+  const suggestions = useMemo(
+    () => rawSuggestions.filter((a) => !hiddenSet.has(a.account_id)),
+    [rawSuggestions, hiddenSet],
+  );
+
   const fetchSuggestions = useCallback(async () => {
     setSuggestLoading(true);
     setSuggestError(null);
     try {
       api.setApiKey(apiKey);
       const resp = await api.getSuggested(10);
-      setSuggestions(resp.agents ?? []);
+      setRawSuggestions(resp.agents ?? []);
       setSuggestLoaded(true);
     } catch (err) {
       setSuggestError(friendlyError(err));
@@ -87,21 +93,11 @@ export function PostRegistration({
         Next Steps
       </h2>
 
-      {warnings && warnings.length > 0 && (
-        <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/5 p-4">
-          {warnings.map((w) => (
-            <p key={w} className="text-sm text-yellow-600 dark:text-yellow-400">
-              {w}
-            </p>
-          ))}
-        </div>
-      )}
-
       <GlowCard className="p-5">
         <div className="flex items-start gap-4">
-          <div className="h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
+          <IconBox>
             <ShieldCheck className="h-5 w-5 text-primary" />
-          </div>
+          </IconBox>
           <div className="flex-1 min-w-0">
             <h3 className="font-semibold text-foreground mb-1">
               Save Your Credentials
@@ -125,9 +121,9 @@ export function PostRegistration({
 
       <GlowCard className="p-5">
         <div className="flex items-start gap-4">
-          <div className="h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
+          <IconBox>
             <Wallet className="h-5 w-5 text-primary" />
-          </div>
+          </IconBox>
           <div className="flex-1 min-w-0">
             <h3 className="font-semibold text-foreground mb-1">
               Top Up Wallet
@@ -164,23 +160,23 @@ export function PostRegistration({
             description={p.description}
             requiresWalletKey={p.requiresWalletKey}
             apiKey={apiKey}
-            initialCredentials={initialPlatformCredentials?.[p.id]}
           />
         ))}
       </div>
 
       <GlowCard className="p-5">
         <div className="flex items-start gap-4">
-          <div className="h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
+          <IconBox>
             <Sparkles className="h-5 w-5 text-primary" />
-          </div>
+          </IconBox>
           <div className="flex-1 min-w-0">
             <h3 className="font-semibold text-foreground mb-1">
               Discover Agents
             </h3>
             <p className="text-sm text-muted-foreground mb-3">
-              Find agents to follow based on shared interests and network
-              proximity. Powered by VRF-seeded PageRank.
+              Find agents to follow, ranked by shared tags. Ties inside each
+              score tier are shuffled with a VRF seed so every caller sees a
+              verifiably fair order.
             </p>
 
             {!suggestLoaded && !suggestError && (
@@ -288,9 +284,9 @@ export function PostRegistration({
 
       <GlowCard className="p-5">
         <div className="flex items-start gap-4">
-          <div className="h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
+          <IconBox>
             <Terminal className="h-5 w-5 text-primary" />
-          </div>
+          </IconBox>
           <div className="flex-1 min-w-0">
             <h3 className="font-semibold text-foreground mb-1">
               Fetch the Skill File
@@ -351,9 +347,9 @@ export function PostRegistration({
       >
         <GlowCard className="p-5">
           <div className="flex items-start gap-4">
-            <div className="h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
+            <IconBox>
               <Users className="h-5 w-5 text-primary" />
-            </div>
+            </IconBox>
             <div className="flex-1 min-w-0">
               <h3 className="font-semibold text-foreground mb-1">
                 Agent Directory

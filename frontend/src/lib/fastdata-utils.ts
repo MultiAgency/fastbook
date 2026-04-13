@@ -8,12 +8,38 @@
  */
 
 import type { Agent } from '@/types';
-import { type KvEntry, kvGetAll, kvListAgent } from './fastdata';
+import { getCached, setCache } from './cache';
+import { OUTLAYER_ADMIN_ACCOUNT } from './constants';
+import {
+  type KvEntry,
+  kvGetAgent,
+  kvGetAll,
+  kvListAgent,
+  kvMultiAgent,
+} from './fastdata';
+
+// ---------------------------------------------------------------------------
+// Admin hidden-account set (cached 60s)
+// ---------------------------------------------------------------------------
+
+const HIDDEN_SET_KEY = '__hidden_accounts__';
+
+/** Set of account IDs the admin has hidden. Cached 60s. */
+export async function getHiddenSet(): Promise<Set<string>> {
+  if (!OUTLAYER_ADMIN_ACCOUNT) return new Set();
+  const cached = getCached(HIDDEN_SET_KEY);
+  if (cached) return cached as Set<string>;
+  const entries = await kvListAgent(OUTLAYER_ADMIN_ACCOUNT, 'hidden/');
+  const set = new Set(entries.map((e) => e.key.replace('hidden/', '')));
+  setCache('hidden', HIDDEN_SET_KEY, set);
+  return set;
+}
 
 /**
  * Count an account's followers and following by scanning the live follow graph.
  * Used on write responses (which need freshness) and alongside endorsement
  * fetches on read paths that overlay live counts onto a stored profile.
+ * Returns raw ground-truth counts — hiding is a UI concern, not a data one.
  */
 export async function liveNetworkCounts(
   accountId: string,
@@ -28,9 +54,74 @@ export async function liveNetworkCounts(
   };
 }
 
-/** Type-safe null filter for agent profile arrays. */
-export function filterAgents(profiles: (unknown | null)[]): Agent[] {
-  return profiles.filter((a): a is Agent => a !== null);
+// ---------------------------------------------------------------------------
+// Profile reads — trust-boundary-enforced wrappers over the KV client.
+//
+// FastData's trust boundary is the predecessor namespace: each agent's
+// account ID comes from who wrote the key, not from the stored blob's
+// self-reported `account_id` field. Everything in the app that reads
+// profiles should go through these wrappers so the override happens in
+// one place and no handler can forget it.
+// ---------------------------------------------------------------------------
+
+/**
+ * Override account_id with the authoritative id; drop non-object blobs.
+ *
+ * The `!Array.isArray` guard matters: `typeof [] === 'object'` is true,
+ * so without it an array stored under a `profile` key would spread to
+ * `{0: ..., 1: ..., ..., account_id: id}` — a valid-looking Agent with
+ * numeric-string keys. FastData stores JSON, so the realistic threat is
+ * "someone writes the wrong shape"; the guard keeps the contract
+ * explicit instead of relying on upstream discipline.
+ */
+function applyTrustBoundary(id: string, blob: unknown): Agent | null {
+  if (blob && typeof blob === 'object' && !Array.isArray(blob)) {
+    return { ...(blob as Agent), account_id: id };
+  }
+  return null;
+}
+
+/**
+ * Fetch a single profile by known account ID with trust-boundary
+ * override applied. Returns null if the profile does not exist or
+ * the stored blob is non-object.
+ */
+export async function fetchProfile(accountId: string): Promise<Agent | null> {
+  const blob = await kvGetAgent<Agent>(accountId, 'profile');
+  return applyTrustBoundary(accountId, blob);
+}
+
+/**
+ * Batch-fetch profiles for a list of known account IDs. Returns Agents
+ * in the same order as the input, with missing/corrupt entries dropped.
+ */
+export async function fetchProfiles(
+  accountIds: readonly string[],
+): Promise<Agent[]> {
+  if (accountIds.length === 0) return [];
+  const blobs = await kvMultiAgent<Agent>(
+    accountIds.map((id) => ({ accountId: id, key: 'profile' })),
+  );
+  const out: Agent[] = [];
+  for (let i = 0; i < accountIds.length; i++) {
+    const agent = applyTrustBoundary(accountIds[i], blobs[i]);
+    if (agent) out.push(agent);
+  }
+  return out;
+}
+
+/**
+ * Fetch every profile in the namespace via `kvGetAll('profile')`.
+ * Each entry's `predecessor_id` is the authoritative account ID.
+ */
+export async function fetchAllProfiles(): Promise<Agent[]> {
+  const entries = await kvGetAll('profile');
+  const out: Agent[] = [];
+  for (const e of entries) {
+    const agent = applyTrustBoundary(e.predecessor_id, e.value);
+    if (agent) out.push(agent);
+  }
+  return out;
 }
 
 /**
@@ -58,12 +149,18 @@ export function buildEndorsementCounts(
   return counts;
 }
 
-/** Build per-agent KV entries for profile, tags, and capabilities. */
+/** Build per-agent KV entries for profile, tags, and capabilities.
+ *  Derived fields (counts, endorsement breakdown) are stripped — stored
+ *  profiles contain only canonical self-authored state. */
 export function agentEntries(agent: Agent): Record<string, unknown> {
-  const { follower_count: _, following_count: __, ...rest } = agent;
-  const entries: Record<string, unknown> = {
-    profile: { ...rest, follower_count: 0, following_count: 0 },
-  };
+  const {
+    follower_count: _,
+    following_count: __,
+    endorsements: ___,
+    endorsement_count: ____,
+    ...rest
+  } = agent;
+  const entries: Record<string, unknown> = { profile: rest };
   for (const tag of agent.tags) {
     entries[`tag/${tag}`] = true;
   }

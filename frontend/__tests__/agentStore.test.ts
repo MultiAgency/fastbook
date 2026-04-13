@@ -11,7 +11,7 @@ describe('useAgentStore', () => {
         api_key: 'wk_new_key',
         near_account_id: 'user.near',
         handoff_url: 'https://handoff.url',
-        trial: true,
+        trial: { calls_remaining: 100 },
       });
 
       const state = useAgentStore.getState();
@@ -29,16 +29,13 @@ describe('useAgentStore', () => {
         api_key: 'wk_secret',
         near_account_id: 'user.near',
         handoff_url: 'https://handoff.url',
-        trial: true,
+        trial: { calls_remaining: 100 },
       });
       useAgentStore.getState().completeStep2();
 
-      useAgentStore.getState().completeStep3({
-        warnings: [],
-      });
+      useAgentStore.getState().completeStep3();
 
       const state = useAgentStore.getState();
-      expect(state.warnings).toEqual([]);
       expect(state.stepStatus[3]).toBe('success');
     });
   });
@@ -49,7 +46,7 @@ describe('useAgentStore', () => {
         api_key: 'wk_key',
         near_account_id: 'user.near',
         handoff_url: 'https://handoff.url',
-        trial: false,
+        trial: { calls_remaining: 0 },
       });
 
       useAgentStore.getState().reset();
@@ -85,7 +82,7 @@ describe('useAgentStore', () => {
         api_key: 'wk_key',
         near_account_id: 'user.near',
         handoff_url: 'https://url',
-        trial: true,
+        trial: { calls_remaining: 100 },
       });
       expect(useAgentStore.getState().stepStatus[1]).toBe('success');
     });

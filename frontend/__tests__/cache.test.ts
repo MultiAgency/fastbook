@@ -55,7 +55,6 @@ describe('invalidateForMutation', () => {
       'followers',
       'following',
       'edges',
-      'follower_counts',
     ]);
 
     // follow invalidates list_agents and profile but not health
@@ -80,10 +79,10 @@ describe('makeCacheKey', () => {
     const a = makeCacheKey({
       action: 'list_agents',
       limit: 10,
-      sort: 'followers',
+      sort: 'active',
     });
     const b = makeCacheKey({
-      sort: 'followers',
+      sort: 'active',
       action: 'list_agents',
       limit: 10,
     });
