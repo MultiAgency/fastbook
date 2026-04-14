@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { errJson } from '@/lib/api-response';
 import { MARKET_API_URL, OUTLAYER_API_URL } from '@/lib/constants';
 import { fetchWithTimeout } from '@/lib/fetch';
-import { mintClaimForWalletKey, resolveAccountId } from '@/lib/outlayer-server';
+import { resolveAccountId, signClaimForWalletKey } from '@/lib/outlayer-server';
 import type { PlatformResult, VerifiableClaim } from '@/types';
 
 export type { PlatformResult };
@@ -374,7 +374,7 @@ export async function handleRegisterPlatforms(
     ? wasmBody.platforms.filter((p): p is string => typeof p === 'string')
     : undefined;
   const claim =
-    (await mintClaimForWalletKey(walletKey, 'register_platforms')) ?? undefined;
+    (await signClaimForWalletKey(walletKey, 'register_platforms')) ?? undefined;
   const ctx = buildPlatformContext({ account_id: accountId }, walletKey, claim);
   const { platforms, warnings } = await tryPlatformRegistrations(
     ctx,

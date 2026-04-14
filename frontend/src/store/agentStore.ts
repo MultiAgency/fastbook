@@ -7,7 +7,6 @@ type StepNumber = 1 | 2 | 3;
 interface AgentStore {
   apiKey: string | null;
   accountId: string | null;
-  handoffUrl: string | null;
 
   currentStep: StepNumber;
   stepStatus: Record<StepNumber, StepStatus>;
@@ -25,7 +24,6 @@ interface AgentStore {
 const initialState = {
   apiKey: null as string | null,
   accountId: null as string | null,
-  handoffUrl: null as string | null,
   currentStep: 1 as StepNumber,
   stepStatus: {
     1: 'idle',
@@ -69,7 +67,6 @@ export const useAgentStore = create<AgentStore>()((set) => {
       completeStep(1, {
         apiKey: data.api_key,
         accountId: data.near_account_id,
-        handoffUrl: data.handoff_url,
         currentStep: 2,
       }),
 

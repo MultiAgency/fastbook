@@ -22,10 +22,9 @@ test.describe('Registration Flow', () => {
   // Post-creation UI state (account visible, step 2 surfaced) is asserted
   // in one sequential flow so we burn one wallet, not four.
   //
-  // Start Over lives in PostRegistration, which only mounts once
-  // `allComplete` is true (page.tsx:288). That requires wallet funding +
-  // heartbeat, which cannot happen in e2e without live NEAR, so reset
-  // behavior is not asserted here.
+  // Start Over lives in Handoff, which only mounts once `allComplete` is
+  // true. That requires wallet funding + heartbeat, which cannot happen in
+  // e2e without live NEAR, so reset behavior is not asserted here.
   test('full registration flow — create and advance', async ({ page }) => {
     await page.getByRole('button', { name: /Create Wallet/ }).click();
 

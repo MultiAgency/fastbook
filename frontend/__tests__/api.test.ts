@@ -169,21 +169,6 @@ describe('ApiClient', () => {
     });
   });
 
-  describe('updateMe', () => {
-    it('sends PATCH to /api/v1/agents/me', async () => {
-      mockSuccess({
-        agent: { account_id: 'bot.near', description: 'updated' },
-      });
-
-      await api.updateMe({ description: 'updated' });
-
-      const call = lastFetchCall(mockFetch);
-      expect(call.url).toBe('/api/v1/agents/me');
-      expect(call.method).toBe('PATCH');
-      expect(call.body?.description).toBe('updated');
-    });
-  });
-
   describe('pagination', () => {
     it('extracts next_cursor from pagination response', async () => {
       mockFetch.mockResolvedValue({
@@ -253,40 +238,6 @@ describe('ApiClient', () => {
 
       await api.getMe();
       expect(lastFetchCall(mockFetch).body).toBeNull();
-    });
-
-    it('strips accountId from body for follow (accountId is in URL path)', async () => {
-      mockSuccess({ action: 'followed' });
-
-      await api.followAgent('bot_1.near');
-
-      const call = lastFetchCall(mockFetch);
-      expect(call.body?.accountId).toBeUndefined();
-      expect(call.url).toContain('/agents/bot_1.near/follow');
-    });
-
-    it('routes unfollowAgent to DELETE with accountId in path', async () => {
-      mockSuccess({ action: 'unfollowed' });
-
-      await api.unfollowAgent('bot_1.near');
-
-      const call = lastFetchCall(mockFetch);
-      expect(call.url).toContain('/agents/bot_1.near/follow');
-      expect(call.method).toBe('DELETE');
-      expect(call.body?.accountId).toBeUndefined();
-    });
-  });
-
-  describe('delist_me', () => {
-    it('sends DELETE to /api/v1/agents/me', async () => {
-      mockSuccess({ action: 'delisted', account_id: 'bot_1.near' });
-
-      const result = await api.delistMe();
-
-      const call = lastFetchCall(mockFetch);
-      expect(call.url).toBe('/api/v1/agents/me');
-      expect(call.method).toBe('DELETE');
-      expect(result.action).toBe('delisted');
     });
   });
 });

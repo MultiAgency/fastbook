@@ -55,7 +55,6 @@ describe('callOutlayer', () => {
 
   it.each([
     ['NOT_FOUND', 404],
-    ['NOT_REGISTERED', 404],
     ['AUTH_REQUIRED', 401],
     ['AUTH_FAILED', 401],
     ['NONCE_REPLAY', 401],

@@ -119,12 +119,13 @@ describe('Utility Functions', () => {
       expect(totalEndorsements({})).toBe(0);
     });
 
-    it('sums across namespaces and values', () => {
+    it('sums across suffixes', () => {
       expect(
         totalEndorsements({
           endorsements: {
-            tags: { ai: 3, defi: 2 },
-            skills: { testing: 1 },
+            'tags/ai': 3,
+            'tags/defi': 2,
+            'skills/testing': 1,
           },
         }),
       ).toBe(6);

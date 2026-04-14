@@ -9,6 +9,9 @@ const MAX_TAG_LEN = 30;
 const MAX_REASON_LEN = 280;
 const MAX_CAPABILITY_DEPTH = 4;
 
+/** FastData KV enforces 1024 bytes for the full key, including prefix. */
+const FASTDATA_MAX_KEY_BYTES = 1024;
+
 export type ValidationError = { code: string; message: string };
 
 function err(message: string): ValidationError {
@@ -201,6 +204,35 @@ export function validateTags(tags: string[]): {
     }
   }
   return { validated, error: null };
+}
+
+/**
+ * Validate a FastData KV `key_suffix` — the variable tail that the caller
+ * supplies under a fixed `key_prefix`. The composed FastData key is
+ * `key_prefix + key_suffix`. Validates the suffix shape (non-empty, no null
+ * bytes, no leading slash, unicode-safe) and enforces FastData's per-key
+ * byte limit on the full composed key.
+ *
+ * Generic — not endorsement-specific. Any handler that composes a FastData
+ * key from a fixed convention prefix and a caller-supplied tail can use
+ * this by passing its own `key_prefix`.
+ */
+export function validateKeySuffix(
+  keySuffix: string,
+  keyPrefix: string,
+): ValidationError | null {
+  if (!keySuffix) return err('key_suffix must not be empty');
+  if (keySuffix.startsWith('/')) return err('key_suffix must not start with /');
+  const u = rejectUnsafeUnicode(keySuffix, false);
+  if (u) return u;
+  const fullKey = `${keyPrefix}${keySuffix}`;
+  if (fullKey.includes('\0')) return err('key must not contain null bytes');
+  if (Buffer.byteLength(fullKey, 'utf8') > FASTDATA_MAX_KEY_BYTES) {
+    return err(
+      `key_prefix + key_suffix exceeds ${FASTDATA_MAX_KEY_BYTES}-byte limit`,
+    );
+  }
+  return null;
 }
 
 export function validateReason(reason: string): ValidationError | null {

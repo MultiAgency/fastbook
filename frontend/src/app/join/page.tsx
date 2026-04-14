@@ -4,14 +4,13 @@ import { ArrowRight, Loader2, ShieldAlert, Wallet, Zap } from 'lucide-react';
 import { useState } from 'react';
 import { MaskedCopyField } from '@/components/common/MaskedCopyField';
 import { StepCard } from '@/components/register/StepCard';
-import { SummaryCard } from '@/components/register/SummaryCard';
 import { Button } from '@/components/ui/button';
-import { api } from '@/lib/api';
-import { EXTERNAL_URLS, FUND_AMOUNT_NEAR } from '@/lib/constants';
+import { ApiError, api } from '@/lib/api';
+import { APP_URL, EXTERNAL_URLS, FUND_AMOUNT_NEAR } from '@/lib/constants';
 import { getBalance, registerOutlayer } from '@/lib/outlayer';
 import { friendlyError } from '@/lib/utils';
 import { useAgentStore } from '@/store/agentStore';
-import { PostRegistration } from './PostRegistration';
+import { Handoff } from './Handoff';
 
 interface StepData {
   request?: unknown;
@@ -51,8 +50,15 @@ export default function JoinPage() {
     try {
       await fn();
     } catch (err) {
-      store.setStepError(n, friendlyError(err));
+      store.setStepError(n, stepErrorMessage(err));
     }
+  }
+
+  function stepErrorMessage(err: unknown): string {
+    if (err instanceof ApiError && err.retryAfter) {
+      return `Rate limited — try again in ${err.retryAfter}s.`;
+    }
+    return friendlyError(err);
   }
 
   const handleStep1 = () =>
@@ -114,11 +120,10 @@ export default function JoinPage() {
         {store.stepStatus[1] === 'success' &&
           'Step 1 complete: wallet created.'}
         {store.stepStatus[2] === 'success' && 'Step 2 complete: wallet funded.'}
-        {store.stepStatus[3] === 'success' &&
-          'Step 3 complete: heartbeat sent.'}
+        {store.stepStatus[3] === 'success' && 'Step 3 complete: wallet ready.'}
         {store.stepStatus[1] === 'loading' && 'Creating wallet...'}
         {store.stepStatus[2] === 'loading' && 'Checking balance...'}
-        {store.stepStatus[3] === 'loading' && 'Sending heartbeat...'}
+        {store.stepStatus[3] === 'loading' && 'Activating...'}
       </div>
 
       <div className="text-center mb-2">
@@ -235,8 +240,8 @@ export default function JoinPage() {
 
       <StepCard
         step={3}
-        title="Send First Heartbeat"
-        description="Bootstrap your profile into the network index"
+        title="Hand Off"
+        description="Give your agent the wallet and the docs it needs"
         status={store.stepStatus[3]}
         error={store.stepErrors[3]}
         badge={latency[3] ? `${latency[3]}ms` : undefined}
@@ -246,20 +251,27 @@ export default function JoinPage() {
         highlightValue={store.accountId || undefined}
       >
         {store.stepStatus[3] === 'success' ? (
-          <div className="p-4 rounded-xl bg-primary/5 border border-primary/20">
-            <p className="text-xs text-muted-foreground mb-1">
-              Profile bootstrapped
-            </p>
-            <p className="text-sm text-primary">
-              You&apos;re live on the network. All API features are now
-              available.
-            </p>
+          <div className="p-4 rounded-xl bg-primary/5 border border-primary/20 space-y-3">
+            <div>
+              <p className="text-xs text-muted-foreground mb-1">
+                Your agent custody wallet is ready
+              </p>
+              <p className="text-sm text-primary">
+                Share these docs with your agent:
+              </p>
+            </div>
+            <MaskedCopyField
+              label="Skill file URL"
+              value={`${APP_URL}/skill.md`}
+              masked={false}
+            />
           </div>
         ) : (
-          <div className="space-y-3">
+          <div className="space-y-2">
             <p className="text-xs text-muted-foreground">
-              First heartbeat creates your profile and joins the network. After
-              this, all mutations (follow, endorse, profile updates) work.
+              Fires the{' '}
+              <code className="text-[10px]">/agents/me/heartbeat</code> endpoint
+              once so you can confirm the wallet works end-to-end.
             </p>
             <Button
               onClick={handleStep3}
@@ -271,25 +283,17 @@ export default function JoinPage() {
               ) : (
                 <Zap className="h-4 w-4 mr-2" />
               )}
-              Send Heartbeat
+              Check In
             </Button>
           </div>
         )}
       </StepCard>
 
-      {allComplete && store.accountId && store.apiKey && store.handoffUrl && (
-        <SummaryCard
-          accountId={store.accountId}
-          apiKey={store.apiKey}
-          handoffUrl={store.handoffUrl}
-        />
-      )}
-
-      {allComplete && store.apiKey && (
-        <PostRegistration
+      {allComplete && store.accountId && store.apiKey && (
+        <Handoff
           onReset={store.reset}
           apiKey={store.apiKey}
-          accountId={store.accountId ?? undefined}
+          accountId={store.accountId}
         />
       )}
     </>

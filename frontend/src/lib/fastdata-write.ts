@@ -6,10 +6,13 @@
  * the caller's custody wallet, and returns a structured response.
  *
  * Key schema (per-predecessor — caller writes under their own account):
- *   graph/follow/{targetAccountId}              → {at, reason?}
- *   endorsing/{targetAccountId}/{ns}/{value}    → {at, reason?}
- *   profile                                     → full Agent record
- *   tag/{tag}                                   → true (existence index)
+ *   graph/follow/{targetAccountId}        → {reason?}
+ *   endorsing/{targetAccountId}/{key_suffix} → {reason?, content_hash?}
+ *   profile                               → full Agent record
+ *   tag/{tag}                             → true (existence index)
+ *
+ * Edge values carry no `at` — the authoritative "when" is FastData's
+ * indexed `block_timestamp`, surfaced on read via `entryBlockSecs`.
  */
 
 import type { Agent } from '@/types';
@@ -29,15 +32,13 @@ import {
 import {
   agentEntries,
   buildEndorsementCounts,
-  collectEndorsable,
-  endorsementKey,
+  composeKey,
   endorsePrefix,
-  entryAt,
+  entryBlockSecs,
   extractCapabilityPairs,
   fetchProfile,
   fetchProfiles,
   liveNetworkCounts,
-  nowSecs,
   profileCompleteness,
   profileSummary,
 } from './fastdata-utils';
@@ -52,6 +53,7 @@ import {
   validateCapabilities,
   validateDescription,
   validateImageUrl,
+  validateKeySuffix,
   validateName,
   validateReason,
   validateTags,
@@ -119,6 +121,20 @@ function insufficientBalance(accountId: string): WriteResult {
 }
 
 /**
+ * Fold a classified write failure into a WriteResult. `writeToFastData`
+ * does the HTTP→reason classification itself; this helper is the
+ * presentation-layer fold used by non-batch handlers.
+ */
+function classifyWriteFailure(
+  wrote: Extract<WriteOutcome, { ok: false }>,
+  accountId: string,
+): WriteResult {
+  return wrote.reason === 'insufficient_balance'
+    ? insufficientBalance(accountId)
+    : fail('STORAGE_ERROR', 'Failed to write to FastData', 500);
+}
+
+/**
  * Per-target guard shared by the four graph handlers. Returns an error
  * entry for empty or self-targeting account IDs, or null if the target
  * passes the guard and should be processed.
@@ -152,7 +168,32 @@ function targetGuardError(
 // FastData KV write (awaitable — primary write path, not fire-and-forget)
 // ---------------------------------------------------------------------------
 
-export type WriteOutcome = { ok: true } | { ok: false; status: number | null };
+export type WriteOutcome =
+  | { ok: true }
+  | { ok: false; reason: 'insufficient_balance' | 'storage_error' };
+
+/**
+ * Probe OutLayer's balance endpoint for a wallet. Returns true iff the
+ * wallet exists and reports a zero balance. Any other outcome (HTTP failure,
+ * malformed body, non-zero balance) returns false — we never misclassify a
+ * genuine upstream outage as an unfunded wallet.
+ */
+async function isWalletUnfunded(walletKey: string): Promise<boolean> {
+  try {
+    const res = await fetchWithTimeout(
+      `${OUTLAYER_API_URL}/wallet/v1/balance?chain=near`,
+      { headers: { Authorization: `Bearer ${walletKey}` } },
+      5_000,
+    );
+    if (!res.ok) return false;
+    const data = (await res.json().catch(() => null)) as {
+      balance?: string;
+    } | null;
+    return data?.balance === '0';
+  } catch {
+    return false;
+  }
+}
 
 export async function writeToFastData(
   walletKey: string,
@@ -183,10 +224,19 @@ export async function writeToFastData(
     console.error(
       `[fastdata-write] http ${res.status}: ${detail.slice(0, 200)}`,
     );
-    return { ok: false, status: res.status };
+    if (res.status === 402) {
+      return { ok: false, reason: 'insufficient_balance' };
+    }
+    // OutLayer returns HTTP 502 (Cloudflare upstream error) for writes on
+    // unfunded wallets, not 402. Confirmed 2026-04-13. Probe the balance
+    // endpoint to disambiguate a genuine outage from an unfunded wallet.
+    if (res.status === 502 && (await isWalletUnfunded(walletKey))) {
+      return { ok: false, reason: 'insufficient_balance' };
+    }
+    return { ok: false, reason: 'storage_error' };
   } catch (err) {
     console.error('[fastdata-write] network error:', err);
-    return { ok: false, status: null };
+    return { ok: false, reason: 'storage_error' };
   }
 }
 
@@ -199,42 +249,22 @@ interface CallerIdentity {
   agent: Agent;
 }
 
-async function resolveCaller(
-  walletKey: string,
-  resolveAccountId: (wk: string) => Promise<string | null>,
-): Promise<CallerIdentity | WriteResult> {
-  const accountId = await resolveAccountId(walletKey);
-  if (!accountId) return fail('AUTH_FAILED', 'Could not resolve account', 401);
-
-  const agent = await fetchProfile(accountId);
-  if (!agent) return fail('NOT_REGISTERED', 'Agent profile not found', 404);
-
-  return { accountId, agent };
-}
-
-// ---------------------------------------------------------------------------
-// Resolve target agent
-// ---------------------------------------------------------------------------
-
-interface TargetIdentity {
-  accountId: string;
-  agent: Agent;
-}
-
-async function resolveTargetAgent(
-  accountId: string,
-): Promise<TargetIdentity | WriteResult> {
-  const agent = await fetchProfile(accountId);
-  if (!agent) return fail('NOT_FOUND', 'Agent not found', 404);
-  return { accountId, agent };
-}
-
 /**
- * Create a default agent profile for first-write (heartbeat or update_me).
- * The agent enters the index when they first write — no prior registration needed.
+ * In-memory default for callers without a profile blob. Used as the
+ * fallback for every mutation so no-profile callers can proceed without a
+ * gate: heartbeat and update_me persist this default as part of their
+ * normal write batch, while follow/endorse/unendorse/delist use it in
+ * memory only, so edge-only callers stay invisible to `list_agents` until
+ * they heartbeat or update_me. Nearly does not gate profile creation — the
+ * first profile-writing mutation is the bootstrap.
+ *
+ * Holds no time fields — `last_active` and `created_at` are read-derived
+ * from block timestamps and have no honest write-side value before the
+ * first read. Handlers that need a "since when" baseline for first-
+ * heartbeat delta computation use `caller.agent.last_active ?? 0`, which
+ * surfaces every pre-existing edge as "new" on the first call.
  */
 function defaultAgent(accountId: string): Agent {
-  const ts = nowSecs();
   return {
     name: null,
     description: '',
@@ -243,14 +273,23 @@ function defaultAgent(accountId: string): Agent {
     capabilities: {},
     endorsements: {},
     account_id: accountId,
-    created_at: ts,
-    last_active: ts,
   };
 }
 
 /**
- * Resolve caller, creating a default profile if none exists.
- * Used by heartbeat and update_me — the two entry points for first-write.
+ * Resolve caller, defaulting to a fresh agent shape if no profile exists.
+ * Used by every mutation handler (follow/unfollow/endorse/unendorse via
+ * `runBatch`, plus heartbeat, update_me, and delist_me directly). There
+ * is no caller-side profile gate: any authenticated `wk_` caller can
+ * mutate, regardless of whether they have a `profile` blob in FastData.
+ *
+ * Does not write. The caller's own post-resolution write persists the
+ * default merged with whatever fields that handler updates, collapsing
+ * bootstrap + first mutation into a single round-trip to OutLayer — but
+ * only for handlers that actually write profile entries (heartbeat,
+ * update_me). Follow/endorse/unendorse/delist use the default in memory
+ * and do not persist it, so edge-only callers stay invisible to
+ * `list_agents` until they heartbeat or update_me.
  */
 async function resolveCallerOrInit(
   walletKey: string,
@@ -260,93 +299,98 @@ async function resolveCallerOrInit(
   if (!accountId) return fail('AUTH_FAILED', 'Could not resolve account', 401);
 
   const existing = await fetchProfile(accountId);
-  if (existing) return { accountId, agent: existing };
-
-  // First-write: create default profile. OutLayer returns 402 Payment
-  // Required for underfunded wallets; any other status is a transient
-  // storage error, not a funding problem.
-  const agent = defaultAgent(accountId);
-  const wrote = await writeToFastData(walletKey, agentEntries(agent));
-  if (!wrote.ok) {
-    return wrote.status === 402
-      ? insufficientBalance(accountId)
-      : fail('STORAGE_ERROR', 'Failed to write to FastData', 500);
-  }
-
-  return { accountId, agent };
+  return { accountId, agent: existing ?? defaultAgent(accountId) };
 }
 
 // ---------------------------------------------------------------------------
-// Follow / Unfollow
+// Batch scaffolding shared by follow/unfollow/endorse/unendorse
 // ---------------------------------------------------------------------------
 
 const MAX_BATCH_SIZE = 20;
 
-export async function handleFollow(
-  walletKey: string,
-  body: Record<string, unknown>,
-  resolveAccountId: (wk: string) => Promise<string | null>,
-): Promise<WriteResult> {
-  const targets = resolveTargets(body);
+type BatchAction = 'follow' | 'unfollow' | 'endorse' | 'unendorse';
+
+/**
+ * A single target's contribution to a batch. `skip` and `fail` append a
+ * per-target result without consuming rate-limit budget or issuing a write;
+ * `write` issues a KV write, charges budget, then appends `onWritten()`'s
+ * result. Used by runBatch — handler logic only builds these.
+ */
+type BatchStep =
+  | { kind: 'skip'; result: Record<string, unknown> }
+  | { kind: 'fail'; result: Record<string, unknown> }
+  | {
+      kind: 'write';
+      entries: Record<string, unknown>;
+      onWritten: () => Record<string, unknown>;
+    };
+
+interface BatchOptions {
+  action: BatchAction;
+  selfCode: string;
+  verb: string;
+  walletKey: string;
+  body: Record<string, unknown>;
+  resolveAccountId: (wk: string) => Promise<string | null>;
+  step: (target: string, caller: CallerIdentity) => Promise<BatchStep>;
+  finalize?: (
+    results: Record<string, unknown>[],
+    caller: CallerIdentity,
+    processed: number,
+  ) => Promise<Record<string, unknown>>;
+}
+
+/**
+ * Shared scaffold for graph-mutation batch handlers. Normalizes target
+ * validation, caller resolution, rate-limit gating, self-action guards,
+ * per-target writes, and response shape. Per-target logic lives in the
+ * handler-supplied `step`; response shape in optional `finalize`.
+ *
+ * A 402 on any write aborts the batch with INSUFFICIENT_BALANCE — no
+ * subsequent target will succeed with an underfunded wallet, and the
+ * caller needs the fund link, not N misleading STORAGE_ERROR items.
+ */
+async function runBatch(opts: BatchOptions): Promise<WriteResult> {
+  const targets = resolveTargets(opts.body);
   if (!Array.isArray(targets)) return targets;
   if (targets.length === 0)
     return fail('VALIDATION_ERROR', 'Targets array must not be empty');
   if (targets.length > MAX_BATCH_SIZE)
     return fail('VALIDATION_ERROR', `Too many targets (max ${MAX_BATCH_SIZE})`);
-  const reason = body.reason as string | undefined;
-  if (reason != null) {
-    const e = validateReason(reason);
-    if (e) return validationFail(e);
-  }
 
-  const caller = await resolveCaller(walletKey, resolveAccountId);
+  const caller = await resolveCallerOrInit(
+    opts.walletKey,
+    opts.resolveAccountId,
+  );
   if ('success' in caller) return caller;
 
-  const budget = checkRateLimitBudget('follow', caller.accountId);
+  const budget = checkRateLimitBudget(opts.action, caller.accountId);
   if (!budget.ok) return rateLimited(budget.retryAfter);
 
-  const ts = nowSecs();
   const results: Record<string, unknown>[] = [];
-  let followedCount = 0;
+  let processed = 0;
 
-  for (const targetAccountId of targets) {
+  for (const target of targets) {
     const guard = targetGuardError(
-      targetAccountId,
+      target,
       caller.accountId,
-      'SELF_FOLLOW',
-      'follow',
+      opts.selfCode,
+      opts.verb,
     );
     if (guard) {
       results.push(guard);
       continue;
     }
 
-    const existing = await kvGetAgent(
-      caller.accountId,
-      `graph/follow/${targetAccountId}`,
-    );
-    if (existing) {
-      results.push({
-        account_id: targetAccountId,
-        action: 'already_following',
-      });
+    const step = await opts.step(target, caller);
+    if (step.kind !== 'write') {
+      results.push(step.result);
       continue;
     }
 
-    const targetAgent = await fetchProfile(targetAccountId);
-    if (!targetAgent) {
+    if (processed >= budget.remaining) {
       results.push({
-        account_id: targetAccountId,
-        action: 'error',
-        code: 'NOT_FOUND',
-        error: 'agent not found',
-      });
-      continue;
-    }
-
-    if (followedCount >= budget.remaining) {
-      results.push({
-        account_id: targetAccountId,
+        account_id: target,
         action: 'error',
         code: 'RATE_LIMITED',
         error: 'rate limit reached within batch',
@@ -354,13 +398,13 @@ export async function handleFollow(
       continue;
     }
 
-    const entries: Record<string, unknown> = {
-      [`graph/follow/${targetAccountId}`]: { at: ts, reason: reason ?? null },
-    };
-    const wrote = await writeToFastData(walletKey, entries);
+    const wrote = await writeToFastData(opts.walletKey, step.entries);
     if (!wrote.ok) {
+      if (wrote.reason === 'insufficient_balance') {
+        return insufficientBalance(caller.accountId);
+      }
       results.push({
-        account_id: targetAccountId,
+        account_id: target,
         action: 'error',
         code: 'STORAGE_ERROR',
         error: 'storage error',
@@ -368,17 +412,81 @@ export async function handleFollow(
       continue;
     }
 
-    incrementRateLimit('follow', caller.accountId);
-    followedCount++;
-    results.push({ account_id: targetAccountId, action: 'followed' });
+    incrementRateLimit(opts.action, caller.accountId);
+    processed++;
+    results.push(step.onWritten());
   }
 
-  const counts = await liveNetworkCounts(caller.accountId);
-  return ok({
-    results,
-    your_network: {
-      following_count: counts.following_count + followedCount,
-      follower_count: counts.follower_count,
+  const payload = opts.finalize
+    ? await opts.finalize(results, caller, processed)
+    : { results };
+  return ok(payload);
+}
+
+// ---------------------------------------------------------------------------
+// Follow / Unfollow
+// ---------------------------------------------------------------------------
+
+export async function handleFollow(
+  walletKey: string,
+  body: Record<string, unknown>,
+  resolveAccountId: (wk: string) => Promise<string | null>,
+): Promise<WriteResult> {
+  const reason = body.reason as string | undefined;
+  if (reason != null) {
+    const e = validateReason(reason);
+    if (e) return validationFail(e);
+  }
+
+  return runBatch({
+    action: 'follow',
+    selfCode: 'SELF_FOLLOW',
+    verb: 'follow',
+    walletKey,
+    body,
+    resolveAccountId,
+    step: async (target, caller) => {
+      const followKey = composeKey('graph/follow/', target);
+      const existing = await kvGetAgent(caller.accountId, followKey);
+      if (existing) {
+        return {
+          kind: 'skip',
+          result: { account_id: target, action: 'already_following' },
+        };
+      }
+      const targetAgent = await fetchProfile(target);
+      if (!targetAgent) {
+        return {
+          kind: 'fail',
+          result: {
+            account_id: target,
+            action: 'error',
+            code: 'NOT_FOUND',
+            error: 'agent not found',
+          },
+        };
+      }
+      // Edge value: just the reason if provided, else an empty object.
+      // No `at` field — the FastData-indexed `block_timestamp` of this
+      // entry is the only authoritative time, surfaced via `entryBlockSecs`
+      // on the read path. Empty `{}` is a "live" entry (object, not null).
+      return {
+        kind: 'write',
+        entries: {
+          [followKey]: reason != null ? { reason } : {},
+        },
+        onWritten: () => ({ account_id: target, action: 'followed' }),
+      };
+    },
+    finalize: async (results, caller, processed) => {
+      const counts = await liveNetworkCounts(caller.accountId);
+      return {
+        results,
+        your_network: {
+          following_count: counts.following_count + processed,
+          follower_count: counts.follower_count,
+        },
+      };
     },
   });
 }
@@ -388,78 +496,37 @@ export async function handleUnfollow(
   body: Record<string, unknown>,
   resolveAccountId: (wk: string) => Promise<string | null>,
 ): Promise<WriteResult> {
-  const targets = resolveTargets(body);
-  if (!Array.isArray(targets)) return targets;
-  if (targets.length === 0)
-    return fail('VALIDATION_ERROR', 'Targets array must not be empty');
-  if (targets.length > MAX_BATCH_SIZE)
-    return fail('VALIDATION_ERROR', `Too many targets (max ${MAX_BATCH_SIZE})`);
-
-  const caller = await resolveCaller(walletKey, resolveAccountId);
-  if ('success' in caller) return caller;
-
-  const budget = checkRateLimitBudget('unfollow', caller.accountId);
-  if (!budget.ok) return rateLimited(budget.retryAfter);
-
-  const results: Record<string, unknown>[] = [];
-  let unfollowedCount = 0;
-
-  for (const targetAccountId of targets) {
-    const guard = targetGuardError(
-      targetAccountId,
-      caller.accountId,
-      'SELF_UNFOLLOW',
-      'unfollow',
-    );
-    if (guard) {
-      results.push(guard);
-      continue;
-    }
-
-    const existing = await kvGetAgent(
-      caller.accountId,
-      `graph/follow/${targetAccountId}`,
-    );
-    if (!existing) {
-      results.push({ account_id: targetAccountId, action: 'not_following' });
-      continue;
-    }
-
-    if (unfollowedCount >= budget.remaining) {
-      results.push({
-        account_id: targetAccountId,
-        action: 'error',
-        code: 'RATE_LIMITED',
-        error: 'rate limit reached within batch',
-      });
-      continue;
-    }
-
-    const entries: Record<string, unknown> = {
-      [`graph/follow/${targetAccountId}`]: null,
-    };
-    const wrote = await writeToFastData(walletKey, entries);
-    if (!wrote.ok) {
-      results.push({
-        account_id: targetAccountId,
-        action: 'error',
-        code: 'STORAGE_ERROR',
-        error: 'storage error',
-      });
-      continue;
-    }
-
-    incrementRateLimit('unfollow', caller.accountId);
-    unfollowedCount++;
-    results.push({ account_id: targetAccountId, action: 'unfollowed' });
-  }
-
-  const counts = await liveNetworkCounts(caller.accountId);
-  return ok({
-    results,
-    your_network: {
-      following_count: Math.max(0, counts.following_count - unfollowedCount),
-      follower_count: counts.follower_count,
+  return runBatch({
+    action: 'unfollow',
+    selfCode: 'SELF_UNFOLLOW',
+    verb: 'unfollow',
+    walletKey,
+    body,
+    resolveAccountId,
+    step: async (target, caller) => {
+      const followKey = composeKey('graph/follow/', target);
+      const existing = await kvGetAgent(caller.accountId, followKey);
+      if (!existing) {
+        return {
+          kind: 'skip',
+          result: { account_id: target, action: 'not_following' },
+        };
+      }
+      return {
+        kind: 'write',
+        entries: { [followKey]: null },
+        onWritten: () => ({ account_id: target, action: 'unfollowed' }),
+      };
+    },
+    finalize: async (results, caller, processed) => {
+      const counts = await liveNetworkCounts(caller.accountId);
+      return {
+        results,
+        your_network: {
+          following_count: Math.max(0, counts.following_count - processed),
+          follower_count: counts.follower_count,
+        },
+      };
     },
   });
 }
@@ -468,31 +535,33 @@ export async function handleUnfollow(
 // Endorse / Unendorse
 // ---------------------------------------------------------------------------
 
-type TagResolution =
-  | { kind: 'resolved'; ns: string; value: string }
-  | { kind: 'not_found' }
-  | { kind: 'ambiguous'; namespaces: string[] };
+/** Max key_suffixes per endorse/unendorse call, independent of targets.length. */
+const MAX_KEY_SUFFIXES = 20;
 
-/** Core tag resolution: bare value or ns:value against endorsable set. */
-function resolveTagCore(val: string, endorsable: Set<string>): TagResolution {
-  if (val.includes(':')) {
-    const [ns, ...rest] = val.split(':');
-    const v = rest.join(':');
-    if (endorsable.has(`${ns}:${v}`))
-      return { kind: 'resolved', ns: ns!, value: v };
-    return { kind: 'not_found' };
+function resolveKeySuffixes(
+  body: Record<string, unknown>,
+): { keySuffixes: string[] } | WriteResult {
+  const raw = body.key_suffixes;
+  if (!Array.isArray(raw) || raw.length === 0)
+    return fail('VALIDATION_ERROR', 'key_suffixes array must not be empty');
+  if (raw.length > MAX_KEY_SUFFIXES)
+    return fail(
+      'VALIDATION_ERROR',
+      `Too many key_suffixes (max ${MAX_KEY_SUFFIXES})`,
+    );
+  // Dedupe: duplicate key_suffixes in a single call would write the same
+  // KV key twice and return misleading duplicate entries in endorsed[].
+  // Order-preserving: first occurrence wins.
+  const seen = new Set<string>();
+  const keySuffixes: string[] = [];
+  for (const ks of raw) {
+    if (typeof ks !== 'string')
+      return fail('VALIDATION_ERROR', 'key_suffixes must be strings');
+    if (seen.has(ks)) continue;
+    seen.add(ks);
+    keySuffixes.push(ks);
   }
-  if (endorsable.has(`tags:${val}`))
-    return { kind: 'resolved', ns: 'tags', value: val };
-  const matches: string[] = [];
-  for (const key of endorsable) {
-    const [ns, v] = key.split(':') as [string, string];
-    if (v === val && ns !== 'tags') matches.push(ns);
-  }
-  if (matches.length === 1)
-    return { kind: 'resolved', ns: matches[0]!, value: val };
-  if (matches.length > 1) return { kind: 'ambiguous', namespaces: matches };
-  return { kind: 'not_found' };
+  return { keySuffixes };
 }
 
 export async function handleEndorse(
@@ -500,163 +569,117 @@ export async function handleEndorse(
   body: Record<string, unknown>,
   resolveAccountId: (wk: string) => Promise<string | null>,
 ): Promise<WriteResult> {
-  const targets = resolveTargets(body);
-  if (!Array.isArray(targets)) return targets;
-  if (targets.length === 0)
-    return fail('VALIDATION_ERROR', 'Targets array must not be empty');
-  if (targets.length > MAX_BATCH_SIZE)
-    return fail('VALIDATION_ERROR', `Too many targets (max ${MAX_BATCH_SIZE})`);
-  const tags = body.tags as string[] | undefined;
-  const capabilities = body.capabilities as Record<string, unknown> | undefined;
+  const keySuffixesResult = resolveKeySuffixes(body);
+  if ('success' in keySuffixesResult) return keySuffixesResult;
+  const { keySuffixes } = keySuffixesResult;
+
   const reason = body.reason as string | undefined;
-  if ((!tags || tags.length === 0) && !capabilities)
-    return fail('VALIDATION_ERROR', 'Tags or capabilities are required');
   if (reason != null) {
     const e = validateReason(reason);
     if (e) return validationFail(e);
   }
+  const contentHash = body.content_hash as string | undefined;
 
-  const caller = await resolveCaller(walletKey, resolveAccountId);
-  if ('success' in caller) return caller;
-
-  const budget = checkRateLimitBudget('endorse', caller.accountId);
-  if (!budget.ok) return rateLimited(budget.retryAfter);
-
-  const ts = nowSecs();
-  const results: Record<string, unknown>[] = [];
-  let endorsedCount = 0;
-
-  for (const targetAccountId of targets) {
-    const guard = targetGuardError(
-      targetAccountId,
-      caller.accountId,
-      'SELF_ENDORSE',
-      'endorse',
-    );
-    if (guard) {
-      results.push(guard);
-      continue;
-    }
-
-    const targetResult = await resolveTargetAgent(targetAccountId);
-    if ('success' in targetResult) {
-      results.push({
-        account_id: targetAccountId,
-        action: 'error',
-        code: 'NOT_FOUND',
-        error: 'agent not found',
-      });
-      continue;
-    }
-    const { agent: targetAgent } = targetResult;
-
-    if (endorsedCount >= budget.remaining) {
-      results.push({
-        account_id: targetAccountId,
-        action: 'error',
-        code: 'RATE_LIMITED',
-        error: 'rate limit reached within batch',
-      });
-      continue;
-    }
-
-    const endorsable = collectEndorsable(targetAgent);
-    const resolved: { ns: string; value: string }[] = [];
-    const skipped: Record<string, unknown>[] = [];
-
-    if (tags) {
-      for (const tag of tags) {
-        const r = resolveTagCore(tag.toLowerCase(), endorsable);
-        if (r.kind === 'resolved') resolved.push({ ns: r.ns, value: r.value });
-        else
-          skipped.push({
-            value: tag.toLowerCase(),
-            reason: r.kind === 'ambiguous' ? 'ambiguous' : 'not_found',
-          });
+  return runBatch({
+    action: 'endorse',
+    selfCode: 'SELF_ENDORSE',
+    verb: 'endorse',
+    walletKey,
+    body,
+    resolveAccountId,
+    // Rate-limit unit: one per target regardless of key_suffixes count.
+    // Multiple key_suffixes within a target share the charge — endorsed.length
+    // === 0 means no write and no budget consumed (skip kind).
+    step: async (target, caller) => {
+      // Existence gate only — the fetched profile is not used beyond this
+      // check, so skip the resolve-wrapper and drop the throwaway object.
+      if ((await fetchProfile(target)) == null) {
+        return {
+          kind: 'fail',
+          result: {
+            account_id: target,
+            action: 'error',
+            code: 'NOT_FOUND',
+            error: 'agent not found',
+          },
+        };
       }
-    }
-    if (capabilities) {
-      for (const [ns, val] of extractCapabilityPairs(capabilities)) {
-        if (endorsable.has(`${ns}:${val}`)) {
-          resolved.push({ ns, value: val });
-        } else {
-          skipped.push({ value: `${ns}:${val}`, reason: 'not_found' });
+
+      // Validate key_suffixes, then write all of them. On content_hash change,
+      // last write wins — overwrite prior entry with no history.
+      const keyPrefix = endorsePrefix(target);
+      const validKeySuffixes: string[] = [];
+      const skipped: { key_suffix: string; reason: string }[] = [];
+      for (const ks of keySuffixes) {
+        const e = validateKeySuffix(ks, keyPrefix);
+        if (e) skipped.push({ key_suffix: ks, reason: e.message });
+        else validKeySuffixes.push(ks);
+      }
+
+      if (validKeySuffixes.length === 0) {
+        return {
+          kind: 'fail',
+          result: {
+            account_id: target,
+            action: 'error',
+            code: 'VALIDATION_ERROR',
+            error: 'no valid key_suffixes',
+            ...(skipped.length > 0 && { skipped }),
+          },
+        };
+      }
+
+      const fullKeys = validKeySuffixes.map((ks) => composeKey(keyPrefix, ks));
+      const existingEntries = await kvMultiAgent(
+        fullKeys.map((key) => ({ accountId: caller.accountId, key })),
+      );
+
+      const entries: Record<string, unknown> = {};
+      const endorsed: string[] = [];
+      const alreadyEndorsed: string[] = [];
+
+      for (let i = 0; i < validKeySuffixes.length; i++) {
+        const ks = validKeySuffixes[i]!;
+        const existing = existingEntries[i]?.value as
+          | { content_hash?: string }
+          | null
+          | undefined;
+        const existingHash = existing?.content_hash;
+        const sameHash = contentHash
+          ? existingHash === contentHash
+          : existingHash == null;
+        if (existing && sameHash) {
+          alreadyEndorsed.push(ks);
+          continue;
         }
+        // Edge value: optional reason + content_hash. No `at` field —
+        // FastData's indexed `block_timestamp` is the only authoritative
+        // time. Empty `{}` is a "live" entry (object, not null/undefined).
+        entries[fullKeys[i]!] = {
+          ...(reason != null && { reason }),
+          ...(contentHash != null && { content_hash: contentHash }),
+        };
+        endorsed.push(ks);
       }
-    }
 
-    if (resolved.length === 0) {
-      const available = [...endorsable];
-      const requested = [
-        ...(tags ?? []).map((t) => t.toLowerCase()),
-        ...(capabilities
-          ? extractCapabilityPairs(capabilities).map(
-              ([ns, val]) => `${ns}:${val}`,
-            )
-          : []),
-      ];
-      results.push({
-        account_id: targetAccountId,
-        action: 'error',
-        code: 'VALIDATION_ERROR',
-        error: 'no endorsable items match',
-        requested,
-        available,
-      });
-      continue;
-    }
+      const buildResult = (): Record<string, unknown> => {
+        const result: Record<string, unknown> = {
+          account_id: target,
+          action: 'endorsed',
+          endorsed,
+        };
+        if (alreadyEndorsed.length > 0)
+          result.already_endorsed = alreadyEndorsed;
+        if (skipped.length > 0) result.skipped = skipped;
+        return result;
+      };
 
-    // Batch idempotency check + build write entries
-    const ekeys = resolved.map(({ ns, value }) =>
-      endorsementKey(targetAccountId, ns, value),
-    );
-    const existingValues = await kvMultiAgent(
-      ekeys.map((key) => ({ accountId: caller.accountId, key })),
-    );
-
-    const entries: Record<string, unknown> = {};
-    const endorsed: Record<string, string[]> = {};
-    const alreadyEndorsed: Record<string, string[]> = {};
-
-    for (let i = 0; i < resolved.length; i++) {
-      const { ns, value } = resolved[i]!;
-      if (existingValues[i]) {
-        if (!alreadyEndorsed[ns]) alreadyEndorsed[ns] = [];
-        alreadyEndorsed[ns].push(value);
-      } else {
-        entries[ekeys[i]!] = { at: ts, reason: reason ?? null };
-        if (!endorsed[ns]) endorsed[ns] = [];
-        endorsed[ns].push(value);
+      if (endorsed.length === 0) {
+        return { kind: 'skip', result: buildResult() };
       }
-    }
-
-    if (Object.keys(endorsed).length > 0) {
-      const wrote = await writeToFastData(walletKey, entries);
-      if (!wrote.ok) {
-        results.push({
-          account_id: targetAccountId,
-          action: 'error',
-          code: 'STORAGE_ERROR',
-          error: 'storage error',
-        });
-        continue;
-      }
-      incrementRateLimit('endorse', caller.accountId);
-      endorsedCount++;
-    }
-
-    const result: Record<string, unknown> = {
-      account_id: targetAccountId,
-      action: 'endorsed',
-      endorsed,
-    };
-    if (Object.keys(alreadyEndorsed).length > 0)
-      result.already_endorsed = alreadyEndorsed;
-    if (skipped.length > 0) result.skipped = skipped;
-    results.push(result);
-  }
-
-  return ok({ results });
+      return { kind: 'write', entries, onWritten: buildResult };
+    },
+  });
 }
 
 export async function handleUnendorse(
@@ -664,111 +687,52 @@ export async function handleUnendorse(
   body: Record<string, unknown>,
   resolveAccountId: (wk: string) => Promise<string | null>,
 ): Promise<WriteResult> {
-  const targets = resolveTargets(body);
-  if (!Array.isArray(targets)) return targets;
-  if (targets.length === 0)
-    return fail('VALIDATION_ERROR', 'Targets array must not be empty');
-  if (targets.length > MAX_BATCH_SIZE)
-    return fail('VALIDATION_ERROR', `Too many targets (max ${MAX_BATCH_SIZE})`);
-  const tags = body.tags as string[] | undefined;
-  const capabilities = body.capabilities as Record<string, unknown> | undefined;
-  if ((!tags || tags.length === 0) && !capabilities)
-    return fail('VALIDATION_ERROR', 'Tags or capabilities are required');
+  const keySuffixesResult = resolveKeySuffixes(body);
+  if ('success' in keySuffixesResult) return keySuffixesResult;
+  const { keySuffixes } = keySuffixesResult;
 
-  const caller = await resolveCaller(walletKey, resolveAccountId);
-  if ('success' in caller) return caller;
+  return runBatch({
+    action: 'unendorse',
+    selfCode: 'SELF_UNENDORSE',
+    verb: 'unendorse',
+    walletKey,
+    body,
+    resolveAccountId,
+    step: async (target, caller) => {
+      // Read only the keys the caller wants to retract. Gating on the
+      // caller's own keys — not the target's current profile — means
+      // retraction works even if the target mutated. Symmetric with
+      // endorse's read path, and avoids the high-fanout cliff of listing
+      // every endorsement the caller has on this target.
+      //
+      // UX note: this is a targeted retract by specific key_suffixes.
+      // There is no "retract everything I endorsed on this target" path —
+      // a caller who wants that must first GET /agents/{target}/endorsers,
+      // filter by their own account_id, and pass the resulting key_suffixes
+      // back here in one or more calls (respecting MAX_KEY_SUFFIXES).
+      const keyPrefix = endorsePrefix(target);
+      const fullKeys = keySuffixes.map((ks) => composeKey(keyPrefix, ks));
+      const existingEntries = await kvMultiAgent(
+        fullKeys.map((key) => ({ accountId: caller.accountId, key })),
+      );
 
-  const budget = checkRateLimitBudget('unendorse', caller.accountId);
-  if (!budget.ok) return rateLimited(budget.retryAfter);
+      const entries: Record<string, unknown> = {};
+      const removed: string[] = [];
 
-  const results: Record<string, unknown>[] = [];
-  let unendorsedCount = 0;
-
-  for (const targetAccountId of targets) {
-    const guard = targetGuardError(
-      targetAccountId,
-      caller.accountId,
-      'SELF_UNENDORSE',
-      'unendorse',
-    );
-    if (guard) {
-      results.push(guard);
-      continue;
-    }
-
-    if (unendorsedCount >= budget.remaining) {
-      results.push({
-        account_id: targetAccountId,
-        action: 'error',
-        code: 'RATE_LIMITED',
-        error: 'rate limit reached within batch',
-      });
-      continue;
-    }
-
-    // Scan the caller's actual endorsement keys for this target. This avoids
-    // gating on the target's current profile — if the target removed a tag or
-    // capability after being endorsed, the caller can still retract.
-    const prefix = endorsePrefix(targetAccountId);
-    const existingKeys = await kvListAgent(caller.accountId, prefix);
-
-    // Build a lookup: "ns/value" → full key
-    const keyMap = new Map<string, string>();
-    for (const e of existingKeys) {
-      const suffix = e.key.startsWith(prefix)
-        ? e.key.slice(prefix.length)
-        : e.key;
-      keyMap.set(suffix, e.key);
-    }
-
-    const entries: Record<string, unknown> = {};
-    const removed: Record<string, string[]> = {};
-
-    if (tags) {
-      for (const tag of tags) {
-        const lower = tag.toLowerCase();
-        const suffix = `tags/${lower}`;
-        if (keyMap.has(suffix)) {
-          entries[keyMap.get(suffix)!] = null;
-          if (!removed.tags) removed.tags = [];
-          removed.tags.push(lower);
+      for (let i = 0; i < keySuffixes.length; i++) {
+        if (existingEntries[i] != null) {
+          entries[fullKeys[i]!] = null;
+          removed.push(keySuffixes[i]!);
         }
       }
-    }
-    if (capabilities) {
-      for (const [ns, val] of extractCapabilityPairs(capabilities)) {
-        const suffix = `${ns}/${val}`;
-        if (keyMap.has(suffix)) {
-          entries[keyMap.get(suffix)!] = null;
-          if (!removed[ns]) removed[ns] = [];
-          removed[ns].push(val);
-        }
+
+      const result = { account_id: target, action: 'unendorsed', removed };
+      if (removed.length === 0) {
+        return { kind: 'skip', result };
       }
-    }
-
-    if (Object.keys(removed).length > 0) {
-      const wrote = await writeToFastData(walletKey, entries);
-      if (!wrote.ok) {
-        results.push({
-          account_id: targetAccountId,
-          action: 'error',
-          code: 'STORAGE_ERROR',
-          error: 'storage error',
-        });
-        continue;
-      }
-      incrementRateLimit('unendorse', caller.accountId);
-      unendorsedCount++;
-    }
-
-    results.push({
-      account_id: targetAccountId,
-      action: 'unendorsed',
-      removed,
-    });
-  }
-
-  return ok({ results });
+      return { kind: 'write', entries, onWritten: () => result };
+    },
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -835,10 +799,9 @@ export async function handleUpdateMe(
     );
   }
 
-  const ts = nowSecs();
-  agent.last_active = ts;
-
-  // Build entries: profile + tag/cap indexes
+  // No write-side timestamp on `agent.last_active` — `agentEntries`
+  // strips the field, and the read path derives it from the block
+  // timestamp of this very write.
   const entries = agentEntries(agent);
 
   // Delete old tag keys if tags changed
@@ -846,7 +809,7 @@ export async function handleUpdateMe(
     const newTags = new Set(agent.tags);
     for (const oldTag of caller.agent.tags) {
       if (!newTags.has(oldTag)) {
-        entries[`tag/${oldTag}`] = null;
+        entries[composeKey('tag/', oldTag)] = null;
       }
     }
   }
@@ -860,17 +823,15 @@ export async function handleUpdateMe(
       ),
     );
     for (const [ns, val] of extractCapabilityPairs(caller.agent.capabilities)) {
-      const key = `${ns}/${val}`;
-      if (!newCapKeys.has(key)) {
-        entries[`cap/${key}`] = null;
+      const capSuffix = `${ns}/${val}`;
+      if (!newCapKeys.has(capSuffix)) {
+        entries[composeKey('cap/', capSuffix)] = null;
       }
     }
   }
 
   const wrote = await writeToFastData(walletKey, entries);
-  if (!wrote.ok) {
-    return fail('STORAGE_ERROR', 'Failed to write to FastData', 500);
-  }
+  if (!wrote.ok) return classifyWriteFailure(wrote, caller.accountId);
 
   incrementRateLimit('update_me', caller.accountId);
 
@@ -899,9 +860,22 @@ export async function handleHeartbeat(
   const rl = checkRateLimit('heartbeat', caller.accountId);
   if (!rl.ok) return rateLimited(rl.retryAfter);
 
-  const previousActive = caller.agent.last_active;
-  const ts = nowSecs();
-  const agent = { ...caller.agent, last_active: ts };
+  // `previousActive` is block-authoritative — `fetchProfile` set
+  // `caller.agent.last_active` from the block timestamp of the caller's
+  // most recent profile write. Edge comparisons below use
+  // `entryBlockSecs(e)` for the same trust source.
+  //
+  // First-heartbeat case: `caller.agent` is the in-memory `defaultAgent`
+  // (no profile exists yet) which carries no `last_active`. The `?? 0`
+  // fallback makes the delta surface every pre-existing follower edge as
+  // "new since you never existed."
+  //
+  // Note: `responseAgent.last_active` ends up undefined for first
+  // heartbeats and equal to the prior block time for subsequent ones —
+  // never wall clock. Clients that need the post-write block time re-read
+  // via `GET /agents/me` after the transaction lands.
+  const previousActive = caller.agent.last_active ?? 0;
+  const agent = { ...caller.agent };
 
   // Compute live counts from graph traversal (parallel)
   const [followerEntries, followingEntries, endorseEntries] = await Promise.all(
@@ -913,18 +887,22 @@ export async function handleHeartbeat(
   );
   agent.endorsements = buildEndorsementCounts(endorseEntries, caller.accountId);
 
-  // New followers since last heartbeat
+  // New followers since last heartbeat. We filter by the FastData-indexed
+  // block_timestamp of the edge write, not the follower's caller-asserted
+  // `value.at`, so a follower cannot backdate their edge to hide from (or
+  // forge an appearance in) this delta.
   const newFollowerAccounts: string[] = [];
   for (const e of followerEntries) {
-    const at = entryAt(e.value);
-    if (at >= previousActive) newFollowerAccounts.push(e.predecessor_id);
+    if (entryBlockSecs(e) >= previousActive) {
+      newFollowerAccounts.push(e.predecessor_id);
+    }
   }
 
-  // New following since last heartbeat
-  const newFollowingCount = followingEntries.filter((e) => {
-    const at = entryAt(e.value);
-    return at >= previousActive;
-  }).length;
+  // New following since last heartbeat — same block-time rule applied to
+  // the caller's own outbound edges for symmetry.
+  const newFollowingCount = followingEntries.filter(
+    (e) => entryBlockSecs(e) >= previousActive,
+  ).length;
 
   // Batch-fetch profiles for new follower summaries. `fetchProfiles`
   // enforces the trust-boundary override so the summaries always carry
@@ -936,9 +914,7 @@ export async function handleHeartbeat(
   // Write updated profile + tag/cap indexes
   const entries = agentEntries(agent);
   const wrote = await writeToFastData(walletKey, entries);
-  if (!wrote.ok) {
-    return fail('STORAGE_ERROR', 'Failed to write to FastData', 500);
-  }
+  if (!wrote.ok) return classifyWriteFailure(wrote, caller.accountId);
 
   incrementRateLimit('heartbeat', caller.accountId);
 
@@ -950,12 +926,12 @@ export async function handleHeartbeat(
 
   return ok({
     agent: responseAgent,
+    profile_completeness: profileCompleteness(responseAgent),
     delta: {
       since: previousActive,
       new_followers: newFollowers,
       new_followers_count: newFollowers.length,
       new_following_count: newFollowingCount,
-      profile_completeness: profileCompleteness(responseAgent),
     },
   });
 }
@@ -968,7 +944,7 @@ export async function handleDelistMe(
   walletKey: string,
   resolveAccountId: (wk: string) => Promise<string | null>,
 ): Promise<WriteResult> {
-  const caller = await resolveCaller(walletKey, resolveAccountId);
+  const caller = await resolveCallerOrInit(walletKey, resolveAccountId);
   if ('success' in caller) return caller;
 
   const rl = checkRateLimit('delist_me', caller.accountId);
@@ -981,12 +957,12 @@ export async function handleDelistMe(
 
   // Null-write tag keys
   for (const tag of caller.agent.tags) {
-    entries[`tag/${tag}`] = null;
+    entries[composeKey('tag/', tag)] = null;
   }
 
   // Null-write capability keys
   for (const [ns, val] of extractCapabilityPairs(caller.agent.capabilities)) {
-    entries[`cap/${ns}/${val}`] = null;
+    entries[composeKey('cap/', `${ns}/${val}`)] = null;
   }
 
   // Null-write follow + endorsement edges
@@ -1002,9 +978,7 @@ export async function handleDelistMe(
   }
 
   const wrote = await writeToFastData(walletKey, entries);
-  if (!wrote.ok) {
-    return fail('STORAGE_ERROR', 'Failed to write to FastData', 500);
-  }
+  if (!wrote.ok) return classifyWriteFailure(wrote, caller.accountId);
 
   incrementRateLimit('delist_me', caller.accountId);
 
@@ -1056,11 +1030,22 @@ export function invalidatesFor(action: string): readonly string[] | null {
 // Dispatcher
 // ---------------------------------------------------------------------------
 
-/** Normalize single account_id or targets[] into a non-empty array. */
+/** Normalize single account_id or targets[] into a non-empty array.
+ *  Rejects non-string items in `targets[]` at the boundary so downstream
+ *  handlers never see garbage (a numeric item would crash on `.trim()`). */
 function resolveTargets(body: Record<string, unknown>): string[] | WriteResult {
-  if (Array.isArray(body.targets)) return body.targets as string[];
-  const accountId = body.account_id as string | undefined;
-  if (!accountId) return fail('VALIDATION_ERROR', 'account_id is required');
+  if (Array.isArray(body.targets)) {
+    for (const t of body.targets) {
+      if (typeof t !== 'string') {
+        return fail('VALIDATION_ERROR', 'targets[] items must be strings');
+      }
+    }
+    return body.targets as string[];
+  }
+  const accountId = body.account_id;
+  if (typeof accountId !== 'string' || !accountId) {
+    return fail('VALIDATION_ERROR', 'account_id is required');
+  }
   return [accountId];
 }
 

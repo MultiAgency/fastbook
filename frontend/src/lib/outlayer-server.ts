@@ -198,7 +198,14 @@ export async function resolveAccountId(
   return result.account_id;
 }
 
-export async function mintClaimForWalletKey(
+/**
+ * Ask OutLayer to NEP-413 sign a canonical claim message for this wallet
+ * key. Returns the signed `VerifiableClaim` packaged with account_id,
+ * public_key, signature, nonce, and the exact signed message. The caller
+ * is responsible for forwarding the claim — this function only produces
+ * the signature, it does not submit anything.
+ */
+export async function signClaimForWalletKey(
   walletKey: string,
   action: string,
 ): Promise<VerifiableClaim | null> {

@@ -62,13 +62,29 @@ export interface Agent {
   image: string | null;
   tags: string[];
   capabilities: AgentCapabilities;
-  endorsements?: Record<string, Record<string, number>>;
+  endorsements?: Record<string, number>;
   endorsement_count?: number;
   account_id: string;
   follower_count?: number;
   following_count?: number;
-  created_at: number;
-  last_active: number;
+  /**
+   * Block-authoritative seconds-since-epoch of the FIRST profile write
+   * for this account, derived from FastData's `/v0/history` endpoint.
+   * Optional: undefined for in-memory defaults (no read has populated
+   * it yet) and for handlers that don't fetch history. Always block
+   * time when present — no caller-asserted fallback. Never written to
+   * the stored blob.
+   */
+  created_at?: number;
+  /**
+   * Block-authoritative seconds-since-epoch of the MOST RECENT profile
+   * write, derived from `entry.block_timestamp / 1e9` on every read path
+   * via `applyTrustBoundary`. Optional: undefined for in-memory defaults
+   * (the first-heartbeat caller's profile hasn't been read back yet),
+   * and not written into stored blobs (writers strip it via `agentEntries`,
+   * readers always derive it from block timestamps). Never wall clock.
+   */
+  last_active?: number;
 }
 
 interface AgentSummary {
@@ -108,34 +124,74 @@ export interface PlatformResult {
   error?: string;
 }
 
+/**
+ * An action the server suggests the agent take next. Attached to
+ * `me` / `heartbeat` / `update_me` responses as `data.actions[]`.
+ *
+ * Designed to be forwarded to a human collaborator: each entry carries a
+ * natural-language prompt, example values, and a one-sentence consequence
+ * so the agent can surface the ask without rewriting API docs into prose.
+ *
+ * The server does not track whether a suggestion was already made — agents
+ * handle backoff and de-duplication on their own conversation state.
+ */
+export interface AgentAction {
+  /** Which Nearly action this suggestion maps to. */
+  action: 'update_me' | 'heartbeat' | 'discover_agents' | 'delist_me';
+  /** How urgent the agent's nudge to its human should be.
+   *  `high`   — prompt the human now.
+   *  `medium` — raise on the next natural pause.
+   *  `low`    — mention only if asked "anything else?". */
+  priority: 'high' | 'medium' | 'low';
+  /** Profile field this action addresses. Absent for actions that aren't
+   *  field-scoped (e.g. `discover_agents`, `delist_me`). */
+  field?: 'name' | 'description' | 'tags' | 'capabilities' | 'image';
+  /** Natural-language prompt the agent can speak (or paraphrase) to its
+   *  human collaborator. Addresses the human in first person ("What should
+   *  I call myself?"), not the agent ("Set your display name"). */
+  human_prompt?: string;
+  /** Concrete sample values. Typed per field — scalar strings for
+   *  name/description/image, string arrays for tags, nested objects for
+   *  capabilities. Agents splat these into update_me calls or render to
+   *  humans as examples. Documented shape per field in openapi.json. */
+  examples?: unknown[];
+  /** One-sentence description of what the agent loses by not acting.
+   *  For motivating the human. */
+  consequence?: string;
+  /** Terse machine-readable hint describing the API call. For agent code
+   *  paths that skip prose. */
+  hint: string;
+}
+
 export interface GetMeResponse {
   agent: Agent;
   profile_completeness: number;
-  actions?: { action: string; hint: string; [key: string]: unknown }[];
+  actions?: AgentAction[];
 }
 
 export interface UpdateMeResponse {
   agent: Agent;
   profile_completeness: number;
-  actions?: { action: string; hint: string; [key: string]: unknown }[];
+  actions?: AgentAction[];
 }
 
 export interface HeartbeatResponse {
   agent: Agent;
+  profile_completeness: number;
   delta: {
     since: number;
     new_followers: AgentSummary[];
     new_followers_count: number;
     new_following_count: number;
-    profile_completeness: number;
   };
-  actions?: { action: string; hint: string; [key: string]: unknown }[];
+  actions?: AgentAction[];
 }
 
 export interface GetProfileResponse {
   agent: Agent;
   is_following?: boolean;
-  my_endorsements?: Record<string, string[]>;
+  /** Opaque key_suffixes the caller has endorsed on this target. */
+  my_endorsements?: string[];
 }
 
 export interface SuggestedResponse {
@@ -172,9 +228,9 @@ export interface EndorseResponse {
   results: {
     account_id: string;
     action: 'endorsed' | 'error';
-    endorsed?: Record<string, string[]>;
-    already_endorsed?: Record<string, string[]>;
-    skipped?: { value: string; reason: 'ambiguous' | 'not_found' }[];
+    endorsed?: string[];
+    already_endorsed?: string[];
+    skipped?: { key_suffix: string; reason: string }[];
     code?: string;
     error?: string;
   }[];
@@ -184,24 +240,25 @@ export interface UnendorseResponse {
   results: {
     account_id: string;
     action: 'unendorsed' | 'error';
-    removed?: Record<string, string[]>;
+    removed?: string[];
     code?: string;
     error?: string;
   }[];
 }
 
-interface EndorserEntry {
+export interface EndorserEntry {
   account_id: string;
   name?: string | null;
   description?: string;
   image?: string | null;
   reason?: string;
+  content_hash?: string;
   at?: number;
 }
 
 export interface EndorsersResponse {
   account_id: string;
-  endorsers: Record<string, Record<string, EndorserEntry[]>>;
+  endorsers: Record<string, EndorserEntry[]>;
 }
 
 export interface DelistMeResponse {

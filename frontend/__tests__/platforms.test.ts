@@ -6,14 +6,14 @@ const mockFetch = jest.fn();
 global.fetch = mockFetch;
 
 jest.mock('@/lib/outlayer-server', () => ({
-  mintClaimForWalletKey: jest.fn(),
+  signClaimForWalletKey: jest.fn(),
   resolveAccountId: jest.fn(),
 }));
 
-import { mintClaimForWalletKey, resolveAccountId } from '@/lib/outlayer-server';
+import { resolveAccountId, signClaimForWalletKey } from '@/lib/outlayer-server';
 import { handleRegisterPlatforms } from '@/lib/platforms';
 
-const mockMint = mintClaimForWalletKey as jest.Mock;
+const mockSign = signClaimForWalletKey as jest.Mock;
 const mockResolve = resolveAccountId as jest.Mock;
 
 function marketOk(body: Record<string, unknown>): Response {
@@ -35,15 +35,15 @@ describe('handleRegisterPlatforms', () => {
     mockResolve.mockResolvedValue('alice.near');
   });
 
-  it('forwards minted verifiable_claim into the market POST body', async () => {
-    const minted = {
+  it('forwards signed verifiable_claim into the market POST body', async () => {
+    const signedClaim = {
       account_id: 'alice.near',
       public_key: 'ed25519:pk',
       signature: 'ed25519:sig',
       nonce: 'bm9uY2U=',
       message: '{"action":"register_platforms","domain":"nearly.social"}',
     };
-    mockMint.mockResolvedValue(minted);
+    mockSign.mockResolvedValue(signedClaim);
     mockFetch.mockResolvedValue(
       marketOk({
         api_key: 'sk_live_xxx',
@@ -57,16 +57,16 @@ describe('handleRegisterPlatforms', () => {
     });
     expect(res.status).toBe(200);
 
-    expect(mockMint).toHaveBeenCalledWith('wk_test_key', 'register_platforms');
+    expect(mockSign).toHaveBeenCalledWith('wk_test_key', 'register_platforms');
     const call = findMarketCall();
     expect(call).toBeDefined();
     const body = JSON.parse(call![1].body as string);
-    expect(body.verifiable_claim).toEqual(minted);
+    expect(body.verifiable_claim).toEqual(signedClaim);
     expect(body.account_id).toBe('alice.near');
   });
 
-  it('omits verifiable_claim when mint returns null (non-fatal)', async () => {
-    mockMint.mockResolvedValue(null);
+  it('omits verifiable_claim when sign returns null (non-fatal)', async () => {
+    mockSign.mockResolvedValue(null);
     mockFetch.mockResolvedValue(
       marketOk({ api_key: 'sk_live_xxx', agent_id: 'uuid-2' }),
     );
@@ -89,7 +89,7 @@ describe('handleRegisterPlatforms', () => {
       platforms: ['market.near.ai'],
     });
     expect(res.status).toBe(401);
-    expect(mockMint).not.toHaveBeenCalled();
+    expect(mockSign).not.toHaveBeenCalled();
     expect(mockFetch).not.toHaveBeenCalled();
   });
 });

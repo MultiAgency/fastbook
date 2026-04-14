@@ -2,7 +2,8 @@
 # smoke.sh — End-to-end smoke test of the Nearly Social API.
 #
 # Usage:
-#   ./scripts/smoke.sh             # Run full test, keep agent
+#   ./scripts/smoke.sh             # Run default 9-step test, keep agent
+#   ./scripts/smoke.sh --full      # Also run extended coverage (5 extra steps)
 #   ./scripts/smoke.sh --cleanup   # Delist test agent at end
 #   ./scripts/smoke.sh --fresh     # Force new wallet
 
@@ -13,11 +14,13 @@ OUTLAYER_API="https://api.outlayer.fastnear.com"
 CREDS_FILE="$HOME/.config/nearly/credentials.json"
 CLEANUP=false
 FRESH=false
+FULL=false
 
 for arg in "$@"; do
   case "$arg" in
     --cleanup) CLEANUP=true ;;
     --fresh)   FRESH=true ;;
+    --full)    FULL=true ;;
     *) echo "Unknown arg: $arg"; exit 1 ;;
   esac
 done
@@ -32,9 +35,12 @@ SKIP=0
 STEP_NAME=""
 STEP_NUM=0
 TOTAL_STEPS=9
+$FULL && TOTAL_STEPS=13
 declare -a LATENCY_NAMES=()
 declare -a LATENCY_VALUES=()
 declare -a STEP_RESULTS=()
+declare -a STEP_LABELS=("Wall" "Prof" "Disc" "Foll" "Endr" "Beat" "Unfl" "Unen" "Plat")
+$FULL && STEP_LABELS+=("Caps" "Page" "Vrf" "Auth")
 START_EPOCH=$(date +%s)
 
 # Colors
@@ -122,9 +128,8 @@ print_summary() {
   done
   printf "\b\b  \n"
 
-  local step_labels=("Wall" "Prof" "Disc" "Foll" "Endr" "Beat" "Unfl" "Unen" "Plat")
   printf "  "
-  for label in "${step_labels[@]}"; do
+  for label in "${STEP_LABELS[@]}"; do
     printf "%-4s" "$label"
   done
   echo ""
@@ -434,21 +439,22 @@ else
     skip "Target has no tags to endorse"
     record_latency "endorse" "0"
   else
-    api_call POST "/agents/${FOLLOW_TARGET}/endorse" "$(jq -n --arg t "$target_tag" '{tags:[$t]}')"
+    target_key_suffix="tags/${target_tag}"
+    api_call POST "/agents/${FOLLOW_TARGET}/endorse" "$(jq -n --arg ks "$target_key_suffix" '{key_suffixes:[$ks]}')"
     record_latency "endorse" "$RESP_MS"
 
     if [[ "$RESP_CODE" != "200" ]]; then
       fail_report "endorse" "HTTP 200" "HTTP $RESP_CODE: $RESP_BODY" \
-        "curl -s -X POST ${NEARLY_API}/agents/${FOLLOW_TARGET}/endorse -H 'Authorization: Bearer \$KEY' -d '{\"tags\":[\"$target_tag\"]}'" \
+        "curl -s -X POST ${NEARLY_API}/agents/${FOLLOW_TARGET}/endorse -H 'Authorization: Bearer \$KEY' -d '{\"key_suffixes\":[\"$target_key_suffix\"]}'" \
         "Check endorse handler"
     fi
 
     endorse_action=$(echo "$RESP_BODY" | jq -r '.data.results[0].action // .data.action // empty' 2>/dev/null)
-    pass "Endorse $FOLLOW_TARGET tag=$target_tag: $endorse_action (${RESP_MS}ms)"
+    pass "Endorse $FOLLOW_TARGET key_suffix=$target_key_suffix: $endorse_action (${RESP_MS}ms)"
 
-    # Verify our account appears in target's endorsers for this tag
-    verify "tag endorsement visible" "/agents/${FOLLOW_TARGET}/endorsers" \
-      "[.data.endorsers.tags.\"${target_tag}\"[]? | select(.account_id == \"${ACCOUNT_ID}\")] | length | tostring" "1"
+    # Verify our account appears in target's endorsers under the flat key_suffix key
+    verify "key_suffix endorsement visible" "/agents/${FOLLOW_TARGET}/endorsers" \
+      "[.data.endorsers[\"${target_key_suffix}\"][]? | select(.account_id == \"${ACCOUNT_ID}\")] | length | tostring" "1"
   fi
 fi
 
@@ -511,25 +517,25 @@ fi
 banner "Unendorse"
 STEP_NAME="unendorse"
 
-if [[ -z "$FOLLOW_TARGET" || "$FOLLOW_TARGET" == "$ACCOUNT_ID" || -z "${target_tag:-}" ]]; then
+if [[ -z "$FOLLOW_TARGET" || "$FOLLOW_TARGET" == "$ACCOUNT_ID" || -z "${target_key_suffix:-}" ]]; then
   skip "No endorsement to remove"
   record_latency "unendorse" "0"
 else
-  api_call DELETE "/agents/${FOLLOW_TARGET}/endorse" "$(jq -n --arg t "$target_tag" '{tags:[$t]}')"
+  api_call DELETE "/agents/${FOLLOW_TARGET}/endorse" "$(jq -n --arg ks "$target_key_suffix" '{key_suffixes:[$ks]}')"
   record_latency "unendorse" "$RESP_MS"
 
   if [[ "$RESP_CODE" != "200" ]]; then
     fail_report "unendorse" "HTTP 200" "HTTP $RESP_CODE: $RESP_BODY" \
-      "curl -s -X DELETE ${NEARLY_API}/agents/${FOLLOW_TARGET}/endorse -H 'Authorization: Bearer \$KEY' -d '{\"tags\":[\"$target_tag\"]}'" \
+      "curl -s -X DELETE ${NEARLY_API}/agents/${FOLLOW_TARGET}/endorse -H 'Authorization: Bearer \$KEY' -d '{\"key_suffixes\":[\"$target_key_suffix\"]}'" \
       "Check unendorse handler"
   fi
 
   unendorse_action=$(echo "$RESP_BODY" | jq -r '.data.results[0].action // .data.action // empty' 2>/dev/null)
-  pass "Unendorse $FOLLOW_TARGET tag=$target_tag: $unendorse_action (${RESP_MS}ms)"
+  pass "Unendorse $FOLLOW_TARGET key_suffix=$target_key_suffix: $unendorse_action (${RESP_MS}ms)"
 
-  # Verify our endorsement removed — our account should be absent from endorsers
-  verify "tag endorsement removed" "/agents/${FOLLOW_TARGET}/endorsers" \
-    "[.data.endorsers.tags.\"${target_tag}\"[]? | select(.account_id == \"${ACCOUNT_ID}\")] | length | tostring" "0"
+  # Verify our endorsement removed — our account should be absent from endorsers under this key_suffix
+  verify "key_suffix endorsement removed" "/agents/${FOLLOW_TARGET}/endorsers" \
+    "[.data.endorsers[\"${target_key_suffix}\"][]? | select(.account_id == \"${ACCOUNT_ID}\")] | length | tostring" "0"
 fi
 
 banner "Register Platforms"
@@ -544,6 +550,134 @@ else
   fail_report "register_platforms" "HTTP 200" "HTTP $RESP_CODE: $RESP_BODY" \
     "curl -s -X POST .../agents/me/platforms" "platform registration endpoint"
 fi
+
+# ─── Extended tests (--full) ─────────────────────────────────────────
+
+if $FULL; then
+
+banner "Capability Endorsement"
+STEP_NAME="endorse_cap"
+
+if [[ -z "$FOLLOW_TARGET" || "$FOLLOW_TARGET" == "$ACCOUNT_ID" ]]; then
+  skip "No target available"
+  record_latency "endorse_cap" "0"
+else
+  api_call GET "/agents/${FOLLOW_TARGET}"
+  cap_ns=$(echo "$RESP_BODY" | jq -r '.data.agent.capabilities // {} | to_entries[0].key // empty' 2>/dev/null)
+  cap_val=$(echo "$RESP_BODY" | jq -r '.data.agent.capabilities // {} | to_entries[0].value | (if type=="array" then .[0] elif type=="string" then . else empty end) // empty' 2>/dev/null)
+  if [[ -z "$cap_ns" || -z "$cap_val" ]]; then
+    skip "Target has no capabilities to endorse"
+    record_latency "endorse_cap" "0"
+  else
+    cap_key_suffix="${cap_ns}/${cap_val}"
+    cap_body=$(jq -n --arg ks "$cap_key_suffix" '{key_suffixes: [$ks]}')
+    api_call POST "/agents/${FOLLOW_TARGET}/endorse" "$cap_body"
+    record_latency "endorse_cap" "$RESP_MS"
+    if [[ "$RESP_CODE" != "200" ]]; then
+      fail_report "endorse_cap" "HTTP 200" "HTTP $RESP_CODE: $RESP_BODY" \
+        "curl -s -X POST ${NEARLY_API}/agents/${FOLLOW_TARGET}/endorse -d '$cap_body'" \
+        "Capability endorsement path — key_suffix=${cap_key_suffix}"
+    fi
+    pass "Endorsed capability key_suffix=${cap_key_suffix} (${RESP_MS}ms)"
+    verify "capability endorsement visible" "/agents/${FOLLOW_TARGET}/endorsers" \
+      "[.data.endorsers[\"${cap_key_suffix}\"][]? | select(.account_id == \"${ACCOUNT_ID}\")] | length | tostring" "1"
+    # Cleanup so the main flow's invariants remain intact for reruns.
+    api_call DELETE "/agents/${FOLLOW_TARGET}/endorse" "$cap_body"
+  fi
+fi
+
+banner "Pagination"
+STEP_NAME="pagination"
+
+api_call GET "/agents?limit=2"
+record_latency "pagination" "$RESP_MS"
+if [[ "$RESP_CODE" != "200" ]]; then
+  fail_report "pagination" "HTTP 200" "HTTP $RESP_CODE: $RESP_BODY" \
+    "curl -s ${NEARLY_API}/agents?limit=2" "list_agents page 1 failed"
+fi
+page1_count=$(echo "$RESP_BODY" | jq -r '.data.agents | length' 2>/dev/null)
+cursor=$(echo "$RESP_BODY" | jq -r '.data.cursor // empty' 2>/dev/null)
+pass "Page 1: ${page1_count} agents (${RESP_MS}ms)"
+if [[ -n "$cursor" ]]; then
+  page1_ids=$(echo "$RESP_BODY" | jq -r '.data.agents[].account_id' 2>/dev/null | sort -u)
+  api_call GET "/agents?limit=2&cursor=${cursor}"
+  if [[ "$RESP_CODE" != "200" ]]; then
+    fail_report "pagination" "HTTP 200 on cursor page" "HTTP $RESP_CODE: $RESP_BODY" \
+      "curl -s '${NEARLY_API}/agents?limit=2&cursor=${cursor}'" "cursor page failed"
+  fi
+  page2_ids=$(echo "$RESP_BODY" | jq -r '.data.agents[].account_id' 2>/dev/null | sort -u)
+  overlap=$(comm -12 <(echo "$page1_ids") <(echo "$page2_ids") | wc -l | tr -d ' ')
+  if [[ "$overlap" != "0" ]]; then
+    fail_report "pagination" "disjoint page 1 and page 2" "$overlap overlapping ids" \
+      "GET /agents?limit=2 then cursor" "cursor did not advance"
+  fi
+  printf "${C_GREEN}    ✓ verify:${C_RESET} page 2 disjoint from page 1\n"
+else
+  info "Only one page available (no cursor) — pagination not exercised"
+fi
+
+banner "VRF Proof on Discover"
+STEP_NAME="vrf_proof"
+
+api_call GET "/agents/discover?limit=5"
+record_latency "vrf_proof" "$RESP_MS"
+if [[ "$RESP_CODE" != "200" ]]; then
+  fail_report "vrf_proof" "HTTP 200" "HTTP $RESP_CODE: $RESP_BODY" \
+    "curl -s ${NEARLY_API}/agents/discover?limit=5" "discover failed"
+fi
+vrf_out=$(echo "$RESP_BODY" | jq -r '.data.vrf.output_hex // empty' 2>/dev/null)
+vrf_sig=$(echo "$RESP_BODY" | jq -r '.data.vrf.signature_hex // empty' 2>/dev/null)
+vrf_pk=$(echo "$RESP_BODY" | jq -r '.data.vrf.vrf_public_key // empty' 2>/dev/null)
+if [[ -z "$vrf_out" || -z "$vrf_sig" || -z "$vrf_pk" ]]; then
+  fail_report "vrf_proof" "data.vrf {output_hex, signature_hex, vrf_public_key}" "$RESP_BODY" \
+    "GET /agents/discover?limit=5" \
+    "VRF proof missing — signClaimForWalletKey or WASM VRF seed path broken"
+fi
+pass "VRF proof present (output=${vrf_out:0:16}…, ${RESP_MS}ms)"
+
+banner "Auth Matrix"
+STEP_NAME="auth_matrix"
+
+# Construct a near:<base64url> token and confirm the API rejects it for mutations.
+near_payload=$(jq -nc --arg a "$ACCOUNT_ID" '{account_id: $a, seed: "smoke-test-seed"}')
+near_b64=$(printf '%s' "$near_payload" | base64 | tr '+/' '-_' | tr -d '=\n')
+raw=$(curl -s --max-time 30 -w '\n%{http_code} %{time_total}' \
+  -X POST \
+  -H "Authorization: Bearer near:${near_b64}" \
+  -H "Content-Type: application/json" \
+  -d '{}' \
+  "${NEARLY_API}/agents/me/heartbeat")
+auth_body=$(echo "$raw" | sed '$d')
+auth_meta=$(echo "$raw" | tail -1)
+auth_code=$(echo "$auth_meta" | awk '{print $1}')
+auth_ms=$(echo "$auth_meta" | awk '{printf "%.0f", $2 * 1000}')
+record_latency "auth_matrix" "$auth_ms"
+if [[ "$auth_code" == "401" ]]; then
+  printf "${C_GREEN}    ✓ verify:${C_RESET} near: token rejected for heartbeat (401, ${auth_ms}ms)\n"
+else
+  fail_report "auth_matrix" "HTTP 401 for near: token on mutation" "HTTP $auth_code: $auth_body" \
+    "curl -X POST -H 'Authorization: Bearer near:...' ${NEARLY_API}/agents/me/heartbeat" \
+    "near: tokens must not be allowed to mutate — check wk_ gating in route.ts"
+fi
+
+# Reads with the same near: token must succeed — CLAUDE.md guarantees
+# reads work for near: tokens (account_id decoded locally from the token).
+read_raw=$(curl -s --max-time 30 -w '\n%{http_code}' \
+  -H "Authorization: Bearer near:${near_b64}" \
+  "${NEARLY_API}/agents/me")
+read_body=$(echo "$read_raw" | sed '$d')
+read_code=$(echo "$read_raw" | tail -1)
+read_acct=$(echo "$read_body" | jq -r '.data.agent.account_id // empty' 2>/dev/null)
+if [[ "$read_code" == "200" && "$read_acct" == "$ACCOUNT_ID" ]]; then
+  pass "near: token: write rejected (401), read accepted (200)"
+else
+  fail_report "auth_matrix" "HTTP 200 and matching account_id on read" \
+    "HTTP $read_code, account_id=${read_acct}" \
+    "curl -H 'Authorization: Bearer near:...' ${NEARLY_API}/agents/me" \
+    "near: tokens must work for reads — check decodeNearToken path"
+fi
+
+fi  # end --full
 
 # ─── Cleanup (optional) ───────────────────────────────────────────────
 

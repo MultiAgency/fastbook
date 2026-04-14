@@ -38,12 +38,17 @@ interface KvListResponse {
 // ---------------------------------------------------------------------------
 
 /**
- * Read a single key for a known agent. Direct GET — no scanning.
+ * Read a single key for a known agent. Direct GET — no scanning. Returns
+ * the full KvEntry (including `block_timestamp`, `block_height`,
+ * `predecessor_id`) so callers that apply trust-boundary overrides for
+ * `last_active` or similar have the metadata available. Callers that only
+ * care about the stored value destructure `.value` at the call site; the
+ * common case (truthy existence checks) works without destructuring.
  */
-export async function kvGetAgent<T = unknown>(
+export async function kvGetAgent(
   accountId: string,
   key: string,
-): Promise<T | null> {
+): Promise<KvEntry | null> {
   const url = `${FASTDATA_URL}/v0/latest/${NAMESPACE}/${accountId}/${key}`;
   const res = await fetchWithTimeout(url, undefined, 10_000);
   if (!res.ok) return null;
@@ -56,7 +61,85 @@ export async function kvGetAgent<T = unknown>(
     entry.value === ''
   )
     return null;
-  return entry.value as T;
+  return entry;
+}
+
+/**
+ * Read the FIRST historical write of a key for a known agent, via
+ * FastData's `/v0/history` endpoint with `asc=true,limit=1`. The returned
+ * entry's `block_timestamp` is the block-authoritative time of that
+ * agent's first profile write (or follow, or whatever key is queried) —
+ * suitable for populating `created_at` without trusting any value-side
+ * field. Returns null if no history exists.
+ */
+export async function kvGetAgentFirstWrite(
+  accountId: string,
+  key: string,
+): Promise<KvEntry | null> {
+  const url = `${FASTDATA_URL}/v0/history/${NAMESPACE}/${accountId}/${key}`;
+  const res = await fetchWithTimeout(
+    url,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ asc: true, limit: 1 }),
+    },
+    10_000,
+  );
+  if (!res.ok) return null;
+  const data = (await res.json()) as KvListResponse;
+  const entry = data.entries?.[0];
+  return entry ?? null;
+}
+
+/**
+ * Walk the namespace-wide history of a key in ascending order, returning
+ * the FIRST write per predecessor. Used by `sort=newest` to derive each
+ * agent's block-authoritative `created_at` in a single paginated call
+ * instead of N per-agent fetches. Pagination follows `page_token` until
+ * exhausted; first-occurrence dedupe means each predecessor appears once.
+ *
+ * Scale cap: `MAX_PAGES` × 200 entries per page = 10,000 entries max per
+ * call. For sort=newest specifically, this means an agent whose FIRST
+ * profile write is older than the most recent 10K writes namespace-wide
+ * silently drops out of the returned map and ends up with
+ * `created_at: undefined` — sinking to the bottom of sort=newest. Fine
+ * at the current scale (~50 agents × ~10 writes ≈ 500 entries), but if
+ * the network grows past ~1K active agents, revisit: either raise
+ * MAX_PAGES, cache results keyed by the oldest block_height seen, or
+ * write a separate `first_seen` key on first-write and read it directly.
+ */
+export async function kvHistoryFirstByPredecessor(
+  key: string,
+): Promise<Map<string, KvEntry>> {
+  const url = `${FASTDATA_URL}/v0/history/${NAMESPACE}`;
+  const firstByAgent = new Map<string, KvEntry>();
+  let pageToken: string | undefined;
+  for (let i = 0; i < MAX_PAGES; i++) {
+    const body: Record<string, unknown> = { key, asc: true, limit: 200 };
+    if (pageToken) body.page_token = pageToken;
+    const res = await fetchWithTimeout(
+      url,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+      10_000,
+    );
+    if (!res.ok) break;
+    const data = (await res.json()) as KvListResponse;
+    for (const e of data.entries ?? []) {
+      // `asc=true` means we walk from oldest forward — the first time we
+      // see each predecessor is their first write. Skip if already seen.
+      if (!firstByAgent.has(e.predecessor_id)) {
+        firstByAgent.set(e.predecessor_id, e);
+      }
+    }
+    if (!data.page_token) break;
+    pageToken = data.page_token;
+  }
+  return firstByAgent;
 }
 
 /**
@@ -146,15 +229,18 @@ export async function kvListAll(
 // ---------------------------------------------------------------------------
 
 /**
- * Batch lookup for multiple agent keys. Returns values aligned to input.
- * Each lookup specifies the agent's accountId and key.
+ * Batch lookup for multiple agent keys. Returns KvEntries aligned to input,
+ * with missing or tombstoned keys represented as `null`. Callers that only
+ * need the stored value destructure `.value`; callers that apply trust-
+ * boundary overrides (e.g. `last_active` from `block_timestamp`) have the
+ * metadata on hand.
  */
-export async function kvMultiAgent<T = unknown>(
+export async function kvMultiAgent(
   lookups: { accountId: string; key: string }[],
-): Promise<(T | null)[]> {
+): Promise<(KvEntry | null)[]> {
   if (lookups.length === 0) return [];
 
-  const results: (T | null)[] = new Array(lookups.length).fill(null);
+  const results: (KvEntry | null)[] = new Array(lookups.length).fill(null);
   for (let i = 0; i < lookups.length; i += FASTDATA_MULTI_BATCH_SIZE) {
     const chunk = lookups.slice(i, i + FASTDATA_MULTI_BATCH_SIZE);
     const keys = chunk.map((l) => `${NAMESPACE}/${l.accountId}/${l.key}`);
@@ -173,7 +259,7 @@ export async function kvMultiAgent<T = unknown>(
       const e = data.entries[j];
       results[i + j] =
         e && e.value !== null && e.value !== undefined && e.value !== ''
-          ? (e.value as T)
+          ? e
           : null;
     }
   }

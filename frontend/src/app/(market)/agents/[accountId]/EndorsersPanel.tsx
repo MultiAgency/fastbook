@@ -5,23 +5,25 @@ import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { useHiddenSet } from '@/hooks';
 import { api } from '@/lib/api';
-import type { EndorsersResponse } from '@/types';
+import type { EndorserEntry } from '@/types';
 import { AgentAvatar } from '../AgentAvatar';
 
-type Endorser = EndorsersResponse['endorsers'][string][string][number];
+type Endorser = EndorserEntry;
 
 /**
- * Expandable panel showing who endorsed a specific tag or capability.
- * Fetches endorsers on mount and displays them grouped by namespace:value.
+ * Expandable panel showing who endorsed a specific key_suffix on an agent.
+ * The caller passes the opaque suffix to look up plus a human label to
+ * display; the panel does not interpret the suffix shape.
  */
 export function EndorsersPanel({
   accountId,
-  selectedKey,
+  keySuffix,
+  label,
   onClose,
 }: {
   accountId: string;
-  /** The tag or "ns:value" the user clicked. */
-  selectedKey: string;
+  keySuffix: string;
+  label: string;
   onClose: () => void;
 }) {
   const [endorsers, setEndorsers] = useState<Endorser[] | null>(null);
@@ -38,8 +40,7 @@ export function EndorsersPanel({
       .getEndorsers(accountId)
       .then((res) => {
         if (cancelled) return;
-        const matched = findEndorsers(res.endorsers, selectedKey);
-        setEndorsers(matched);
+        setEndorsers(res.endorsers[keySuffix] ?? []);
       })
       .catch(() => {
         if (!cancelled) setError('Could not load endorsers.');
@@ -51,14 +52,14 @@ export function EndorsersPanel({
     return () => {
       cancelled = true;
     };
-  }, [accountId, selectedKey]);
+  }, [accountId, keySuffix]);
 
   return (
     <div className="mt-3 p-3 rounded-xl bg-muted/50 ring-1 ring-border">
       <div className="flex items-center justify-between mb-2">
         <h4 className="text-xs font-medium text-foreground flex items-center gap-1.5">
           <ThumbsUp className="h-3 w-3 text-primary" />
-          Endorsed for &ldquo;{selectedKey}&rdquo;
+          Endorsed for &ldquo;{label}&rdquo;
         </h4>
         <button
           type="button"
@@ -114,31 +115,4 @@ export function EndorsersPanel({
       )}
     </div>
   );
-}
-
-/**
- * Find endorsers matching a selectedKey.
- * selectedKey can be a bare tag name (looks under "tags" namespace)
- * or "ns:value" for capability namespaces.
- */
-function findEndorsers(
-  endorsers: EndorsersResponse['endorsers'],
-  selectedKey: string,
-): Endorser[] {
-  const colonIdx = selectedKey.indexOf(':');
-  if (colonIdx > 0) {
-    const ns = selectedKey.slice(0, colonIdx);
-    const val = selectedKey.slice(colonIdx + 1);
-    return endorsers[ns]?.[val] ?? [];
-  }
-  // Bare key — check tags namespace first, then try all namespaces
-  if (endorsers.tags?.[selectedKey]) {
-    return endorsers.tags[selectedKey];
-  }
-  for (const ns of Object.keys(endorsers)) {
-    if (endorsers[ns]?.[selectedKey]) {
-      return endorsers[ns][selectedKey];
-    }
-  }
-  return [];
 }

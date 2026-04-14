@@ -100,11 +100,11 @@ function concat(parts) {
 }
 
 /**
- * Mint a fresh NEP-413 claim signed by a throwaway Ed25519 keypair, with
+ * Sign a fresh NEP-413 claim with a throwaway Ed25519 keypair, using
  * `account_id = hex(pubkey)` so the verifier's implicit-account fast path
  * binds the claim without touching NEAR RPC.
  */
-async function mintClaim({
+async function signClaim({
   action = 'login',
   domain = 'nearly.social',
   recipient = 'nearly.social',
@@ -202,7 +202,7 @@ async function run(url) {
   // 1. Happy path — implicit account, valid claim, expected_domain matches.
   {
     console.log('1. Happy path (implicit account, recipient+domain pinned)');
-    const claim = await mintClaim();
+    const claim = await signClaim();
     const result = await post(url, {
       ...claim,
       recipient: 'nearly.social',
@@ -226,7 +226,7 @@ async function run(url) {
   // 2. Wrong recipient — caller pins a different recipient than the signer used.
   {
     console.log('\n2. Wrong recipient (signed for A, verifier pins B)');
-    const claim = await mintClaim({
+    const claim = await signClaim({
       recipient: 'market.near.ai',
       domain: 'market.near.ai',
     });
@@ -242,7 +242,7 @@ async function run(url) {
   // 3. Missing recipient — route handler rejects with 400.
   {
     console.log('\n3. Missing recipient field');
-    const claim = await mintClaim();
+    const claim = await signClaim();
     const { status, body } = await post(url, { ...claim });
     assert('status 400', status === 400, `got ${status}`);
     assert('success: false', body?.success === false);
@@ -251,7 +251,7 @@ async function run(url) {
   // 4. Replay — submit the same claim twice, second must be rejected.
   {
     console.log('\n4. Replay detection');
-    const claim = await mintClaim();
+    const claim = await signClaim();
     const first = await post(url, { ...claim, recipient: 'nearly.social' });
     assert('first valid: true', first.body?.valid === true);
     const second = await post(url, { ...claim, recipient: 'nearly.social' });
@@ -262,7 +262,7 @@ async function run(url) {
   // 5. Expected-domain mismatch — message.domain does not match the pin.
   {
     console.log('\n5. Expected-domain mismatch');
-    const claim = await mintClaim({ domain: 'nearly.social' });
+    const claim = await signClaim({ domain: 'nearly.social' });
     const { body } = await post(url, {
       ...claim,
       recipient: 'nearly.social',
@@ -275,7 +275,7 @@ async function run(url) {
   // 6. Expected domain unset — domain pinning is opt-in.
   {
     console.log('\n6. Domain pin skipped when expected_domain is unset');
-    const claim = await mintClaim({
+    const claim = await signClaim({
       recipient: 'market.near.ai',
       domain: 'whatever.xyz',
     });
@@ -289,7 +289,7 @@ async function run(url) {
   // 7. Stale timestamp — older than the freshness window.
   {
     console.log('\n7. Stale timestamp');
-    const claim = await mintClaim({ timestamp: Date.now() - 10 * 60_000 });
+    const claim = await signClaim({ timestamp: Date.now() - 10 * 60_000 });
     const { body } = await post(url, {
       ...claim,
       recipient: 'nearly.social',
@@ -301,7 +301,7 @@ async function run(url) {
   // 8. Nonce canonicalization — strip base64 padding and retry; must replay.
   {
     console.log('\n8. Nonce canonicalization (padding-strip replay attempt)');
-    const claim = await mintClaim();
+    const claim = await signClaim();
     const first = await post(url, { ...claim, recipient: 'nearly.social' });
     assert('first valid: true', first.body?.valid === true);
     const unpadded = claim.nonce.replace(/=+$/, '');

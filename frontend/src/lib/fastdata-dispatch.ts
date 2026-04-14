@@ -6,15 +6,21 @@
  *   profile              → AgentRecord
  *   tag/{tag}            → true (existence index)
  *   cap/{ns}/{value}     → true (existence index)
- *   graph/follow/{accountId} → {at, reason}
+ *   graph/follow/{accountId} → {reason?}   (time is FastData block_timestamp)
  */
 
 import type { Agent, VrfProof } from '@/types';
-import { kvGetAgent, kvGetAll, kvListAgent, kvListAll } from './fastdata';
+import {
+  kvGetAgent,
+  kvGetAll,
+  kvHistoryFirstByPredecessor,
+  kvListAgent,
+  kvListAll,
+} from './fastdata';
 import {
   buildEndorsementCounts,
   endorsePrefix,
-  entryAt,
+  entryBlockSecs,
   fetchAllProfiles,
   fetchProfile,
   fetchProfiles,
@@ -157,7 +163,7 @@ async function handleGetProfile(
 
 /**
  * Look up the caller's stance toward a target agent: whether they follow them,
- * and which of the target's tags/capabilities they have endorsed. Returns
+ * and which key_suffixes they have endorsed on the target. Returns
  * `{ is_following, my_endorsements }` for inclusion in the profile response.
  */
 async function fetchCallerContext(
@@ -165,25 +171,17 @@ async function fetchCallerContext(
   targetAccountId: string,
 ): Promise<{
   is_following: boolean;
-  my_endorsements: Record<string, string[]>;
+  my_endorsements: string[];
 }> {
   const [followEntry, endorseEntries] = await Promise.all([
-    kvGetAgent<{ at: number }>(
-      callerAccountId,
-      `graph/follow/${targetAccountId}`,
-    ),
+    kvGetAgent(callerAccountId, `graph/follow/${targetAccountId}`),
     kvListAgent(callerAccountId, `endorsing/${targetAccountId}/`),
   ]);
-  const my_endorsements: Record<string, string[]> = {};
   const prefix = `endorsing/${targetAccountId}/`;
+  const my_endorsements: string[] = [];
   for (const e of endorseEntries) {
-    const suffix = e.key.startsWith(prefix) ? e.key.slice(prefix.length) : '';
-    const slash = suffix.indexOf('/');
-    if (slash < 0) continue;
-    const ns = suffix.slice(0, slash);
-    const value = suffix.slice(slash + 1);
-    if (!my_endorsements[ns]) my_endorsements[ns] = [];
-    my_endorsements[ns].push(value);
+    if (!e.key.startsWith(prefix)) continue;
+    my_endorsements.push(e.key.slice(prefix.length));
   }
   return { is_following: followEntry !== null, my_endorsements };
 }
@@ -234,16 +232,31 @@ async function handleListAgents(
   // Profile reads go through `fetchProfiles` / `fetchAllProfiles`,
   // which enforce the FastData trust boundary (authoritative account
   // IDs come from the predecessor namespace, never the stored blob).
-  let allAgents: Agent[];
+  // For sort=newest we additionally walk the namespace-wide profile
+  // history once to derive each agent's first-write block_timestamp,
+  // joined into the agent list before sorting. sort=active doesn't
+  // need this — `last_active` is already block-authoritative on the
+  // latest read path.
+  const [allAgents, firstSeenMap] = await Promise.all([
+    capability || tag
+      ? kvGetAll(
+          capability
+            ? `cap/${capability.toLowerCase()}`
+            : `tag/${tag!.toLowerCase()}`,
+        ).then((entries) => fetchProfiles(entries.map((e) => e.predecessor_id)))
+      : fetchAllProfiles(),
+    sort === 'newest'
+      ? kvHistoryFirstByPredecessor('profile')
+      : Promise.resolve(null),
+  ]);
 
-  if (capability || tag) {
-    const key = capability
-      ? `cap/${capability.toLowerCase()}`
-      : `tag/${tag!.toLowerCase()}`;
-    const entries = await kvGetAll(key);
-    allAgents = await fetchProfiles(entries.map((e) => e.predecessor_id));
-  } else {
-    allAgents = await fetchAllProfiles();
+  if (firstSeenMap) {
+    for (const a of allAgents) {
+      const firstEntry = firstSeenMap.get(a.account_id);
+      if (firstEntry) {
+        a.created_at = entryBlockSecs(firstEntry);
+      }
+    }
   }
 
   // Backend returns raw graph truth. Counts are live per-profile via
@@ -269,12 +282,27 @@ async function handleListAgents(
   };
 }
 
+/**
+ * Sort agents by activity recency or registration order, both
+ * block-authoritative.
+ *
+ * - `sort=active` uses `last_active`, populated from the latest profile
+ *   entry's `block_timestamp` via `applyTrustBoundary`.
+ * - `sort=newest` uses `created_at`, populated from the FIRST profile
+ *   entry's `block_timestamp` via `kvHistoryFirstByPredecessor` joined
+ *   into the agent list before sorting (see `handleListAgents`).
+ *
+ * Both are derived from FastData history, ungameable by caller-asserted
+ * values. Agents missing a `created_at` (history call failed, or the
+ * entry was indexed too recently to be retrievable) sort last under
+ * `sort=newest` — we treat undefined as 0 to keep the comparator total.
+ */
 function sortComparator(sort: string): (a: Agent, b: Agent) => number {
   switch (sort) {
     case 'newest':
-      return (a, b) => b.created_at - a.created_at;
+      return (a, b) => (b.created_at ?? 0) - (a.created_at ?? 0);
     default: // 'active'
-      return (a, b) => b.last_active - a.last_active;
+      return (a, b) => (b.last_active ?? 0) - (a.last_active ?? 0);
   }
 }
 
@@ -433,7 +461,7 @@ export async function handleGetSuggested(
   });
   scored.sort((a, b) => {
     if (b.score !== a.score) return b.score - a.score;
-    return b.agent.last_active - a.agent.last_active;
+    return (b.agent.last_active ?? 0) - (a.agent.last_active ?? 0);
   });
 
   // VRF shuffle within equal-score tiers for fairness.
@@ -544,61 +572,55 @@ async function handleGetEndorsers(
   if ('error' in resolved) return resolved;
   const { accountId } = resolved;
 
-  // All endorsement entries targeting this account across all predecessors.
-  const endorseEntries = await kvListAll(endorsePrefix(accountId));
-
   const prefix = endorsePrefix(accountId);
+  const endorseEntries = await kvListAll(prefix);
 
-  // Deduplicate endorser account IDs and batch-fetch profiles.
   const endorserAccountIds = [
     ...new Set(endorseEntries.map((e) => e.predecessor_id)),
   ];
-
-  // Build a lookup map: accountId → profile summary. `fetchProfiles`
-  // enforces the trust-boundary override, so the map keys match the
-  // authoritative predecessor_id we look up with below.
   const profileMap = new Map<string, ReturnType<typeof profileSummary>>();
   for (const p of await fetchProfiles(endorserAccountIds)) {
     profileMap.set(p.account_id, profileSummary(p));
   }
 
-  // Group entries into ns → value → endorser list.
+  // Group entries by opaque key_suffix. The tail after `endorsing/{target}/`
+  // is passed through unchanged — the server does not interpret segments.
   const endorsers: Record<
     string,
-    Record<
-      string,
-      Array<{
-        account_id: string;
-        name: string | null;
-        description: string;
-        image: string | null;
-        reason?: string;
-        at?: number;
-      }>
-    >
+    Array<{
+      account_id: string;
+      name: string | null;
+      description: string;
+      image: string | null;
+      reason?: string;
+      content_hash?: string;
+      at?: number;
+    }>
   > = {};
 
   for (const e of endorseEntries) {
-    const suffix = e.key.replace(prefix, '');
-    const slashIdx = suffix.indexOf('/');
-    if (slashIdx === -1) continue; // malformed key, skip
-    const ns = suffix.slice(0, slashIdx);
-    const value = suffix.slice(slashIdx + 1);
+    if (!e.key.startsWith(prefix)) continue;
+    const keySuffix = e.key.slice(prefix.length);
+    if (!keySuffix) continue;
 
     const profile = profileMap.get(e.predecessor_id);
-    if (!profile) continue; // endorser profile not found, skip
+    if (!profile) continue;
 
     const meta = (e.value ?? {}) as Record<string, unknown>;
 
-    if (!endorsers[ns]) endorsers[ns] = {};
-    if (!endorsers[ns][value]) endorsers[ns][value] = [];
-    endorsers[ns][value].push({
+    if (!endorsers[keySuffix]) endorsers[keySuffix] = [];
+    endorsers[keySuffix].push({
       account_id: profile.account_id,
       name: profile.name,
       description: profile.description,
       image: profile.image ?? null,
       reason: meta.reason as string | undefined,
-      at: meta.at as number | undefined,
+      content_hash: meta.content_hash as string | undefined,
+      // Block-authoritative timestamp — the endorser cannot backdate or
+      // forward-date by lying in their value blob. The caller-asserted
+      // `meta.at` is discarded here; if a legacy consumer ever needs it,
+      // read the entry value directly via kvListAll.
+      at: entryBlockSecs(e),
     });
   }
 
@@ -635,17 +657,19 @@ async function handleGetActivity(
     kvListAgent(accountId, 'graph/follow/'),
   ]);
 
+  // Trust the FastData-indexed block_timestamp, not the follower's
+  // caller-asserted `value.at`, so the activity feed cannot be gamed by
+  // backdating edges.
   const newFollowerAccounts: string[] = [];
   for (const e of followerEntries) {
-    const at = entryAt(e.value);
-    if (at >= since) newFollowerAccounts.push(e.predecessor_id);
+    if (entryBlockSecs(e) >= since) newFollowerAccounts.push(e.predecessor_id);
   }
 
   const newFollowingAccountIds: string[] = [];
   for (const e of followingEntries) {
-    const at = entryAt(e.value);
-    if (at >= since)
+    if (entryBlockSecs(e) >= since) {
       newFollowingAccountIds.push(e.key.replace('graph/follow/', ''));
+    }
   }
 
   // Batch-fetch profiles for summaries (parallel).

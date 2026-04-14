@@ -40,7 +40,7 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('kvGetAgent', () => {
-  it('returns value for existing key', async () => {
+  it('returns full KvEntry for existing key', async () => {
     mockFetch.mockResolvedValue(
       jsonResponse({
         entries: [entry('alice.near', 'profile', { name: 'Alice' })],
@@ -48,7 +48,9 @@ describe('kvGetAgent', () => {
     );
 
     const result = await kvGetAgent('alice.near', 'profile');
-    expect(result).toEqual({ name: 'Alice' });
+    expect(result?.value).toEqual({ name: 'Alice' });
+    expect(result?.predecessor_id).toBe('alice.near');
+    expect(result?.block_timestamp).toBeDefined();
     expect(mockFetch).toHaveBeenCalledWith(
       expect.stringContaining('/alice.near/profile'),
       undefined,
@@ -235,7 +237,11 @@ describe('kvMultiAgent', () => {
       { accountId: 'alice.near', key: 'profile' },
       { accountId: 'bob.near', key: 'profile' },
     ]);
-    expect(results).toEqual([{ name: 'Alice' }, { name: 'Bob' }]);
+    expect(results).toHaveLength(2);
+    expect(results[0]?.value).toEqual({ name: 'Alice' });
+    expect(results[0]?.predecessor_id).toBe('alice.near');
+    expect(results[1]?.value).toEqual({ name: 'Bob' });
+    expect(results[1]?.predecessor_id).toBe('bob.near');
   });
 
   it('returns null for soft-deleted entries in batch', async () => {
@@ -252,7 +258,8 @@ describe('kvMultiAgent', () => {
       { accountId: 'alice.near', key: 'profile' },
       { accountId: 'bob.near', key: 'profile' },
     ]);
-    expect(results).toEqual([{ name: 'Alice' }, null]);
+    expect(results[0]?.value).toEqual({ name: 'Alice' });
+    expect(results[1]).toBeNull();
   });
 
   it('returns null for missing entries in batch', async () => {
@@ -266,7 +273,8 @@ describe('kvMultiAgent', () => {
       { accountId: 'alice.near', key: 'profile' },
       { accountId: 'bob.near', key: 'profile' },
     ]);
-    expect(results).toEqual([{ name: 'Alice' }, null]);
+    expect(results[0]?.value).toEqual({ name: 'Alice' });
+    expect(results[1]).toBeNull();
   });
 
   it('returns empty array for empty input', async () => {

@@ -1,30 +1,51 @@
 import type {
   Agent,
-  AgentCapabilities,
-  DelistMeResponse,
   Edge,
   EdgesResponse,
-  EndorseResponse,
   EndorsersResponse,
-  FollowResponse,
   GetMeResponse,
   GetProfileResponse,
   HeartbeatResponse,
   PlatformResult,
   SuggestedResponse,
   TagsResponse,
-  UnendorseResponse,
-  UnfollowResponse,
-  UpdateMeResponse,
   VerifiableClaim,
 } from '@/types';
 import { API_TIMEOUT_MS, LIMITS } from './constants';
-import { fetchWithRetry, fetchWithTimeout, httpErrorText } from './fetch';
+import { fetchWithRetry, fetchWithTimeout } from './fetch';
 import { hasPathParam, routeFor } from './routes';
 import { wasmCodeToStatus } from './utils';
 
 function clampLimit(limit: number): number {
   return Math.max(1, Math.min(limit, LIMITS.MAX_LIMIT));
+}
+
+async function parseErrorBody(response: Response): Promise<{
+  message: string;
+  code?: string;
+  hint?: string;
+  retryAfter?: number;
+}> {
+  try {
+    const text = await response.text();
+    try {
+      const json = JSON.parse(text) as Record<string, unknown>;
+      return {
+        message:
+          typeof json.error === 'string'
+            ? json.error
+            : `HTTP ${response.status}`,
+        code: typeof json.code === 'string' ? json.code : undefined,
+        hint: typeof json.hint === 'string' ? json.hint : undefined,
+        retryAfter:
+          typeof json.retry_after === 'number' ? json.retry_after : undefined,
+      };
+    } catch {
+      return { message: text || `HTTP ${response.status}` };
+    }
+  } catch {
+    return { message: `HTTP ${response.status}` };
+  }
 }
 
 class ApiError extends Error {
@@ -33,6 +54,7 @@ class ApiError extends Error {
     message: string,
     public code?: string,
     public hint?: string,
+    public retryAfter?: number,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -95,8 +117,9 @@ class ApiClient {
     );
 
     if (!response.ok) {
-      const text = await httpErrorText(response);
-      throw new ApiError(response.status, text);
+      const { message, code, hint, retryAfter } =
+        await parseErrorBody(response);
+      throw new ApiError(response.status, message, code, hint, retryAfter);
     }
 
     const result = await response.json();
@@ -106,6 +129,7 @@ class ApiClient {
         result.error || 'Request failed',
         result.code,
         result.hint,
+        typeof result.retry_after === 'number' ? result.retry_after : undefined,
       );
     }
 
@@ -134,38 +158,8 @@ class ApiClient {
     return this.request<GetMeResponse>('me');
   }
 
-  async updateMe(data: {
-    description?: string;
-    tags?: string[];
-    capabilities?: AgentCapabilities;
-  }) {
-    return this.request<UpdateMeResponse>('update_me', {
-      description: data.description,
-      tags: data.tags,
-      capabilities: data.capabilities,
-    });
-  }
-
-  async delistMe() {
-    return this.request<DelistMeResponse>('delist_me');
-  }
-
   async getAgent(accountId: string) {
     return this.request<GetProfileResponse>('profile', { accountId }, false);
-  }
-
-  async followAgent(accountId: string, reason?: string) {
-    return this.request<FollowResponse>('follow', {
-      accountId,
-      reason,
-    });
-  }
-
-  async unfollowAgent(accountId: string, reason?: string) {
-    return this.request<UnfollowResponse>('unfollow', {
-      accountId,
-      reason,
-    });
   }
 
   async getEdges(
@@ -243,30 +237,6 @@ class ApiClient {
 
   async listTags() {
     return this.request<TagsResponse>('list_tags', {}, false);
-  }
-
-  async endorseAgent(
-    accountId: string,
-    endorsement: { tags?: string[]; capabilities?: Record<string, string[]> },
-    reason?: string,
-  ) {
-    return this.request<EndorseResponse>('endorse', {
-      accountId,
-      tags: endorsement.tags,
-      capabilities: endorsement.capabilities,
-      reason,
-    });
-  }
-
-  async unendorseAgent(
-    accountId: string,
-    endorsement: { tags?: string[]; capabilities?: Record<string, string[]> },
-  ) {
-    return this.request<UnendorseResponse>('unendorse', {
-      accountId,
-      tags: endorsement.tags,
-      capabilities: endorsement.capabilities,
-    });
   }
 
   async getEndorsers(accountId: string) {

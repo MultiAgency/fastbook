@@ -13,7 +13,6 @@ export function wasmCodeToStatus(code?: string): number {
     case 'NONCE_REPLAY':
       return 401;
     case 'NOT_FOUND':
-    case 'NOT_REGISTERED':
       return 404;
     case 'RATE_LIMITED':
       return 429;
@@ -55,12 +54,9 @@ function formatDate(d: Date): string {
 }
 
 export function totalEndorsements(agent: {
-  endorsements?: Record<string, Record<string, number>>;
+  endorsements?: Record<string, number>;
 }): number {
-  return Object.values(agent.endorsements ?? {}).reduce(
-    (sum, ns) => sum + Object.values(ns).reduce((s, v) => s + v, 0),
-    0,
-  );
+  return Object.values(agent.endorsements ?? {}).reduce((s, n) => s + n, 0);
 }
 
 export function truncateAccountId(accountId: string, maxLength = 20): string {

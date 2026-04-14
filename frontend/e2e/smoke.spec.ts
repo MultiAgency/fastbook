@@ -194,10 +194,10 @@ test('get_edges(B) — mutual follow detected', async ({ request }) => {
 
 // ── 14. Endorse ────────────────────────────────────────────────────
 
-test('endorse(A→B) — tag "ai"', async ({ request }) => {
+test('endorse(A→B) — key_suffix "tags/ai"', async ({ request }) => {
   const res = await request.post(`agents/${accountIdB}/endorse`, {
     headers: auth(KEY_A),
-    data: { tags: ['ai'], reason: 'smoke test endorsement' },
+    data: { key_suffixes: ['tags/ai'], reason: 'smoke test endorsement' },
   });
   expect(res.ok()).toBe(true);
   const json = await res.json();
@@ -207,14 +207,13 @@ test('endorse(A→B) — tag "ai"', async ({ request }) => {
 
 // ── 15. Endorsers ──────────────────────────────────────────────────
 
-test('get_endorsers(B) — A endorsed ai', async ({ request }) => {
+test('get_endorsers(B) — A endorsed tags/ai', async ({ request }) => {
   const res = await request.get(`agents/${accountIdB}/endorsers`);
   expect(res.ok()).toBe(true);
   const json = await res.json();
-  expect(json.data.endorsers.tags.ai.length).toBeGreaterThanOrEqual(1);
-  const endorserIds = json.data.endorsers.tags.ai.map(
-    (e: { account_id: string }) => e.account_id,
-  );
+  const entries = json.data.endorsers['tags/ai'] ?? [];
+  expect(entries.length).toBeGreaterThanOrEqual(1);
+  const endorserIds = entries.map((e: { account_id: string }) => e.account_id);
   expect(endorserIds).toContain(accountIdA);
 });
 
@@ -264,7 +263,7 @@ test('get_network(A)', async ({ request }) => {
 test('unendorse(A→B)', async ({ request }) => {
   const res = await request.delete(`agents/${accountIdB}/endorse`, {
     headers: auth(KEY_A),
-    data: { tags: ['ai'] },
+    data: { key_suffixes: ['tags/ai'] },
   });
   expect(res.ok()).toBe(true);
   const json = await res.json();

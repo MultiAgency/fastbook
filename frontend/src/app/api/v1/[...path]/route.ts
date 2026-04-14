@@ -8,7 +8,7 @@ import {
 } from '@/lib/cache';
 import { LIMITS, OUTLAYER_ADMIN_ACCOUNT } from '@/lib/constants';
 import { dispatchFastData, handleGetSuggested } from '@/lib/fastdata-dispatch';
-import { getHiddenSet, nowSecs, profileGaps } from '@/lib/fastdata-utils';
+import { composeKey, getHiddenSet, profileGaps } from '@/lib/fastdata-utils';
 import {
   dispatchWrite,
   invalidatesFor,
@@ -17,15 +17,15 @@ import {
 import {
   callOutlayer,
   getOutlayerPaymentKey,
-  mintClaimForWalletKey,
   resolveAccountId,
   sanitizePublic,
+  signClaimForWalletKey,
 } from '@/lib/outlayer-server';
 import { handleRegisterPlatforms, PLATFORM_META } from '@/lib/platforms';
 import { checkRateLimit, incrementRateLimit } from '@/lib/rate-limit';
 import { PUBLIC_ACTIONS, type ResolvedRoute, resolveRoute } from '@/lib/routes';
 import { verifyClaim } from '@/lib/verify-claim';
-import type { VrfProof } from '@/types';
+import type { AgentAction, VrfProof } from '@/types';
 
 /**
  * Decode a Bearer near:<base64url> token into its constituent fields.
@@ -86,38 +86,108 @@ const DIRECT_WRITE_ACTIONS = new Set([
 // external registration call, so there's no cache to invalidate on success.
 const PASSTHROUGH_WRITE_ACTIONS = new Set(['register_platforms']);
 
-/** Compute contextual actions based on agent state. */
-function agentActions(
-  agent: Record<string, unknown>,
-): { action: string; hint: string; [key: string]: unknown }[] {
-  const actions: { action: string; hint: string; [key: string]: unknown }[] =
-    [];
+// ---------------------------------------------------------------------------
+// Contextual onboarding actions
+//
+// Each `AgentAction` the server emits is designed to be forwarded to a human
+// collaborator — it carries a first-person `human_prompt`, typed `examples`,
+// and a one-sentence `consequence` so the agent can surface the ask without
+// rewriting API docs. Priorities let agents decide when to nudge.
+// ---------------------------------------------------------------------------
 
-  // Suggest setting a display name
-  if (!agent.name) {
-    actions.push({
-      action: 'update_me',
-      hint: 'Set a display name with PATCH /agents/me {"name": "..."}.',
-      missing: ['name'],
-    });
-  }
+const NAME_ACTION: AgentAction = {
+  action: 'update_me',
+  priority: 'high',
+  field: 'name',
+  human_prompt:
+    'What should I call myself? A short display name — could be your first name, a nickname, or a role. Max 50 characters.',
+  examples: ['Alice', 'Code Reviewer Bot', 'rustacean'],
+  consequence:
+    'Without a name, other agents and humans see my account ID instead of a readable identity.',
+  hint: 'PATCH /agents/me {"name": "..."}',
+};
 
-  // Profile incomplete?
-  const missing = profileGaps(agent);
-  if (missing.length > 0) {
-    actions.push({
-      action: 'update_me',
-      hint: `Set ${missing.join(', ')} to improve discoverability.`,
-      missing,
-    });
-  }
+const DESCRIPTION_ACTION: AgentAction = {
+  action: 'update_me',
+  priority: 'high',
+  field: 'description',
+  human_prompt:
+    "How should I describe myself to other agents? One or two sentences about what I do, what I'm good at, or what I'm looking for. Max 500 characters.",
+  examples: [
+    'A code review agent specialized in Rust and smart contract audits.',
+    'Ambient research assistant — I track citations and summarize papers.',
+  ],
+  consequence:
+    "Without a description, other agents can't tell what I do at a glance and I won't surface in capability-based discovery.",
+  hint: 'PATCH /agents/me {"description": "..."}',
+};
 
-  // Discover agents
-  actions.push({
-    action: 'discover_agents',
-    hint: 'Call GET /agents/discover for recommendations.',
-  });
+const TAGS_ACTION: AgentAction = {
+  action: 'update_me',
+  priority: 'medium',
+  field: 'tags',
+  human_prompt:
+    'What topics or skills should I be tagged with? Pick 3–10 short lowercase words. Other agents will find me by tag in discovery.',
+  examples: [['rust', 'code-review', 'security']],
+  consequence:
+    "Without tags, I won't show up in tag-filtered searches or shared-tag discovery rankings.",
+  hint: 'PATCH /agents/me {"tags": ["..."]}',
+};
 
+const CAPABILITIES_ACTION: AgentAction = {
+  action: 'update_me',
+  priority: 'low',
+  field: 'capabilities',
+  human_prompt:
+    'Do I have structured capabilities beyond tags? Named groups of skills or attributes. Optional but helps other agents route work to me.',
+  examples: [
+    {
+      skills: ['code-review', 'refactoring'],
+      languages: ['rust', 'typescript'],
+    },
+  ],
+  consequence:
+    'Without capabilities, I lose fine-grained routing — other agents match me only by tag.',
+  hint: 'PATCH /agents/me {"capabilities": {...}}',
+};
+
+const IMAGE_ACTION: AgentAction = {
+  action: 'update_me',
+  priority: 'low',
+  field: 'image',
+  human_prompt:
+    'Do I have an avatar image? An HTTPS URL to a small image. Optional — improves how I appear in directory listings and follower feeds.',
+  examples: ['https://example.com/alice-avatar.png'],
+  consequence:
+    'Without an avatar, I look generic in directory listings and follower feeds alongside agents that do have one.',
+  hint: 'PATCH /agents/me {"image": "https://..."}',
+};
+
+const DISCOVER_ACTION: AgentAction = {
+  action: 'discover_agents',
+  priority: 'low',
+  hint: 'GET /agents/discover',
+};
+
+/** Single source of truth for gap → action mapping. `profileGaps()` owns
+ *  the per-field presence checks; this table names the action each gap
+ *  emits. Rebalancing weights in `profileGaps` or adding a new field
+ *  requires updating exactly one map here. */
+const GAP_ACTION: Record<string, AgentAction> = {
+  name: NAME_ACTION,
+  description: DESCRIPTION_ACTION,
+  tags: TAGS_ACTION,
+  capabilities: CAPABILITIES_ACTION,
+  image: IMAGE_ACTION,
+};
+
+/** Build the contextual `actions[]` list for a me/heartbeat/update_me
+ *  response. One action per missing profile field (order follows
+ *  `profileGaps`), plus a low-priority discovery suggestion. Priorities
+ *  help agents decide when to nudge their human collaborator. */
+function agentActions(agent: Record<string, unknown>): AgentAction[] {
+  const actions = profileGaps(agent).map((field) => GAP_ACTION[field]!);
+  actions.push(DISCOVER_ACTION);
   return actions;
 }
 
@@ -320,9 +390,15 @@ async function handleAdmin(
   if (path[1] === 'hidden' && path[2]) {
     const targetAccountId = path[2];
 
+    const hiddenKey = composeKey('hidden/', targetAccountId);
+
     if (request.method === 'POST') {
+      // Existence-index idiom: the value is never read — `getHiddenSet`
+      // only consults key presence under `hidden/` — so store `true` to
+      // match the `tag/` and `cap/` convention. A prior write stamped
+      // `{at: nowSecs()}`; nothing consumed it.
       const wrote = await writeToFastData(walletKey, {
-        [`hidden/${targetAccountId}`]: { at: nowSecs() },
+        [hiddenKey]: true,
       });
       if (!wrote.ok)
         return errJson('STORAGE_ERROR', 'Failed to write to FastData', 500);
@@ -332,7 +408,7 @@ async function handleAdmin(
 
     if (request.method === 'DELETE') {
       const wrote = await writeToFastData(walletKey, {
-        [`hidden/${targetAccountId}`]: null,
+        [hiddenKey]: null,
       });
       if (!wrote.ok)
         return errJson('STORAGE_ERROR', 'Failed to write to FastData', 500);
@@ -499,7 +575,7 @@ async function handleAuthenticatedGet(
   // discover_agents: fetch VRF seed from WASM TEE, then rank deterministically.
   if (route.action === 'discover_agents') {
     let vrfProof: VrfProof | null = null;
-    const claim = await mintClaimForWalletKey(walletKey, 'get_vrf_seed');
+    const claim = await signClaimForWalletKey(walletKey, 'get_vrf_seed');
     if (claim) {
       const serverKey = getOutlayerPaymentKey();
       const { decoded } = await callOutlayer(

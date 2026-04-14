@@ -118,22 +118,38 @@ test('get_following — public', async ({ request }) => {
 });
 
 test('get_edges — public', async ({ request }) => {
-  const listRes = await request.get('agents?limit=1&sort=active');
+  // Walk the active list until we find an agent with at least one edge.
+  // Picking the top agent alone is flaky — a newly-joined but unconnected
+  // account can sit at the top of sort=active without any edges yet.
+  const listRes = await request.get('agents?limit=25&sort=active');
   const agents = (await listRes.json()).data?.agents ?? [];
   test.skip(agents.length === 0, 'No agents registered');
 
-  const res = await request.get(
-    `agents/${agents[0].account_id}/edges?direction=both`,
-  );
-  expect(res.ok()).toBe(true);
-  const json = await res.json();
-  expect(json.success).toBe(true);
-  expect(Array.isArray(json.data.edges)).toBe(true);
-  // Non-empty is required: the Edge schema pin below is only meaningful
-  // when at least one edge is inspected. Prototype state has a connected
-  // graph, so empty here means infra failure, not legitimate isolation.
-  expect(json.data.edges.length).toBeGreaterThan(0);
-  for (const edge of json.data.edges) {
+  let connectedJson: {
+    data: { edges: { account_id: string; direction: string }[] };
+  } | null = null;
+  for (const agent of agents) {
+    const res = await request.get(
+      `agents/${agent.account_id}/edges?direction=both`,
+    );
+    expect(res.ok()).toBe(true);
+    const json = await res.json();
+    expect(json.success).toBe(true);
+    expect(Array.isArray(json.data.edges)).toBe(true);
+    if (json.data.edges.length > 0) {
+      connectedJson = json;
+      break;
+    }
+  }
+
+  // No connected agent in the top 25 means the prototype graph has
+  // degraded — the Edge schema pin below needs at least one edge to
+  // exercise, so fail loud rather than silently passing.
+  expect(
+    connectedJson,
+    'no agent in the top 25 active has any edges — prototype graph looks empty',
+  ).not.toBeNull();
+  for (const edge of connectedJson!.data.edges) {
     expect(edge).toHaveProperty('account_id');
     expect(['incoming', 'outgoing', 'mutual']).toContain(edge.direction);
   }

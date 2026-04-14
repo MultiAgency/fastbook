@@ -65,7 +65,6 @@ export const EXTERNAL_URLS = {
     `https://near.rocks/block/${encodeURIComponent(txHash)}`,
   NEAR_ACCOUNT: (accountId: string) =>
     `https://${encodeURIComponent(accountId)}.near.rocks`,
-  NEAR_BRIDGE: 'https://app.near.org/bridge',
   OUTLAYER_FUND: (accountId: string) =>
     `https://outlayer.fastnear.com/wallet/fund?to=${encodeURIComponent(accountId)}&amount=${FUND_AMOUNT_NEAR}&token=near&msg=Fund+agent+wallet+for+gas`,
 } as const;

@@ -29,15 +29,25 @@ const mockKvListAll = fastdata.kvListAll as jest.MockedFunction<
 const mockKvMultiAgent = fastdata.kvMultiAgent as jest.MockedFunction<
   typeof fastdata.kvMultiAgent
 >;
+const mockKvHistoryFirstByPredecessor =
+  fastdata.kvHistoryFirstByPredecessor as jest.MockedFunction<
+    typeof fastdata.kvHistoryFirstByPredecessor
+  >;
 
 beforeEach(() => {
   jest.resetAllMocks();
   clearCache();
+  mockKvGetAgent.mockResolvedValue(null);
   mockKvGetAll.mockResolvedValue([]);
   mockKvListAll.mockResolvedValue([]);
   mockKvListAgent.mockResolvedValue([]);
   mockKvMultiAgent.mockResolvedValue([]);
 });
+
+// Block timestamp in nanoseconds (the units FastData uses). This fixed value
+// resolves to the same second as the AGENT_ALICE `last_active`, so the
+// trust-boundary override doesn't shift the timestamp in unrelated tests.
+const FIXTURE_BLOCK_TS_NS = 1_700_000_000_000_000_000;
 
 function entry(
   predecessorId: string,
@@ -48,10 +58,15 @@ function entry(
     predecessor_id: predecessorId,
     current_account_id: 'contextual.near',
     block_height: 100,
-    block_timestamp: 1700000000,
+    block_timestamp: FIXTURE_BLOCK_TS_NS,
     key,
     value,
   };
+}
+
+/** Wrap a profile blob in a KvEntry with the standard fixture block time. */
+function profileEntry(accountId: string, value: unknown): fastdata.KvEntry {
+  return entry(accountId, 'profile', value);
 }
 
 function expectData(result: unknown): unknown {
@@ -65,72 +80,116 @@ function expectError(result: unknown): string {
 }
 
 describe('profileCompleteness', () => {
-  it('returns 100 when all fields are complete', () => {
-    const agent = {
-      description: 'A description longer than 10 chars',
-      tags: ['ai'],
-      capabilities: { skills: ['testing'] },
-    };
-    expect(profileGaps(agent)).toEqual([]);
-    expect(profileCompleteness(agent)).toBe(100);
+  // Per-field scoring (see fastdata-utils.ts):
+  //   name         binary, 10 points
+  //   description  binary, 20 points
+  //   image        binary, 20 points
+  //   tags         continuous, 2 points per tag up to 10 (cap 20)
+  //   capabilities continuous, 10 points per leaf pair up to 3 (cap 30)
+  // A score of 100 means "richly populated" (name, description, image, ≥10
+  // tags, ≥3 capability pairs), not just "minimally filled." Fulfilling an
+  // emitted action moves the score by at least 2 (tags) or 10 (caps, name)
+  // or 20 (description, image) — agents use the score as a progress signal
+  // across heartbeats, and a rising score means the human engaged.
+  const COMPLETE_AGENT = {
+    name: 'Alice',
+    description: 'A description longer than 10 chars',
+    image: 'https://example.com/avatar.png',
+    // 10 tags hits the tag cap (10 × 2 = 20).
+    tags: ['t1', 't2', 't3', 't4', 't5', 't6', 't7', 't8', 't9', 't10'],
+    // 3 leaf pairs hits the capability cap (3 × 10 = 30).
+    capabilities: { skills: ['s1', 's2', 's3'] },
+  };
+
+  it('returns 100 when all fields are richly populated', () => {
+    expect(profileGaps(COMPLETE_AGENT)).toEqual([]);
+    expect(profileCompleteness(COMPLETE_AGENT)).toBe(100);
+  });
+
+  it('penalizes missing name', () => {
+    expect(profileGaps({ ...COMPLETE_AGENT, name: null })).toContain('name');
   });
 
   it('penalizes missing description', () => {
-    expect(
-      profileGaps({
-        description: '',
-        tags: ['ai'],
-        capabilities: { skills: ['x'] },
-      }),
-    ).toContain('description');
+    expect(profileGaps({ ...COMPLETE_AGENT, description: '' })).toContain(
+      'description',
+    );
   });
 
   it('penalizes description <= 10 chars', () => {
     expect(
-      profileGaps({
-        description: '0123456789',
-        tags: ['ai'],
-        capabilities: { skills: ['x'] },
-      }),
+      profileGaps({ ...COMPLETE_AGENT, description: '0123456789' }),
     ).toContain('description');
   });
 
   it('accepts description > 10 chars', () => {
     expect(
-      profileGaps({
-        description: '01234567890',
-        tags: ['ai'],
-        capabilities: { skills: ['x'] },
-      }),
+      profileGaps({ ...COMPLETE_AGENT, description: '01234567890' }),
     ).not.toContain('description');
   });
 
   it('penalizes empty tags', () => {
-    expect(
-      profileGaps({
-        description: 'long enough text',
-        tags: [],
-        capabilities: { skills: ['x'] },
-      }),
-    ).toContain('tags');
+    expect(profileGaps({ ...COMPLETE_AGENT, tags: [] })).toContain('tags');
   });
 
   it('penalizes empty capabilities', () => {
-    expect(
-      profileGaps({
-        description: 'long enough text',
-        tags: ['ai'],
-        capabilities: {},
-      }),
-    ).toContain('capabilities');
+    expect(profileGaps({ ...COMPLETE_AGENT, capabilities: {} })).toContain(
+      'capabilities',
+    );
   });
 
-  it('scores AGENT_ALICE at 60 (description 30 + tags 30, capabilities 0)', () => {
+  it('penalizes missing image', () => {
+    expect(profileGaps({ ...COMPLETE_AGENT, image: null })).toContain('image');
+  });
+
+  it('scores tags continuously (2 points per tag, cap 10)', () => {
+    // 1 tag: 10 (name) + 20 (desc) + 20 (image) + 2 (tags) + 30 (caps) = 82
+    expect(profileCompleteness({ ...COMPLETE_AGENT, tags: ['t1'] })).toBe(82);
+    // 5 tags: ... + 10 (tags) ... = 90
+    expect(
+      profileCompleteness({
+        ...COMPLETE_AGENT,
+        tags: ['t1', 't2', 't3', 't4', 't5'],
+      }),
+    ).toBe(90);
+    // 15 tags: capped at 10 → 20 (tags) → 100 total
+    expect(
+      profileCompleteness({
+        ...COMPLETE_AGENT,
+        tags: Array.from({ length: 15 }, (_, i) => `t${i}`),
+      }),
+    ).toBe(100);
+  });
+
+  it('scores capabilities continuously (10 points per leaf pair, cap 3)', () => {
+    // 1 pair: 10 (name) + 20 (desc) + 20 (image) + 20 (tags) + 10 (caps) = 80
+    expect(
+      profileCompleteness({
+        ...COMPLETE_AGENT,
+        capabilities: { skills: ['s1'] },
+      }),
+    ).toBe(80);
+    // 5 pairs: capped at 3 → 30 (caps) → 100 total
+    expect(
+      profileCompleteness({
+        ...COMPLETE_AGENT,
+        capabilities: {
+          skills: ['s1', 's2', 's3'],
+          languages: ['l1', 'l2'],
+        },
+      }),
+    ).toBe(100);
+  });
+
+  it('scores AGENT_ALICE at 24 (description 20 + tags 4; name, capabilities, image missing)', () => {
+    // AGENT_ALICE: name: null (0), description: "Test agent Alice" (20),
+    // image: null (0), tags: ['ai','defi'] → 2 × 2 = 4, capabilities: {} (0).
+    // Total = 20 + 4 = 24.
     expect(
       profileCompleteness(
         AGENT_ALICE as Parameters<typeof profileCompleteness>[0],
       ),
-    ).toBe(60);
+    ).toBe(24);
   });
 });
 
@@ -155,7 +214,7 @@ describe('agentEntries', () => {
       follower_count: 42,
       following_count: 7,
       endorsement_count: 3,
-      endorsements: { skills: { testing: 2 } },
+      endorsements: { 'skills/testing': 2 },
     };
 
     const entries = agentEntries(agent);
@@ -172,8 +231,11 @@ describe('agentEntries', () => {
     expect(stored.description).toBe('Test agent with a sufficient description');
     expect(stored.tags).toEqual(['ai']);
     expect(stored.capabilities).toEqual({ skills: ['testing'] });
-    expect(stored.created_at).toBe(1700000000);
-    expect(stored.last_active).toBe(1700001000);
+    // Time fields are read-derived from FastData block_timestamp and
+    // must not leak into the stored blob — caller-asserted values would
+    // give agents a way to appear eternally fresh in sort=active.
+    expect(stored).not.toHaveProperty('created_at');
+    expect(stored).not.toHaveProperty('last_active');
 
     // Tag and capability index keys are still written alongside profile.
     expect(entries['tag/ai']).toBe(true);
@@ -191,7 +253,7 @@ describe('dispatchFastData', () => {
 
   describe('profile', () => {
     it('reads profile by account_id', async () => {
-      mockKvGetAgent.mockResolvedValue(AGENT_ALICE);
+      mockKvGetAgent.mockResolvedValue(profileEntry('alice.near', AGENT_ALICE));
       const data = expectData(
         await dispatchFastData('profile', { account_id: 'alice.near' }),
       ) as Record<string, unknown>;
@@ -214,7 +276,7 @@ describe('dispatchFastData', () => {
     });
 
     it('omits is_following and my_endorsements when caller is not set', async () => {
-      mockKvGetAgent.mockResolvedValue(AGENT_ALICE);
+      mockKvGetAgent.mockResolvedValue(profileEntry('alice.near', AGENT_ALICE));
       const data = expectData(
         await dispatchFastData('profile', { account_id: 'alice.near' }),
       ) as Record<string, unknown>;
@@ -224,9 +286,12 @@ describe('dispatchFastData', () => {
 
     it('populates is_following=true when caller follows the target', async () => {
       mockKvGetAgent.mockImplementation(async (accountId, key) => {
-        if (accountId === 'alice.near' && key === 'profile') return AGENT_ALICE;
+        if (accountId === 'alice.near' && key === 'profile')
+          return profileEntry('alice.near', AGENT_ALICE);
         if (accountId === 'bob.near' && key === 'graph/follow/alice.near')
-          return { at: 1700000000 };
+          return entry('bob.near', 'graph/follow/alice.near', {
+            at: 1700000000,
+          });
         return null;
       });
       mockKvListAgent.mockResolvedValue([]);
@@ -237,12 +302,13 @@ describe('dispatchFastData', () => {
         }),
       ) as Record<string, unknown>;
       expect(data.is_following).toBe(true);
-      expect(data.my_endorsements).toEqual({});
+      expect(data.my_endorsements).toEqual([]);
     });
 
     it('populates is_following=false when caller does not follow', async () => {
       mockKvGetAgent.mockImplementation(async (accountId, key) => {
-        if (accountId === 'alice.near' && key === 'profile') return AGENT_ALICE;
+        if (accountId === 'alice.near' && key === 'profile')
+          return profileEntry('alice.near', AGENT_ALICE);
         return null;
       });
       mockKvListAgent.mockResolvedValue([]);
@@ -253,12 +319,13 @@ describe('dispatchFastData', () => {
         }),
       ) as Record<string, unknown>;
       expect(data.is_following).toBe(false);
-      expect(data.my_endorsements).toEqual({});
+      expect(data.my_endorsements).toEqual([]);
     });
 
-    it('groups my_endorsements by namespace', async () => {
+    it('returns my_endorsements as a flat list of key_suffixes', async () => {
       mockKvGetAgent.mockImplementation(async (accountId, key) => {
-        if (accountId === 'alice.near' && key === 'profile') return AGENT_ALICE;
+        if (accountId === 'alice.near' && key === 'profile')
+          return profileEntry('alice.near', AGENT_ALICE);
         return null;
       });
       mockKvListAgent.mockImplementation(async (accountId, prefix) => {
@@ -283,17 +350,19 @@ describe('dispatchFastData', () => {
           caller_account_id: 'bob.near',
         }),
       ) as Record<string, unknown>;
-      expect(data.my_endorsements).toEqual({
-        tags: ['ai', 'defi'],
-        skills: ['testing'],
-      });
+      expect(data.my_endorsements).toEqual([
+        'tags/ai',
+        'tags/defi',
+        'skills/testing',
+      ]);
     });
 
     it('returns zero caller context when caller is the target', async () => {
       // Self-follow and self-endorse are blocked at write time, so the
-      // natural KV lookups yield is_following=false and my_endorsements={}.
+      // natural KV lookups yield is_following=false and my_endorsements=[].
       mockKvGetAgent.mockImplementation(async (accountId, key) => {
-        if (accountId === 'alice.near' && key === 'profile') return AGENT_ALICE;
+        if (accountId === 'alice.near' && key === 'profile')
+          return profileEntry('alice.near', AGENT_ALICE);
         return null;
       });
       mockKvListAgent.mockResolvedValue([]);
@@ -304,12 +373,15 @@ describe('dispatchFastData', () => {
         }),
       ) as Record<string, unknown>;
       expect(data.is_following).toBe(false);
-      expect(data.my_endorsements).toEqual({});
+      expect(data.my_endorsements).toEqual([]);
     });
 
     it('falls back to unenriched profile when caller context lookup fails', async () => {
+      // The profile read succeeds; the follow-edge lookup fails. With a
+      // single kvGetAgent, split by key via mockImplementation.
       mockKvGetAgent.mockImplementation(async (accountId, key) => {
-        if (accountId === 'alice.near' && key === 'profile') return AGENT_ALICE;
+        if (accountId === 'alice.near' && key === 'profile')
+          return profileEntry('alice.near', AGENT_ALICE);
         throw new Error('fastdata down');
       });
       mockKvListAgent.mockResolvedValue([]);
@@ -374,7 +446,9 @@ describe('dispatchFastData', () => {
       mockKvGetAll.mockResolvedValue([
         entry('alice.near', 'tag/ai', { score: 10 }),
       ]);
-      mockKvMultiAgent.mockResolvedValue([AGENT_ALICE]);
+      mockKvMultiAgent.mockResolvedValue([
+        profileEntry('alice.near', AGENT_ALICE),
+      ]);
 
       const data = expectData(
         await dispatchFastData('list_agents', { tag: 'ai' }),
@@ -387,7 +461,9 @@ describe('dispatchFastData', () => {
       mockKvGetAll.mockResolvedValue([
         entry('alice.near', 'cap/skills/testing', { score: 10 }),
       ]);
-      mockKvMultiAgent.mockResolvedValue([AGENT_ALICE]);
+      mockKvMultiAgent.mockResolvedValue([
+        profileEntry('alice.near', AGENT_ALICE),
+      ]);
 
       const data = expectData(
         await dispatchFastData('list_agents', { capability: 'skills/testing' }),
@@ -427,12 +503,17 @@ describe('dispatchFastData', () => {
       expect(byId['alice.near'].hidden).toBeUndefined();
     });
 
-    it('sorts by newest (created_at descending)', async () => {
-      const bob = {
-        ...AGENT_ALICE,
-        account_id: 'bob.near',
-        created_at: 1700002000,
-      };
+    it('sorts by newest (block_timestamp of first profile write, descending)', async () => {
+      // sort=newest is driven by `kvHistoryFirstByPredecessor` returning
+      // the FIRST profile write's KvEntry per agent. The block_timestamp
+      // on each entry determines ordering — NOT any caller-asserted
+      // `created_at` field on the profile blob (those are stripped by
+      // applyTrustBoundary). To prove the test isn't accidentally
+      // passing through the bug we just fixed, the blob carries an
+      // ANTI-CORRELATED `created_at` (alice's blob value is bigger than
+      // bob's) but the history entries set bob's first write later than
+      // alice's. The expected order follows the history, not the blob.
+      const bob = { ...AGENT_ALICE, account_id: 'bob.near', created_at: 1 };
       mockKvGetAll.mockReset();
       mockKvGetAll.mockImplementation(async (key: string) => {
         if (key === 'profile')
@@ -442,29 +523,81 @@ describe('dispatchFastData', () => {
           ];
         return [];
       });
+      mockKvHistoryFirstByPredecessor.mockResolvedValue(
+        new Map([
+          [
+            'alice.near',
+            {
+              predecessor_id: 'alice.near',
+              current_account_id: 'contextual.near',
+              block_height: 100,
+              block_timestamp: 1_700_000_000_000_000_000,
+              key: 'profile',
+              value: {},
+            },
+          ],
+          [
+            'bob.near',
+            {
+              predecessor_id: 'bob.near',
+              current_account_id: 'contextual.near',
+              block_height: 200,
+              block_timestamp: 1_700_002_000_000_000_000,
+              key: 'profile',
+              value: {},
+            },
+          ],
+        ]),
+      );
 
       const data = expectData(
         await dispatchFastData('list_agents', { sort: 'newest', limit: 25 }),
       ) as Record<string, unknown>;
       const agents = data.agents as Record<string, unknown>[];
       expect(agents).toHaveLength(2);
-      // Bob (created_at: 1700002000) is newer than Alice (1700000000)
+      // Bob's first write block_timestamp is later than Alice's, so bob
+      // is newer — even though alice's BLOB has a larger caller-asserted
+      // created_at. The trust boundary strips the blob value; the join
+      // from kvHistoryFirstByPredecessor sets the block-derived value.
       expect(agents[0].account_id).toBe('bob.near');
       expect(agents[1].account_id).toBe('alice.near');
     });
 
-    it('sorts by active (last_active descending)', async () => {
+    it('sorts by active (block_timestamp descending)', async () => {
+      // `last_active` is overridden by the trust boundary with each entry's
+      // block_timestamp, so the sort order is driven by the FastData-indexed
+      // time of the profile write — not by whatever the caller claims in
+      // the value blob. Stored `last_active` values below are intentionally
+      // reversed from the block_timestamp ordering to verify the override.
       const bob = {
         ...AGENT_ALICE,
         account_id: 'bob.near',
-        last_active: 1700005000,
+        last_active: 1700001000, // lower than Alice's in the stored value
+      };
+      const alice = {
+        ...AGENT_ALICE,
+        last_active: 1700005000, // higher, but her block_timestamp is older
       };
       mockKvGetAll.mockReset();
       mockKvGetAll.mockImplementation(async (key: string) => {
         if (key === 'profile')
           return [
-            entry('alice.near', 'profile', AGENT_ALICE),
-            entry('bob.near', 'profile', bob),
+            {
+              predecessor_id: 'alice.near',
+              current_account_id: 'contextual.near',
+              block_height: 100,
+              block_timestamp: 1_700_001_000_000_000_000,
+              key: 'profile',
+              value: alice,
+            },
+            {
+              predecessor_id: 'bob.near',
+              current_account_id: 'contextual.near',
+              block_height: 101,
+              block_timestamp: 1_700_005_000_000_000_000,
+              key: 'profile',
+              value: bob,
+            },
           ];
         return [];
       });
@@ -474,7 +607,9 @@ describe('dispatchFastData', () => {
       ) as Record<string, unknown>;
       const agents = data.agents as Record<string, unknown>[];
       expect(agents).toHaveLength(2);
-      // Bob (last_active: 1700005000) is more recent than Alice (1700001000)
+      // Bob's block_timestamp (1_700_005_000 s) is newer than Alice's
+      // (1_700_001_000 s), so Bob ranks first — independent of the
+      // values in the stored profile blobs.
       expect(agents[0].account_id).toBe('bob.near');
       expect(agents[1].account_id).toBe('alice.near');
     });
@@ -487,8 +622,11 @@ describe('dispatchFastData', () => {
         entry('carol.near', 'graph/follow/alice.near', { at: 1700000001 }),
       ]);
       mockKvMultiAgent.mockResolvedValue([
-        { ...AGENT_ALICE, account_id: 'bob.near' },
-        { ...AGENT_ALICE, account_id: 'carol.near' },
+        profileEntry('bob.near', { ...AGENT_ALICE, account_id: 'bob.near' }),
+        profileEntry('carol.near', {
+          ...AGENT_ALICE,
+          account_id: 'carol.near',
+        }),
       ]);
 
       const data = expectData(
@@ -505,7 +643,7 @@ describe('dispatchFastData', () => {
 
   describe('me', () => {
     it('returns profile with computed completeness', async () => {
-      mockKvGetAgent.mockResolvedValue(AGENT_ALICE);
+      mockKvGetAgent.mockResolvedValue(profileEntry('alice.near', AGENT_ALICE));
 
       const data = expectData(
         await dispatchFastData('me', { account_id: 'alice.near' }),
@@ -513,7 +651,7 @@ describe('dispatchFastData', () => {
       expect((data.agent as Record<string, unknown>).account_id).toBe(
         'alice.near',
       );
-      expect(data.profile_completeness).toBe(60); // description >10 chars (30) + tags present (30), capabilities empty (0)
+      expect(data.profile_completeness).toBe(24); // description (20) + tags 2*2 (4); name, capabilities, image missing
     });
   });
 
@@ -524,7 +662,7 @@ describe('dispatchFastData', () => {
         account_id: 'bob.near',
         tags: ['ai'],
       };
-      mockKvGetAgent.mockResolvedValue(AGENT_ALICE);
+      mockKvGetAgent.mockResolvedValue(profileEntry('alice.near', AGENT_ALICE));
       mockKvListAgent.mockResolvedValue([]); // no follows yet
       mockKvGetAll.mockResolvedValue([
         entry('alice.near', 'profile', AGENT_ALICE),

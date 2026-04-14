@@ -10,14 +10,12 @@ describe('useAgentStore', () => {
       useAgentStore.getState().completeStep1({
         api_key: 'wk_new_key',
         near_account_id: 'user.near',
-        handoff_url: 'https://handoff.url',
         trial: { calls_remaining: 100 },
       });
 
       const state = useAgentStore.getState();
       expect(state.apiKey).toBe('wk_new_key');
       expect(state.accountId).toBe('user.near');
-      expect(state.handoffUrl).toBe('https://handoff.url');
       expect(state.currentStep).toBe(2);
       expect(state.stepStatus[1]).toBe('success');
     });
@@ -28,7 +26,6 @@ describe('useAgentStore', () => {
       useAgentStore.getState().completeStep1({
         api_key: 'wk_secret',
         near_account_id: 'user.near',
-        handoff_url: 'https://handoff.url',
         trial: { calls_remaining: 100 },
       });
       useAgentStore.getState().completeStep2();
@@ -45,7 +42,6 @@ describe('useAgentStore', () => {
       useAgentStore.getState().completeStep1({
         api_key: 'wk_key',
         near_account_id: 'user.near',
-        handoff_url: 'https://handoff.url',
         trial: { calls_remaining: 0 },
       });
 
@@ -81,7 +77,6 @@ describe('useAgentStore', () => {
       completeStep1({
         api_key: 'wk_key',
         near_account_id: 'user.near',
-        handoff_url: 'https://url',
         trial: { calls_remaining: 100 },
       });
       expect(useAgentStore.getState().stepStatus[1]).toBe('success');

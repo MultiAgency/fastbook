@@ -10,7 +10,7 @@ jest.mock('@/lib/outlayer-server', () => ({
   getOutlayerPaymentKey: () => 'pk_test',
   sanitizePublic: jest.requireActual('@/lib/outlayer-server').sanitizePublic,
   callOutlayer: (...args: unknown[]) => mockCallOutlayer(...args),
-  mintClaimForWalletKey: jest.fn().mockResolvedValue(null),
+  signClaimForWalletKey: jest.fn().mockResolvedValue(null),
   resolveAccountId: jest.fn().mockResolvedValue('test.near'),
   signMessage: (...args: unknown[]) => mockSignMessage(...args),
 }));
@@ -105,8 +105,18 @@ beforeEach(() => {
   });
   mockSignMessage.mockResolvedValue(null);
   // Authenticated GETs resolve caller account via resolveAccountId.
-  // For tests that use wk_ keys, mock kvGetAgent to return a profile.
-  mockKvGetAgent.mockResolvedValue('test_agent');
+  // kvGetAgent now returns a KvEntry (post trust-boundary unification) —
+  // any truthy value would pass existence checks, but keep the mock shape
+  // honest so future tests that read `.value` or `.predecessor_id` don't
+  // silently get undefined.
+  mockKvGetAgent.mockResolvedValue({
+    predecessor_id: 'test.near',
+    current_account_id: 'contextual.near',
+    block_height: 1,
+    block_timestamp: 1_700_000_000_000_000_000,
+    key: 'profile',
+    value: { account_id: 'test.near' },
+  });
   // Rate limit defaults to pass-through; individual tests can override
   // via `mockReturnValueOnce` to simulate a 429.
   mockCheckRateLimit.mockReturnValue({ ok: true });
@@ -777,9 +787,7 @@ describe('admin /admin/hidden', () => {
       expect(mockWriteToFastData).toHaveBeenCalledWith(
         'wk_admin_test',
         expect.objectContaining({
-          'hidden/spam.near': expect.objectContaining({
-            at: expect.any(Number),
-          }),
+          'hidden/spam.near': true,
         }),
       );
     });

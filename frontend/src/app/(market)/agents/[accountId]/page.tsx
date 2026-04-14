@@ -84,7 +84,10 @@ export default function AgentProfilePage() {
     },
   );
 
-  const [endorserKey, setEndorserKey] = useState<string | null>(null);
+  const [endorserKey, setEndorserKey] = useState<{
+    suffix: string;
+    label: string;
+  } | null>(null);
   const [showList, setShowList] = useState<'followers' | 'following' | null>(
     null,
   );
@@ -284,13 +287,16 @@ export default function AgentProfilePage() {
         {agent.tags && agent.tags.length > 0 && (
           <div className="flex flex-wrap gap-1.5 mb-4">
             {agent.tags.map((tag) => {
-              const count = agent.endorsements?.tags?.[tag] ?? 0;
-              const isSelected = endorserKey === tag;
+              const suffix = `tags/${tag}`;
+              const count = agent.endorsements?.[suffix] ?? 0;
+              const isSelected = endorserKey?.suffix === suffix;
               return (
                 <button
                   key={tag}
                   type="button"
-                  onClick={() => setEndorserKey(isSelected ? null : tag)}
+                  onClick={() =>
+                    setEndorserKey(isSelected ? null : { suffix, label: tag })
+                  }
                   className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full transition-colors ${
                     isSelected
                       ? 'bg-primary text-primary-foreground'
@@ -316,7 +322,8 @@ export default function AgentProfilePage() {
         {endorserKey && (
           <EndorsersPanel
             accountId={agent.account_id}
-            selectedKey={endorserKey}
+            keySuffix={endorserKey.suffix}
+            label={endorserKey.label}
             onClose={() => setEndorserKey(null)}
           />
         )}
@@ -344,15 +351,16 @@ export default function AgentProfilePage() {
                     );
                   }
                   return items.map((v) => {
-                    const capKey = `${ns}:${v}`;
-                    const count = agent.endorsements?.[ns]?.[v] ?? 0;
-                    const isSelected = endorserKey === capKey;
+                    const suffix = `${ns}/${v}`;
+                    const label = `${ns}:${v}`;
+                    const count = agent.endorsements?.[suffix] ?? 0;
+                    const isSelected = endorserKey?.suffix === suffix;
                     return (
                       <button
-                        key={capKey}
+                        key={suffix}
                         type="button"
                         onClick={() =>
-                          setEndorserKey(isSelected ? null : capKey)
+                          setEndorserKey(isSelected ? null : { suffix, label })
                         }
                         className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full transition-colors ${
                           isSelected
@@ -378,9 +386,11 @@ export default function AgentProfilePage() {
             </div>
           )}
 
-        <p className="text-xs text-muted-foreground">
-          Registered {new Date(toMs(agent.created_at)).toLocaleDateString()}
-        </p>
+        {agent.created_at !== undefined && (
+          <p className="text-xs text-muted-foreground">
+            Registered {new Date(toMs(agent.created_at)).toLocaleDateString()}
+          </p>
+        )}
       </GlowCard>
 
       <GlowCard className="p-6 mb-6">

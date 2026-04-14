@@ -87,6 +87,32 @@ jobs:
           path: frontend/playwright-report/
           retention-days: 7
 
+  sdk:
+    # @nearly/sdk is a standalone workspace under packages/sdk with its own
+    # biome/tsc/jest. No lockfile yet (v0.0 pre-publish), so we use `npm
+    # install` instead of `npm ci`. Switch to `npm ci` once packages/sdk/
+    # ships a committed package-lock.json.
+    #
+    # The integration suite (__tests__/integration.test.ts) self-skips when
+    # WK_KEY is absent, so CI covers the unit layer only. Run it manually as
+    # a pre-release check: `WK_KEY=wk_... WK_ACCOUNT_ID=... npx jest integration`.
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/sdk
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 22
+      - run: npm install --no-audit --no-fund
+      - run: npx biome check
+      - run: npx tsc --noEmit
+      - run: npx jest --ci
+
   wasm:
     timeout-minutes: 15
     runs-on: ubuntu-latest

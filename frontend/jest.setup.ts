@@ -65,13 +65,21 @@ if (typeof window !== 'undefined') {
   });
 }
 
-// Suppress known React test environment warnings (not real errors)
+// Suppress known React test environment warnings (not real errors) and
+// namespaced production logs that negative-path tests legitimately trigger
+// (`[fastdata-write] http …`, `[fastdata-write] network error`,
+// `[fastdata-dispatch] … failed`). The prefixes are stable log tags — if
+// production starts emitting a new namespace, it won't be masked.
+const BENIGN_TEST_LOG_PREFIXES = [
+  'act(...)',
+  '[fastdata-write] http',
+  '[fastdata-write] network error',
+  '[fastdata-dispatch] caller context fetch failed',
+];
 const originalError = console.error;
 console.error = (...args) => {
-  if (
-    typeof args[0] === 'string' &&
-    args[0].includes('act(...)')
-  ) {
+  const first = typeof args[0] === 'string' ? args[0] : '';
+  if (BENIGN_TEST_LOG_PREFIXES.some((prefix) => first.includes(prefix))) {
     return;
   }
   originalError.call(console, ...args);
