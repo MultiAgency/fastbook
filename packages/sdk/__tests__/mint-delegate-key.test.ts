@@ -4,7 +4,11 @@ import { bytesToHex, hmacSha256, sha256 } from '../src/hashes';
 import { mintDelegateKey } from '../src/wallet';
 import { jsonResponse, scripted } from './fixtures/http';
 
-function freshKey(): { privateKey: string; seed32: Uint8Array; publicKey: Uint8Array } {
+function freshKey(): {
+  privateKey: string;
+  seed32: Uint8Array;
+  publicKey: Uint8Array;
+} {
   const seed32 = new Uint8Array(32);
   for (let i = 0; i < 32; i++) seed32[i] = (i * 17 + 2) & 0xff;
   const kp = nacl.sign.keyPair.fromSeed(seed32);
@@ -167,9 +171,7 @@ describe('mintDelegateKey', () => {
 
   it('throws authError on 401', async () => {
     const { privateKey } = freshKey();
-    const { fetch } = scripted(
-      () => new Response('bad sig', { status: 401 }),
-    );
+    const { fetch } = scripted(() => new Response('bad sig', { status: 401 }));
     await expect(
       mintDelegateKey({
         outlayerUrl: 'https://outlayer.example',
@@ -204,22 +206,19 @@ describe('mintDelegateKey', () => {
   it.each([
     ['wallet_id', { near_account_id: 'x' }],
     ['near_account_id', { wallet_id: 'x' }],
-  ])(
-    'throws protocolError when response is missing %s',
-    async (_label, body) => {
-      const { privateKey } = freshKey();
-      const { fetch } = scripted(() => jsonResponse(body));
-      await expect(
-        mintDelegateKey({
-          outlayerUrl: 'https://outlayer.example',
-          accountId: 'alice.near',
-          seed: 's',
-          privateKey,
-          fetch,
-        }),
-      ).rejects.toMatchObject({ code: 'PROTOCOL' });
-    },
-  );
+  ])('throws protocolError when response is missing %s', async (_label, body) => {
+    const { privateKey } = freshKey();
+    const { fetch } = scripted(() => jsonResponse(body));
+    await expect(
+      mintDelegateKey({
+        outlayerUrl: 'https://outlayer.example',
+        accountId: 'alice.near',
+        seed: 's',
+        privateKey,
+        fetch,
+      }),
+    ).rejects.toMatchObject({ code: 'PROTOCOL' });
+  });
 
   it('does not echo the private key body into any error', async () => {
     const { privateKey } = freshKey();
@@ -249,9 +248,7 @@ describe('mintDelegateKey', () => {
         fail('should have thrown');
       } catch (e) {
         const msg = (e as Error).message;
-        const shape = JSON.stringify(
-          (e as { shape?: unknown }).shape ?? {},
-        );
+        const shape = JSON.stringify((e as { shape?: unknown }).shape ?? {});
         expect(msg).not.toContain(privBody);
         expect(shape).not.toContain(privBody);
       }

@@ -1,9 +1,6 @@
-import { createPrivateKey, sign as cryptoSign } from 'node:crypto';
 import { NextResponse } from 'next/server';
 import {
   LIMITS,
-  OUTLAYER_ADMIN_ACCOUNT,
-  OUTLAYER_ADMIN_NEAR_KEY,
   OUTLAYER_API_URL,
   OUTLAYER_PROJECT_NAME,
   OUTLAYER_PROJECT_OWNER,
@@ -107,136 +104,35 @@ export function getOutlayerPaymentKey(): string {
   return key;
 }
 
-// ---------------------------------------------------------------------------
-// Admin near: token helpers — sign admin writes as hack.near via OutLayer's
-// deterministic wallet. The server holds hack.near's NEAR ed25519 key as
-// OUTLAYER_ADMIN_NEAR_KEY, builds a fresh near:<base64url> token per write
-// (±30s window), and submits via writeToFastData the same way wk_ auth does.
-// ---------------------------------------------------------------------------
-
-const B58_ALPHA = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
-
-function b58decode(str: string): Uint8Array {
-  const bytes = [0];
-  for (const ch of str) {
-    const val = B58_ALPHA.indexOf(ch);
-    if (val < 0) throw new Error(`invalid base58 char: ${ch}`);
-    let carry = val;
-    for (let i = 0; i < bytes.length; i++) {
-      carry += bytes[i] * 58;
-      bytes[i] = carry & 0xff;
-      carry >>= 8;
-    }
-    while (carry > 0) {
-      bytes.push(carry & 0xff);
-      carry >>= 8;
+// wk_-keyed cache only; near: tokens are single-use and bypass.
+export class BoundedAccountCache {
+  private readonly max: number;
+  private readonly store = new Map<string, string>();
+  constructor(max: number) {
+    this.max = max;
+  }
+  get(key: string): string | undefined {
+    const v = this.store.get(key);
+    if (v === undefined) return undefined;
+    this.store.delete(key);
+    this.store.set(key, v);
+    return v;
+  }
+  set(key: string, value: string): void {
+    if (this.store.has(key)) this.store.delete(key);
+    this.store.set(key, value);
+    if (this.store.size > this.max) {
+      const oldest = this.store.keys().next().value;
+      if (oldest !== undefined) this.store.delete(oldest);
     }
   }
-  for (const ch of str) {
-    if (ch === '1') bytes.push(0);
-    else break;
+  get size(): number {
+    return this.store.size;
   }
-  return Uint8Array.from(bytes.reverse());
 }
 
-function b58encode(bytes: Uint8Array): string {
-  const digits = [0];
-  for (const b of bytes) {
-    let carry = b;
-    for (let i = 0; i < digits.length; i++) {
-      carry += digits[i] << 8;
-      digits[i] = carry % 58;
-      carry = (carry / 58) | 0;
-    }
-    while (carry > 0) {
-      digits.push(carry % 58);
-      carry = (carry / 58) | 0;
-    }
-  }
-  let out = '';
-  for (let i = digits.length - 1; i >= 0; i--) {
-    out += B58_ALPHA[digits[i]];
-  }
-  for (const b of bytes) {
-    if (b === 0) out = `1${out}`;
-    else break;
-  }
-  return out || '1';
-}
-
-const ADMIN_SEED = 'admin';
-const DER_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
-
-let adminKeyParsed: {
-  privateKey: ReturnType<typeof createPrivateKey>;
-  pubkeyB58: string;
-  accountId: string;
-} | null = null;
-
-function parseAdminNearKey(): typeof adminKeyParsed {
-  if (adminKeyParsed) return adminKeyParsed;
-  if (!OUTLAYER_ADMIN_NEAR_KEY) return null;
-  const b58 = OUTLAYER_ADMIN_NEAR_KEY.replace(/^ed25519:/, '');
-  const expanded = b58decode(b58);
-  if (expanded.length !== 64) return null;
-  const seed32 = expanded.slice(0, 32);
-  const pub32 = expanded.slice(32);
-  const privateKey = createPrivateKey({
-    key: Buffer.concat([DER_PREFIX, seed32]),
-    format: 'der',
-    type: 'pkcs8',
-  });
-  const pubkeyB58 = `ed25519:${b58encode(pub32)}`;
-  const accountId = process.env.OUTLAYER_ADMIN_ACCOUNT || '';
-  adminKeyParsed = { privateKey, pubkeyB58, accountId };
-  return adminKeyParsed;
-}
-
-export function buildAdminNearToken(): string | null {
-  const parsed = parseAdminNearKey();
-  if (!parsed) return null;
-  const ts = Math.floor(Date.now() / 1000);
-  const message = `auth:${ADMIN_SEED}:${ts}`;
-  const sigBytes = cryptoSign(null, Buffer.from(message), parsed.privateKey);
-  const signatureB58 = b58encode(new Uint8Array(sigBytes));
-  const payload = JSON.stringify({
-    account_id: parsed.accountId,
-    seed: ADMIN_SEED,
-    pubkey: parsed.pubkeyB58,
-    timestamp: ts,
-    signature: signatureB58,
-  });
-  return `near:${Buffer.from(payload).toString('base64url')}`;
-}
-
-let adminWriterAccountCached: string | null = null;
-
-export async function resolveAdminWriterAccount(): Promise<string | null> {
-  if (adminWriterAccountCached) return adminWriterAccountCached;
-  const token = buildAdminNearToken();
-  if (token) {
-    const fromBalance = await accountIdFromBalance(token);
-    if (fromBalance) {
-      adminWriterAccountCached = fromBalance;
-      return fromBalance;
-    }
-  }
-  // Fallback: OUTLAYER_ADMIN_ACCOUNT is the custody wallet's account_id
-  // (what /wallet/v1/balance returns for the admin wk_). Works without
-  // OUTLAYER_ADMIN_NEAR_KEY — the env var is set to the same value the
-  // near: token path would resolve to.
-  if (OUTLAYER_ADMIN_ACCOUNT) {
-    adminWriterAccountCached = OUTLAYER_ADMIN_ACCOUNT;
-    return OUTLAYER_ADMIN_ACCOUNT;
-  }
-  return null;
-}
-
-// Claims can't be cached — NEP-413 nonces are single-use. Account IDs can —
-// they're deterministic per wallet key, so accountCache holds them for the
-// life of the process (cold starts clear it).
-
-const accountCache = new Map<string, string>();
+const ACCOUNT_CACHE_MAX = 10_000;
+const accountCache = new BoundedAccountCache(ACCOUNT_CACHE_MAX);
 const SIGN_TIMEOUT_MS = 5_000;
 const CLAIM_DOMAIN = 'nearly.social';
 const CLAIM_VERSION = 1;
@@ -319,7 +215,9 @@ export async function signMessage(
  * the caller can fall back to sign-message instead of surfacing a
  * transient outage as a hard identity failure.
  */
-async function accountIdFromBalance(walletKey: string): Promise<string | null> {
+export async function accountIdFromBalance(
+  walletKey: string,
+): Promise<string | null> {
   let resp: Response;
   try {
     resp = await fetchWithTimeout(
@@ -331,13 +229,17 @@ async function accountIdFromBalance(walletKey: string): Promise<string | null> {
     return null;
   }
   if (!resp.ok) return null;
-  const body = (await resp.json().catch((e: unknown) => {
+  const body: unknown = await resp.json().catch((e: unknown) => {
     console.error('[resolveAccountIdFromBalance] json parse failed', e);
     return null;
-  })) as {
-    account_id?: unknown;
-  } | null;
-  if (body && typeof body.account_id === 'string' && body.account_id) {
+  });
+  if (
+    body &&
+    typeof body === 'object' &&
+    'account_id' in body &&
+    typeof body.account_id === 'string' &&
+    body.account_id
+  ) {
     return body.account_id;
   }
   return null;
@@ -346,13 +248,12 @@ async function accountIdFromBalance(walletKey: string): Promise<string | null> {
 export async function resolveAccountId(
   walletKey: string,
 ): Promise<string | null> {
-  const cached = accountCache.get(walletKey);
-  if (cached) return cached;
+  const isWk = walletKey.startsWith('wk_');
 
-  // wk_ only: balance is cheaper than sign-message. near: tokens can
-  // reach here via register_platforms passthrough; sign-message accepts
-  // them (CLAUDE.md Auth), balance's near: support is undocumented.
-  if (walletKey.startsWith('wk_')) {
+  if (isWk) {
+    const cached = accountCache.get(walletKey);
+    if (cached) return cached;
+
     const fromBalance = await accountIdFromBalance(walletKey);
     if (fromBalance) {
       accountCache.set(walletKey, fromBalance);
@@ -364,7 +265,7 @@ export async function resolveAccountId(
   const result = await signMessage(walletKey, msg);
   if (!result) return null;
 
-  accountCache.set(walletKey, result.account_id);
+  if (isWk) accountCache.set(walletKey, result.account_id);
   return result.account_id;
 }
 

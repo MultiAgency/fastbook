@@ -3,36 +3,14 @@ import nacl from 'tweetnacl';
 import { validationError } from './errors';
 
 export interface ParsedEd25519Key {
-  /**
-   * The 64-byte tweetnacl "secret key" — seed concatenated with the
-   * derived public key. Pass directly to `signRegisterMessage`; do not
-   * log or persist.
-   */
+  // 64-byte tweetnacl secretKey (seed || publicKey). Do not log or persist.
   secretKey: Uint8Array;
-  /**
-   * The 32-byte derived public key, suitable for `encodeEd25519PublicKey`.
-   */
   publicKey: Uint8Array;
 }
 
 const ED25519_PREFIX = 'ed25519:';
 
-/**
- * Parse a NEAR-formatted ed25519 secret key string into raw bytes.
- *
- * Accepts two on-disk shapes, both NEAR-common:
- *   `ed25519:<base58-32-bytes>` — raw seed only.
- *   `ed25519:<base58-64-bytes>` — concat of `seed || publicKey`, NEAR's
- *     default storage format for a full keypair.
- *
- * In the 64-byte case the stored public key is validated against the one
- * derived from the seed; a mismatch throws rather than silently trusting
- * the stored half, which would let a corrupted key produce valid-looking
- * registrations that OutLayer would then reject.
- *
- * Errors surface as typed `NearlyError(VALIDATION_ERROR)` with `field:
- * 'privateKey'` and a `reason` that never echoes the raw key bytes.
- */
+// Throws typed validationError(field='privateKey'); reason never echoes the raw key bytes.
 export function parseEd25519SecretKey(str: string): ParsedEd25519Key {
   if (typeof str !== 'string' || !str) {
     throw validationError('privateKey', 'expected ed25519:<base58> string');
@@ -52,9 +30,7 @@ export function parseEd25519SecretKey(str: string): ParsedEd25519Key {
     throw validationError('privateKey', 'invalid base58 encoding');
   }
 
-  // tweetnacl's "secret key" is the 64-byte concat of seed + public. We
-  // accept either shape on input and normalize to the 64-byte form that
-  // `nacl.sign.detached` takes.
+  // tweetnacl's "secret key" is the 64-byte concat of seed + public; accept either shape and normalize.
   if (decoded.length === 32) {
     const kp = nacl.sign.keyPair.fromSeed(decoded);
     return { secretKey: kp.secretKey, publicKey: kp.publicKey };
@@ -77,15 +53,7 @@ export function parseEd25519SecretKey(str: string): ParsedEd25519Key {
   );
 }
 
-/**
- * Raw ed25519 sign over `message`'s UTF-8 bytes. Returns a 64-byte
- * signature. This is NOT NEP-413 — the OutLayer deterministic-register
- * endpoint wants the raw signature, per agent-custody SKILL.md
- * §"Signature format (IMPORTANT)".
- *
- * `secretKey` must be tweetnacl's 64-byte form (seed || publicKey), as
- * returned by `parseEd25519SecretKey`.
- */
+// Raw ed25519, not NEP-413 — OutLayer's deterministic /register wants the raw signature.
 export function signRegisterMessage(
   message: string,
   secretKey: Uint8Array,
@@ -93,18 +61,10 @@ export function signRegisterMessage(
   return nacl.sign.detached(new TextEncoder().encode(message), secretKey);
 }
 
-/**
- * Encode a 32-byte ed25519 public key as `ed25519:<base58>`. Inverse of
- * the public-key half of `parseEd25519SecretKey`.
- */
 export function encodeEd25519PublicKey(publicKey: Uint8Array): string {
   return `${ED25519_PREFIX}${bs58.encode(publicKey)}`;
 }
 
-/**
- * Encode a 64-byte signature as plain base58 with no prefix — the wire
- * format OutLayer's deterministic `/register` expects.
- */
 export function encodeSignatureBase58(signature: Uint8Array): string {
   return bs58.encode(signature);
 }

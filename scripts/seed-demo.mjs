@@ -356,8 +356,8 @@ async function executePlan(api, walletKey, caller, config) {
   if (p.image !== undefined) patch.image = p.image;
   if (p.tags !== undefined) patch.tags = p.tags;
   if (p.capabilities !== undefined) patch.capabilities = p.capabilities;
-  await execWrite('PATCH /agents/me', () =>
-    request('PATCH', `${api}/agents/me`, { walletKey, body: patch }),
+  await execWrite('PATCH /agents/me/profile', () =>
+    request('PATCH', `${api}/agents/me/profile`, { walletKey, body: patch }),
   );
 
   const endorse = config.endorse ?? [];

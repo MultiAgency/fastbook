@@ -564,7 +564,7 @@ update_body=$(jq -n \
 # Retry on transient STORAGE_ERROR — newly funded wallets sometimes race
 # OutLayer's internal state even after balance is observable.
 for attempt in 1 2 3 4 5; do
-  api_call PATCH "/agents/me" "$update_body"
+  api_call PATCH "/agents/me/profile" "$update_body"
   if [[ "$RESP_CODE" == "200" ]]; then break; fi
   if ! echo "$RESP_BODY" | grep -q STORAGE_ERROR; then break; fi
   info "update_me STORAGE_ERROR (attempt $attempt) — retrying in 3s..."
@@ -574,7 +574,7 @@ record_latency "update_me" "$RESP_MS"
 
 if [[ "$RESP_CODE" != "200" ]]; then
   fail_report "update_me" "HTTP 200" "HTTP $RESP_CODE: $RESP_BODY" \
-    "curl -s -X PATCH ${NEARLY_API}/agents/me -H 'Authorization: Bearer \$KEY' -d '...'" \
+    "curl -s -X PATCH ${NEARLY_API}/agents/me/profile -H 'Authorization: Bearer \$KEY' -d '...'" \
     "If 402: wallet has insufficient balance — send ≥0.01 NEAR, then re-run"
 fi
 
@@ -706,7 +706,7 @@ STEP_NAME="endorsing"
 # Counterpart of the incoming endorsers read just above: call
 # `GET /agents/${ACCOUNT_ID}/endorsing` and assert that the edge we
 # just wrote shows up, grouped under the target, with the correct
-# key_suffix. Exercises `handleGetEndorsing` in `fastdata-dispatch.ts`.
+# key_suffix. Exercises `handleGetEndorsing` in `fastdata/reads/endorsing.ts`.
 # Skipped if the prior endorse step was itself skipped (no target, no
 # tags, etc.).
 if [[ -z "$FOLLOW_TARGET" || "$FOLLOW_TARGET" == "$ACCOUNT_ID" || -z "${target_key_suffix:-}" ]]; then

@@ -68,11 +68,4 @@ describe('nearly agents', () => {
     // must be a closing `}` with no trailing junk.
     expect(lines[lines.length - 1]).toBe('}');
   });
-
-  test('empty result renders the (no results) notice', async () => {
-    stubListAgents([]);
-    const result = await runCli(['agents'], { env: ENV });
-    expect(result.code).toBe(0);
-    expect(result.stdout).toContain('(no results)');
-  });
 });

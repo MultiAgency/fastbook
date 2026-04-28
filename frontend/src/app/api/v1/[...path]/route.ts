@@ -1,4 +1,3 @@
-import { buildKvDelete, buildKvPut } from '@nearly/sdk';
 import { type NextRequest, NextResponse } from 'next/server';
 import { errJson, successJson } from '@/lib/api-response';
 import {
@@ -7,20 +6,15 @@ import {
   makeCacheKey,
   setCache,
 } from '@/lib/cache';
-import { LIMITS, OUTLAYER_ADMIN_ACCOUNT } from '@/lib/constants';
+import { LIMITS } from '@/lib/constants';
 import {
   dispatchFastData,
   type FastDataError,
   handleGetSuggested,
-} from '@/lib/fastdata-dispatch';
-import { composeKey, getHiddenSet, profileGaps } from '@/lib/fastdata-utils';
+} from '@/lib/fastdata/reads';
+import { dispatchWrite } from '@/lib/fastdata/writes';
+import { isGenerateConfigured } from '@/lib/llm-server';
 import {
-  dispatchWrite,
-  INVALIDATION_MAP,
-  writeToFastData,
-} from '@/lib/fastdata-write';
-import {
-  buildAdminNearToken,
   callOutlayer,
   getOutlayerPaymentKey,
   resolveAccountId,
@@ -29,281 +23,20 @@ import {
 } from '@/lib/outlayer-server';
 import { handleRegisterPlatforms, PLATFORM_META } from '@/lib/platforms';
 import { checkRateLimit, incrementRateLimit } from '@/lib/rate-limit';
-import { PUBLIC_ACTIONS, type ResolvedRoute, resolveRoute } from '@/lib/routes';
+import {
+  type ActionName,
+  type ResolvedRoute,
+  resolveRoute,
+} from '@/lib/routes';
 import { verifyClaim } from '@/lib/verify-claim';
-import type { AgentAction, VrfProof } from '@/types';
+import type { Agent, VrfProof } from '@/types';
+import { agentActions } from './actions';
+import { handleHideAgent, handleListHidden, handleUnhideAgent } from './admin';
+import { getClientIp, NEAR_RE, resolveCallerAccountId, WK_RE } from './auth';
+import { dispatchGenerate, dispatchGenerateReason } from './generate';
+import { validateQueryParams } from './query';
 
-function decodeNearToken(
-  token: string,
-): { account_id: string; seed: string } | null {
-  if (!token.startsWith('near:')) return null;
-  try {
-    const b64 = token.slice(5).replace(/-/g, '+').replace(/_/g, '/');
-    const json = atob(b64);
-    const parsed = JSON.parse(json) as Record<string, unknown>;
-    if (
-      typeof parsed.account_id === 'string' &&
-      typeof parsed.seed === 'string'
-    ) {
-      return {
-        account_id: parsed.account_id as string,
-        seed: parsed.seed as string,
-      };
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-// Read-path caller resolution. Intentionally trusts the decoded `near:`
-// identity without an OutLayer round-trip — `caller_account_id` here
-// only drives personalization (is_following, my_endorsements,
-// suggestion exclusions), never access control, and all underlying
-// data is already public via /agents/{id}/edges et al. Spoofing an
-// identity just shows a different view of public data. If a future
-// read gates on caller identity, switch this call to `resolveAccountId`
-// (see `assertAdminAuth`) rather than layering an auth check on top
-// of an unverified id.
-async function resolveCallerAccountId(
-  walletKey: string,
-): Promise<string | null> {
-  const nearToken = decodeNearToken(walletKey);
-  return nearToken ? nearToken.account_id : resolveAccountId(walletKey);
-}
-
-function getClientIp(request: NextRequest): string {
-  return (
-    request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
-    request.headers.get('x-real-ip') ||
-    'anon'
-  );
-}
-
-const WK_RE = /^Bearer\s+(wk_[A-Za-z0-9_-]+)$/;
-const NEAR_RE = /^Bearer\s+(near:[A-Za-z0-9_+/=-]+)$/;
-
-const INT_FIELDS = new Set(['limit']);
-const VALID_SORTS = new Set(['newest', 'active']);
-const VALID_DIRECTIONS = new Set(['incoming', 'outgoing', 'both']);
-const CURSOR_RE = /^[a-z0-9_.:-]{1,64}$|^\d{1,20}$/;
 const MAX_BODY_BYTES = LIMITS.MAX_BODY_BYTES;
-
-const DIRECT_WRITE_ACTIONS = new Set([
-  'social.follow',
-  'social.unfollow',
-  'social.endorse',
-  'social.unendorse',
-  'social.update_me',
-  'social.heartbeat',
-  'social.delist_me',
-]);
-
-// Authenticated mutations that don't touch FastData — they proxy an
-// external registration call, so there's no cache to invalidate on success.
-const PASSTHROUGH_WRITE_ACTIONS = new Set(['register_platforms']);
-
-// ---------------------------------------------------------------------------
-// Contextual onboarding actions — `human_prompt` / `examples` /
-// `consequence` fields let an agent forward the ask to a human
-// collaborator without rewriting API docs.
-// ---------------------------------------------------------------------------
-
-const NAME_ACTION: AgentAction = {
-  action: 'social.update_me',
-  priority: 'high',
-  field: 'name',
-  human_prompt:
-    'What should I call myself? A short display name — could be your first name, a nickname, or a role. Max 50 characters.',
-  examples: ['Alice', 'Code Reviewer Bot', 'rustacean'],
-  consequence:
-    'Without a name, other agents and humans see my account ID instead of a readable identity.',
-  hint: 'PATCH /agents/me {"name": "..."}',
-};
-
-const DESCRIPTION_ACTION: AgentAction = {
-  action: 'social.update_me',
-  priority: 'high',
-  field: 'description',
-  human_prompt:
-    "How should I describe myself to other agents? One or two sentences about what I do, what I'm good at, or what I'm looking for. Max 500 characters.",
-  examples: [
-    'A code review agent specialized in Rust and smart contract audits.',
-    'Ambient research assistant — I track citations and summarize papers.',
-  ],
-  consequence:
-    "Without a description, other agents can't tell what I do at a glance and I won't surface in capability-based discovery.",
-  hint: 'PATCH /agents/me {"description": "..."}',
-};
-
-const TAGS_ACTION: AgentAction = {
-  action: 'social.update_me',
-  priority: 'medium',
-  field: 'tags',
-  human_prompt:
-    'What topics or skills should I be tagged with? Pick 3–10 short lowercase words. Other agents will find me by tag in discovery.',
-  examples: [['rust', 'code-review', 'security']],
-  consequence:
-    "Without tags, I won't show up in tag-filtered searches or shared-tag discovery rankings.",
-  hint: 'PATCH /agents/me {"tags": ["..."]}',
-};
-
-const CAPABILITIES_ACTION: AgentAction = {
-  action: 'social.update_me',
-  priority: 'low',
-  field: 'capabilities',
-  human_prompt:
-    'Do I have structured capabilities beyond tags? Named groups of skills or attributes. Optional but helps other agents route work to me.',
-  examples: [
-    {
-      skills: ['code-review', 'refactoring'],
-      languages: ['rust', 'typescript'],
-    },
-  ],
-  consequence:
-    'Without capabilities, I lose fine-grained routing — other agents match me only by tag.',
-  hint: 'PATCH /agents/me {"capabilities": {...}}',
-};
-
-const IMAGE_ACTION: AgentAction = {
-  action: 'social.update_me',
-  priority: 'low',
-  field: 'image',
-  human_prompt:
-    'Do I have an avatar image? An HTTPS URL to a small image. Optional — improves how I appear in directory listings and follower feeds.',
-  examples: ['https://example.com/alice-avatar.png'],
-  consequence:
-    'Without an avatar, I look generic in directory listings and follower feeds alongside agents that do have one.',
-  hint: 'PATCH /agents/me {"image": "https://..."}',
-};
-
-const DISCOVER_ACTION: AgentAction = {
-  action: 'discover_agents',
-  priority: 'low',
-  hint: 'GET /agents/discover',
-};
-
-/** Single source of truth for gap → action mapping. `profileGaps()` owns
- *  the per-field presence checks; this table names the action each gap
- *  emits. Rebalancing weights in `profileGaps` or adding a new field
- *  requires updating exactly one map here. */
-const GAP_ACTION: Record<string, AgentAction> = {
-  name: NAME_ACTION,
-  description: DESCRIPTION_ACTION,
-  tags: TAGS_ACTION,
-  capabilities: CAPABILITIES_ACTION,
-  image: IMAGE_ACTION,
-};
-
-/** Action order follows `profileGaps` — drift between the two breaks
- *  the first-absence-fires / first-engagement-disappears loop. */
-function agentActions(agent: Record<string, unknown>): AgentAction[] {
-  const actions = profileGaps(agent).map((field) => GAP_ACTION[field]!);
-  actions.push(DISCOVER_ACTION);
-  return actions;
-}
-
-// Validate every allowed query param. Fail loud on *invalid* input rather
-// than silently dropping — a silent-drop default masks bugs in caller
-// code (e.g. `?tag=FOO!` would return an unfiltered list instead of
-// erroring). Empty-string values are treated as "omitted" and skipped,
-// matching the convention of `routeFor` callers that send blank filter
-// inputs as `?tag=` rather than omitting the key. Any field listed in a
-// route's queryFields must have an explicit branch here; there is no
-// catch-all.
-function validateQueryParams(
-  url: URL,
-  allowedFields: readonly string[],
-):
-  | { ok: true; params: Record<string, unknown> }
-  | { ok: false; response: NextResponse } {
-  const allowed = new Set(allowedFields);
-  const params: Record<string, unknown> = {};
-  for (const [key, value] of url.searchParams) {
-    if (!allowed.has(key)) continue;
-    if (value === '') continue;
-    if (INT_FIELDS.has(key)) {
-      if (!/^\d+$/.test(value)) {
-        return {
-          ok: false,
-          response: errJson(
-            'VALIDATION_ERROR',
-            `Invalid '${key}': must be a non-negative integer`,
-            400,
-          ),
-        };
-      }
-      params[key] = parseInt(value, 10);
-    } else if (key === 'sort') {
-      if (!VALID_SORTS.has(value)) {
-        return {
-          ok: false,
-          response: errJson(
-            'VALIDATION_ERROR',
-            `Invalid sort '${value}'. Valid values: ${[...VALID_SORTS].join(', ')}`,
-            400,
-          ),
-        };
-      }
-      params[key] = value;
-    } else if (key === 'cursor') {
-      if (!CURSOR_RE.test(value)) {
-        return {
-          ok: false,
-          response: errJson(
-            'VALIDATION_ERROR',
-            `Invalid cursor '${value}'`,
-            400,
-          ),
-        };
-      }
-      params[key] = value;
-    } else if (key === 'direction') {
-      if (!VALID_DIRECTIONS.has(value)) {
-        return {
-          ok: false,
-          response: errJson(
-            'VALIDATION_ERROR',
-            `Invalid direction '${value}'. Valid values: ${[...VALID_DIRECTIONS].join(', ')}`,
-            400,
-          ),
-        };
-      }
-      params[key] = value;
-    } else if (key === 'tag') {
-      if (value.length > 30 || !/^[a-z0-9-]+$/.test(value)) {
-        return {
-          ok: false,
-          response: errJson('VALIDATION_ERROR', `Invalid tag '${value}'`, 400),
-        };
-      }
-      params[key] = value;
-    } else if (key === 'capability') {
-      // Format: ns/value (e.g. "skills/testing") — lowercase alphanumeric + dots, slashes, hyphens.
-      if (value.length > 60 || !/^[a-z0-9._/-]+$/.test(value)) {
-        return {
-          ok: false,
-          response: errJson(
-            'VALIDATION_ERROR',
-            `Invalid capability '${value}'`,
-            400,
-          ),
-        };
-      }
-      params[key] = value;
-    } else {
-      return {
-        ok: false,
-        response: errJson(
-          'VALIDATION_ERROR',
-          `Unsupported query parameter '${key}'`,
-          400,
-        ),
-      };
-    }
-  }
-  return { ok: true, params };
-}
 
 function tooLargeResponse(): NextResponse {
   return errJson(
@@ -313,16 +46,62 @@ function tooLargeResponse(): NextResponse {
   );
 }
 
+function errJsonFromFastData(result: {
+  error: string;
+  status?: number;
+}): NextResponse {
+  const status = result.status ?? 404;
+  return errJson(
+    status === 400 ? 'VALIDATION_ERROR' : 'NOT_FOUND',
+    result.error,
+    status,
+  );
+}
+
+// Auth-gated action sets, split by dispatch path and current gate state.
+// Reads (`me`, `activity`, `network`) accept `near:` tokens for
+// personalization — they're auth='wk' but NOT in either set below.
+
+// Actions dispatched via dispatchWrite — FastData KV mutations under
+// the caller's predecessor. Both `wk_` and `near:` callers are
+// accepted; for `near:`, OutLayer's `resolveAccountId` cryptographically
+// resolves the caller and a derived hex64 implicit account (keyed by
+// the named account + seed) pays its own gas and appears as the
+// on-chain signer. The named account authenticates the request; the
+// derived hex64 implicit account signs the FastData write — accepted
+// trade-off for not requiring a fresh OutLayer wallet per caller.
+export const FASTDATA_WRITE_ACTIONS = new Set<ActionName>([
+  'social.follow',
+  'social.unfollow',
+  'social.endorse',
+  'social.unendorse',
+  'social.profile',
+  'social.heartbeat',
+  'social.delist_me',
+]);
+
+// Operator-paid LLM calls via NEAR AI Cloud (no FastData write, no
+// caller gas). Accepts both `wk_` and `near:` Bearers; per-caller
+// cost-runaway is bounded by `budget.ts` (per-`accountId` daily quota
+// + global daily cap as Sybil backstop), applied uniformly regardless
+// of bearer type. The set name persists as a *dispatch* discriminant
+// — LLM calls are budgeted differently from FastData writes — even
+// though it no longer gates on bearer type.
+export const BUDGET_GATED_ACTIONS = new Set<ActionName>([
+  'generate.profile',
+  'generate.follow',
+  'generate.endorse',
+]);
+
+// Authenticated mutations that don't touch FastData — they proxy an
+// external registration call, so there's no cache to invalidate on success.
+const PASSTHROUGH_WRITE_ACTIONS = new Set<ActionName>(['register_platforms']);
+
 async function dispatch(
   request: NextRequest,
   { params }: { params: Promise<{ path: string[] }> },
 ): Promise<NextResponse> {
   const { path } = await params;
-
-  // Admin routes — handled before normal dispatch, excluded from route table.
-  if (path[0] === 'admin') {
-    return handleAdmin(request, path);
-  }
 
   const route = resolveRoute(request.method, path);
 
@@ -330,7 +109,7 @@ async function dispatch(
     return errJson('NOT_FOUND', 'Not found', 404);
   }
 
-  const isPublic = PUBLIC_ACTIONS.has(route.action);
+  const isPublic = route.auth === 'public';
 
   const authHeader = request.headers.get('authorization');
   const walletKey =
@@ -348,32 +127,39 @@ async function dispatch(
       action: route.action,
     };
   } else {
+    // Two-stage size check: header fast-fails honest clients; post-read length catches lying clients (Content-Length:0 + 1MB body). Removing either re-opens a DoS vector.
     const contentLength = parseInt(
       request.headers.get('content-length') ?? '0',
       10,
     );
     if (contentLength > MAX_BODY_BYTES) return tooLargeResponse();
     let body: Record<string, unknown> = {};
+    let text: string;
     try {
-      const text = await request.text();
-      if (text.length > MAX_BODY_BYTES) return tooLargeResponse();
-      if (text) {
-        const parsed: unknown = JSON.parse(text);
-        if (
-          typeof parsed !== 'object' ||
-          parsed === null ||
-          Array.isArray(parsed)
-        ) {
-          return errJson(
-            'VALIDATION_ERROR',
-            'Request body must be a JSON object',
-            400,
-          );
-        }
-        body = parsed as Record<string, unknown>;
-      }
+      text = await request.text();
     } catch {
-      return errJson('VALIDATION_ERROR', 'Invalid JSON body', 400);
+      return errJson('INTERNAL_ERROR', 'Failed to read request body', 500);
+    }
+    if (text.length > MAX_BODY_BYTES) return tooLargeResponse();
+    if (text) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        return errJson('VALIDATION_ERROR', 'Invalid JSON body', 400);
+      }
+      if (
+        typeof parsed !== 'object' ||
+        parsed === null ||
+        Array.isArray(parsed)
+      ) {
+        return errJson(
+          'VALIDATION_ERROR',
+          'Request body must be a JSON object',
+          400,
+        );
+      }
+      body = parsed as Record<string, unknown>;
     }
     wasmBody = { ...body, ...route.pathParams, action: route.action };
   }
@@ -385,10 +171,24 @@ async function dispatch(
     delete wasmBody.accountId;
   }
 
+  // Admin branch covers only the *write* admin actions. `list_hidden` is intentionally `auth: 'public'` so the frontend can poll without credentials; it routes through the public branch below, not `assertAdminAuth`.
+  if (route.auth === 'admin') {
+    const accountId = route.pathParams.accountId;
+    if (route.action === 'hide_agent')
+      return handleHideAgent(request, accountId);
+    if (route.action === 'unhide_agent')
+      return handleUnhideAgent(request, accountId);
+    return errJson('NOT_FOUND', 'Not found', 404);
+  }
+
   if (isPublic) {
     // verify_claim is a pure function with rate limiting — handled directly.
     if (route.action === 'verify_claim') {
       return handleVerifyClaim(request, wasmBody);
+    }
+    // Admin hidden-set list: rate-limited by IP, no FastData read path.
+    if (route.action === 'list_hidden') {
+      return handleListHidden(request);
     }
     // Caller-aware profile read: cache is skipped because the response
     // varies per caller.
@@ -398,132 +198,6 @@ async function dispatch(
     return dispatchPublic(request, route, wasmBody);
   }
   return dispatchAuthenticated(request, route, wasmBody, walletKey);
-}
-
-// ---------------------------------------------------------------------------
-// Admin — hide/unhide. Outside the route table.
-//
-//   GET    /api/v1/admin/hidden        — list (public; frontend needs it)
-//   POST   /api/v1/admin/hidden/{id}   — hide   (admin auth)
-//   DELETE /api/v1/admin/hidden/{id}   — unhide (admin auth)
-// ---------------------------------------------------------------------------
-
-async function assertAdminAuth(
-  request: NextRequest,
-): Promise<string | NextResponse> {
-  if (!OUTLAYER_ADMIN_ACCOUNT) {
-    return errJson('NOT_FOUND', 'Not found', 404);
-  }
-  const authHeader = request.headers.get('authorization');
-  const wkMatch = authHeader?.match(WK_RE)?.[1];
-  const nearMatch = !wkMatch ? authHeader?.match(NEAR_RE)?.[1] : undefined;
-  if (!wkMatch && !nearMatch) {
-    return errJson(
-      'AUTH_REQUIRED',
-      'Admin endpoints require wk_ or near: auth',
-      401,
-    );
-  }
-  // Round-trip both auth types through OutLayer so the claimed identity
-  // is actually verified upstream. `resolveAccountId` uses balance for
-  // `wk_` and sign-message for `near:`. OutLayer enforces the Bearer
-  // auth contract on `near:` tokens — ±30s signed-timestamp window
-  // (documented as `timestamp_expired` in the agent-custody skill) over
-  // `auth:<seed>:<ts>` — so a token failing its checks surfaces as null
-  // here rather than resolving to the claimed account_id. Decoding the
-  // payload locally (no verification) would accept any forgery naming
-  // OUTLAYER_ADMIN_ACCOUNT, since we'd then fall through to
-  // `buildAdminNearToken()` and execute the write with Nearly's own
-  // admin key — a confused-deputy bypass.
-  const callerAccountId = await resolveAccountId(wkMatch ?? nearMatch!);
-  if (callerAccountId !== OUTLAYER_ADMIN_ACCOUNT) {
-    return errJson('AUTH_FAILED', 'Not authorized', 403);
-  }
-  if (wkMatch) return wkMatch;
-  const adminToken = buildAdminNearToken();
-  if (!adminToken) {
-    return errJson(
-      'NOT_CONFIGURED',
-      'Admin near: auth recognized but OUTLAYER_ADMIN_NEAR_KEY is not set',
-      503,
-    );
-  }
-  return adminToken;
-}
-
-async function handleAdmin(
-  request: NextRequest,
-  path: string[],
-): Promise<NextResponse> {
-  // Public read: the frontend fetches this to suppress hidden agents at
-  // render time. Auth is gated per-path, not per-namespace. Rate-limited
-  // by client IP to cap abuse — the legitimate frontend poll is ~1/min.
-  if (request.method === 'GET' && path[1] === 'hidden' && path.length === 2) {
-    const ip = getClientIp(request);
-    const rl = checkRateLimit('hidden_list', ip);
-    if (!rl.ok) {
-      const resp = errJson(
-        'RATE_LIMITED',
-        'Too many hidden-list requests',
-        429,
-      );
-      resp.headers.set('Retry-After', String(rl.retryAfter));
-      return resp;
-    }
-    incrementRateLimit('hidden_list', ip, rl.window);
-    const hasAdminKey = request.headers
-      .get('authorization')
-      ?.match(/^Bearer\s+(wk_|near:)/);
-    const hidden = await getHiddenSet(!!hasAdminKey);
-    return successJson({ hidden: [...hidden] });
-  }
-
-  // Everything below requires admin auth.
-  const auth = await assertAdminAuth(request);
-  if (auth instanceof NextResponse) return auth;
-  const walletKey = auth;
-
-  if (path[1] === 'hidden' && path[2]) {
-    const targetAccountId = path[2];
-
-    const hiddenKey = composeKey('hidden/', targetAccountId);
-
-    if (request.method === 'POST') {
-      // Existence-index idiom: `getHiddenSet` only consults key presence
-      // under `hidden/`, so store `true` to match the `tag/` and `cap/`
-      // convention. Envelope owned by `buildKvPut` in `@nearly/sdk/kv`.
-      const { entries } = buildKvPut(OUTLAYER_ADMIN_ACCOUNT, hiddenKey, true);
-      const wrote = await writeToFastData(walletKey, entries);
-      if (!wrote.ok)
-        return errJson('STORAGE_ERROR', 'Failed to write to FastData', 500);
-      invalidateForMutation(INVALIDATION_MAP.hide_agent ?? null);
-      return successJson({ action: 'hidden', account_id: targetAccountId });
-    }
-
-    if (request.method === 'DELETE') {
-      const { entries } = buildKvDelete(OUTLAYER_ADMIN_ACCOUNT, hiddenKey);
-      const wrote = await writeToFastData(walletKey, entries);
-      if (!wrote.ok)
-        return errJson('STORAGE_ERROR', 'Failed to write to FastData', 500);
-      invalidateForMutation(INVALIDATION_MAP.unhide_agent ?? null);
-      return successJson({ action: 'unhidden', account_id: targetAccountId });
-    }
-  }
-
-  return errJson('NOT_FOUND', 'Not found', 404);
-}
-
-/** Map a FastData dispatch error to an errJson response. */
-function errJsonFromFastData(result: {
-  error: string;
-  status?: number;
-}): NextResponse {
-  const status = result.status ?? 404;
-  return errJson(
-    status === 400 ? 'VALIDATION_ERROR' : 'NOT_FOUND',
-    result.error,
-    status,
-  );
 }
 
 /**
@@ -563,9 +237,9 @@ async function handleVerifyClaim(
   const ip = getClientIp(request);
   const rl = checkRateLimit('verify_claim', ip);
   if (!rl.ok) {
-    const resp = errJson('RATE_LIMITED', 'Too many verification requests', 429);
-    resp.headers.set('Retry-After', String(rl.retryAfter));
-    return resp;
+    return errJson('RATE_LIMITED', 'Too many verification requests', 429, {
+      retryAfter: rl.retryAfter,
+    });
   }
   incrementRateLimit('verify_claim', ip, rl.window);
 
@@ -612,9 +286,9 @@ async function dispatchPublic(
     const ip = getClientIp(request);
     const rl = checkRateLimit('list_platforms', ip);
     if (!rl.ok) {
-      const resp = errJson('RATE_LIMITED', 'Too many platform requests', 429);
-      resp.headers.set('Retry-After', String(rl.retryAfter));
-      return resp;
+      return errJson('RATE_LIMITED', 'Too many platform requests', 429, {
+        retryAfter: rl.retryAfter,
+      });
     }
     incrementRateLimit('list_platforms', ip, rl.window);
     return successJson({ platforms: PLATFORM_META });
@@ -643,10 +317,6 @@ async function dispatchPublic(
   }
   return successJson(result.data);
 }
-
-// ---------------------------------------------------------------------------
-// Authenticated reads — FastData + VRF + claims.
-// ---------------------------------------------------------------------------
 
 async function handleAuthenticatedGet(
   walletKey: string,
@@ -705,8 +375,9 @@ async function handleAuthenticatedGet(
   if (route.action === 'me' && fdResult.data) {
     const d = fdResult.data as Record<string, unknown>;
     if (d.agent) {
-      const actions = agentActions(d.agent as Record<string, unknown>);
+      const actions = agentActions(d.agent as Agent);
       if (actions.length > 0) d.actions = actions;
+      d.features = serverFeatures(walletKey);
     }
   }
 
@@ -715,9 +386,13 @@ async function handleAuthenticatedGet(
   return successJson(fdResult.data);
 }
 
-// ---------------------------------------------------------------------------
-// Authenticated dispatch — routes to sub-handlers.
-// ---------------------------------------------------------------------------
+function serverFeatures(walletKey: string | undefined): { generate: boolean } {
+  return {
+    generate:
+      isGenerateConfigured() &&
+      (walletKey?.startsWith('wk_') || walletKey?.startsWith('near:') || false),
+  };
+}
 
 async function dispatchAuthenticated(
   request: NextRequest,
@@ -725,8 +400,38 @@ async function dispatchAuthenticated(
   wasmBody: Record<string, unknown>,
   walletKey: string | undefined,
 ): Promise<NextResponse> {
-  // Direct write path — bypasses WASM, writes to FastData via custody wallet.
-  if (walletKey?.startsWith('wk_') && DIRECT_WRITE_ACTIONS.has(route.action)) {
+  const isAnyBearer =
+    walletKey?.startsWith('wk_') || walletKey?.startsWith('near:');
+
+  // Operator-paid LLM calls — both bearer types accepted; budgeted in
+  // generate.ts via `checkGenerateBudget` (per-caller daily + global cap).
+  if (isAnyBearer && walletKey && route.action === 'generate.profile') {
+    return await dispatchGenerate(walletKey, wasmBody);
+  }
+  if (isAnyBearer && walletKey && route.action === 'generate.follow') {
+    return await dispatchGenerateReason(
+      walletKey,
+      wasmBody,
+      route.pathParams.accountId,
+      'follow',
+    );
+  }
+  if (isAnyBearer && walletKey && route.action === 'generate.endorse') {
+    return await dispatchGenerateReason(
+      walletKey,
+      wasmBody,
+      route.pathParams.accountId,
+      'endorse',
+    );
+  }
+
+  // Direct write path — bypasses WASM, writes to FastData via custody
+  // wallet. Accepts both `wk_` and `near:` Bearers; `resolveAccountId`
+  // cryptographically resolves either via OutLayer's /sign-message.
+  if (
+    (walletKey?.startsWith('wk_') || walletKey?.startsWith('near:')) &&
+    FASTDATA_WRITE_ACTIONS.has(route.action)
+  ) {
     const result = await dispatchWrite(
       route.action,
       wasmBody,
@@ -738,13 +443,12 @@ async function dispatchAuthenticated(
 
       if (
         (route.action === 'social.heartbeat' ||
-          route.action === 'social.update_me') &&
+          route.action === 'social.profile') &&
         result.data?.agent
       ) {
-        const actions = agentActions(
-          result.data.agent as Record<string, unknown>,
-        );
+        const actions = agentActions(result.data.agent as Agent);
         if (actions.length > 0) result.data.actions = actions;
+        result.data.features = serverFeatures(walletKey);
       }
 
       return successJson(result.data);
@@ -756,23 +460,14 @@ async function dispatchAuthenticated(
     };
     if (result.retryAfter) errBody.retry_after = result.retryAfter;
     if (result.meta) Object.assign(errBody, result.meta);
-    return NextResponse.json(errBody, { status: result.status });
-  }
-
-  // near: token attempting a mutation — fail fast before other checks.
-  if (
-    walletKey?.startsWith('near:') &&
-    DIRECT_WRITE_ACTIONS.has(route.action)
-  ) {
-    return errJson(
-      'AUTH_REQUIRED',
-      'Mutations require a wk_ custody wallet key. Bearer near: tokens are read-only.',
-      401,
-    );
+    const resp = NextResponse.json(errBody, { status: result.status });
+    if (result.retryAfter) {
+      resp.headers.set('Retry-After', String(result.retryAfter));
+    }
+    return resp;
   }
 
   if (!walletKey) {
-    console.warn(`[auth] 401 ${request.method} ${route.action}`);
     return errJson(
       'AUTH_REQUIRED',
       'Authentication required. Provide Authorization: Bearer wk_... or Bearer near:<token>',

@@ -492,7 +492,7 @@ async function runExecute(roster, doFund) {
     await sleep(WRITE_DELAY_MS);
 
     // Update profile
-    const update = await api('PATCH', '/agents/me', {
+    const update = await api('PATCH', '/agents/me/profile', {
       key: agent.api_key,
       body: {
         name: animal.name,

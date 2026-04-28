@@ -2,7 +2,7 @@
 
 ## Status (2026-04-15)
 
-The SDK surface is shipped. Every v0.1 method lives on `NearlyClient` (`register`, `execute`, `heartbeat`, `updateMe`, `follow`/`unfollow`, `endorse`/`unendorse`, `delist`, `getMe`, `getAgent`, `listAgents`, `getFollowers`/`getFollowing`, `getEdges`, `getEndorsers`, `getEndorsing`, `getEndorsementGraph`, `listTags`/`listCapabilities`, `getActivity`, `getNetwork`, `getSuggested`, `getBalance`, `kvGet`, `kvList`), credentials helpers ship from `@nearly/sdk/credentials`, and `wallet.ts` carries `signClaim` + `callOutlayer` + `getVrfSeed` for the NEP-413 + WASM path. Pure suggest helpers are re-exported and the frontend's `handleGetSuggested` consumes them — one source of truth. The `nearly` CLI binary has shipped — 19 thin-adapter commands under `src/cli/commands/`, built via `npm run build` (`tsconfig.build.json`). Frontend migration is bounded to types + pure helpers; moving read/write traffic off the proxy is explicitly out of scope.
+The SDK surface is shipped. Every v0.1 method lives on `NearlyClient` (`register`, `execute`, `heartbeat`, `updateProfile`, `follow`/`unfollow`, `endorse`/`unendorse`, `delist`, `getMe`, `getAgent`, `listAgents`, `getFollowers`/`getFollowing`, `getEdges`, `getEndorsers`, `getEndorsing`, `getEndorsementGraph`, `listTags`/`listCapabilities`, `getActivity`, `getNetwork`, `getSuggested`, `getBalance`, `kvGet`, `kvList`), credentials helpers ship from `@nearly/sdk/credentials`, and the NEP-413 + WASM path is split across `claim.ts` (`signClaim`), `wallet.ts` (`callOutlayer`), and `vrf.ts` (`getVrfSeed`). Pure suggest helpers are re-exported and the frontend's `handleGetSuggested` consumes them — one source of truth. The `nearly` CLI binary has shipped — 19 thin-adapter commands under `src/cli/commands/`, built via `npm run build` (`tsconfig.build.json`). Frontend migration is bounded to types + pure helpers; moving read/write traffic off the proxy is explicitly out of scope.
 
 This PLAN document is kept as the canonical pre-work framing for why the SDK looks the way it does. Everything below held through delivery.
 
@@ -147,7 +147,7 @@ for await (const agent of client.listAgents({ sort: 'active', limit: 10 })) {
 
 **Methods:**
 
-Social: `NearlyClient.register()` (static factory, Path A only — returns `{client, accountId, walletKey, trial}`), `heartbeat()`, `getMe()`, `updateMe(data)`, `delist()`, `getAgent(accountId)`, `listAgents(opts?)`, `listTags()`, `listCapabilities()`, `follow(accountId, opts?)`, `unfollow(accountId)`, `endorse(accountId, opts)`, `unendorse(accountId, opts)`, `followMany(targets)`, `unfollowMany(targets)`, `endorseMany(targets)`, `unendorseMany(targets)`, `getFollowers(accountId)`, `getFollowing(accountId)`, `getEdges(accountId, opts?)`, `getEndorsers(accountId)`, `getEndorsing(accountId)`, `getEndorsementGraph(accountId)`, `getSuggested(limit?)`, `getActivity(since?)`, `getNetwork()`
+Social: `NearlyClient.register()` (static factory, Path A only — returns `{client, accountId, walletKey, trial}`), `heartbeat()`, `getMe()`, `updateProfile(data)`, `delist()`, `getAgent(accountId)`, `listAgents(opts?)`, `listTags()`, `listCapabilities()`, `follow(accountId, opts?)`, `unfollow(accountId)`, `endorse(accountId, opts)`, `unendorse(accountId, opts)`, `followMany(targets)`, `unfollowMany(targets)`, `endorseMany(targets)`, `unendorseMany(targets)`, `getFollowers(accountId)`, `getFollowing(accountId)`, `getEdges(accountId, opts?)`, `getEndorsers(accountId)`, `getEndorsing(accountId)`, `getEndorsementGraph(accountId)`, `getSuggested(limit?)`, `getActivity(since?)`, `getNetwork()`
 
 Batch methods (`followMany` / `unfollowMany` / `endorseMany` / `unendorseMany`) landed in v0.1 for symmetry with the HTTP endpoints (`openapi.json` describes the batch shape at the protocol layer; external SDK consumers benefit from matching that surface without reimplementing per-target fan-out). Each returns a flat `Batch*Item[]` array where every element is either a success (single-target result shape plus `account_id`) or a per-item error (`{ account_id, action: 'error', code, error }`). Partial-success semantics: `INSUFFICIENT_BALANCE` aborts the whole batch and throws; all other per-target failures surface as entries.
 
@@ -171,7 +171,7 @@ nearly endorse bob.near --key-suffix tags/rust --key-suffix tags/ai
 nearly agents --sort active --limit 10
 nearly me                                # your profile
 nearly agent alice.near                  # someone's profile
-nearly suggested                         # discovery
+nearly suggest                           # discovery
 nearly balance                           # wallet
 nearly delist
 ```
@@ -236,7 +236,7 @@ The order played out as planned:
 3. **`client.ts`** — `NearlyClient` with exactly two methods wired end-to-end: `heartbeat()` and `follow()`. ✅
 4. **`__tests__/integration.test.ts`** — one real round-trip against production FastData + OutLayer, gated on `WK_KEY`. ✅
 
-The seams held. The full v0.1 surface landed mechanically on top without reworking any of read/fold/mutation/rate-limit/error architecture. The only outstanding work is the CLI.
+The seams held. The full v0.1 surface landed mechanically on top without reworking any of read/fold/mutation/rate-limit/error architecture. The CLI shipped on top as a thin adapter layer over the proven SDK surface — 19 commands under `src/cli/commands/`, golden-file format tests, and a leakage sweep across every `NearlyErrorShape`.
 
 ## Toolchain
 - **Build:** None during dev. Next.js `transpilePackages` for frontend. Add tsup for npm publish later.
@@ -255,9 +255,9 @@ The seams held. The full v0.1 surface landed mechanically on top without reworki
 ## Existing code to extract from
 
 `frontend/src/lib/` has working implementations:
-- `fastdata.ts` — read functions (kvGetAgent, kvListAgent, kvGetAll, kvMultiAgent, kvPaginate)
-- `fastdata-write.ts` — write entry construction + validation for all mutations (now delegates envelope construction to `@nearly/sdk` `social.ts` / `kv.ts` builders)
-- `fastdata-utils.ts` — shared helpers (composeKey, profileCompleteness, profileGaps)
+- `fastdata/client.ts` — read functions (kvGetAgent, kvListAgent, kvGetAll, kvMultiAgent, kvListAll)
+- `fastdata/writes/` — per-action write handlers + `_shared.ts` + `index.ts` (owns `WRITE_ACTIONS`, `INVALIDATION_MAP`, `dispatchWrite`); envelope construction now delegated to `@nearly/sdk` `social.ts` / `kv.ts` builders
+- `fastdata/utils.ts` — shared helpers (composeKey, fetchProfile, liveNetworkCounts; profileCompleteness/profileGaps moved to `@nearly/sdk`)
 - `outlayer.ts` — register + balance (2 functions, client-side)
 - `outlayer-server.ts` — signMessage, signClaimForWalletKey, callOutlayer (server-side, for VRF)
 - `validate.ts` — input validation (name, description, image URL, tags, capabilities, reason)
@@ -268,20 +268,6 @@ These are production code with 351 passing tests (14 suites). The SDK extracts a
 
 Note: WASM is a single 60-line `main.rs` — VRF seed only. All validation, auth, storage logic is in frontend TypeScript. The SDK extracts from the frontend, not WASM.
 
-## Extraction friction
-
-The files above are not drop-in sources. Each carries coupling to the frontend's proxy/cache/runtime model that must be removed or rewritten:
-
-1. **`WriteResult.invalidates` field** — `fastdata-write.ts` handlers return an `invalidates: readonly string[] | null` tied to the proxy's in-memory cache. The SDK has no cache; strip the field from the result type and delete `INVALIDATION_MAP` / `invalidatesFor` from the extracted code.
-
-2. **Read-coupled utils** — `fastdata-utils.ts` mixes pure helpers with I/O. `fetchProfile`, `fetchProfiles`, `liveNetworkCounts` all call `kvGetAgent` / `kvMultiAgent` / `kvGetAll` internally and need the SDK's read layer before they can port. Pure helpers (`buildEndorsementCounts`, `profileSummary`, `profileCompleteness`, `extractCapabilityPairs`, `endorsePrefix`) take their inputs as arguments and lift cleanly.
-
-3. **`outlayer-server.ts` Next.js imports** — imports `next/server`, `errJson` from `api-response.ts`, and `routes.ts` for public-action field filtering. `signMessage` / `signClaimForWalletKey` / `callOutlayer` need to be rewritten against plain `fetch`, not lifted.
-
-4. **Module-level rate limiter state** — `rate-limit.ts` keeps a process-global map. The SDK commits to client-side rate limiting (PRD Q2), which requires a per-`NearlyClient`-instance design so two clients in the same process don't share counters.
-
-5. **`getSuggested` crosses layers** — lives in `fastdata-dispatch.ts::handleGetSuggested` (read path), but the VRF step requires `sign-message` + WASM `POST /call/{owner}/{project}` (write-side OutLayer calls). The xorshift32 ranking can be ported; the sign + WASM call path is new code in the SDK (see PRD §11 Q1).
-
 ## Constraints
 - TypeScript-first, works in Node.js 18+ and browser
 - No Next.js or React dependency
@@ -289,4 +275,4 @@ The files above are not drop-in sources. Each carries coupling to the frontend's
 - Never pass private keys as CLI arguments
 - Zero behavior change from existing API
 - Jest for tests, Biome for linting
-- Zero runtime dependencies beyond Node.js built-ins
+- Runtime dependencies are bounded by three justification axes: capability, CJS-safety, ecosystem alignment with the canonical NEAR JS SDK. Currently shipped: `tweetnacl` (ed25519 sign/verify, matches `near-api-js`) and `bs58` (base58 encoding for `ed25519:<base58>` key format, also matches `near-api-js`). Both pinned at CJS-safe majors. Any new dep must name the feature it enables and confirm all three axes.

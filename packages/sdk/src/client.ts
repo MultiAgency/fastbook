@@ -1,12 +1,14 @@
+import type { ClientContext } from './client/_context';
+import * as batch from './client/batch';
+import * as reads from './client/reads';
+import * as writes from './client/writes';
 import {
   DEFAULT_FASTDATA_URL,
   DEFAULT_NAMESPACE,
   DEFAULT_OUTLAYER_URL,
   DEFAULT_TIMEOUT_MS,
-  LIMITS,
 } from './constants';
-import { NearlyError, rateLimitedError } from './errors';
-import { buildEndorsementCounts, foldProfile, foldProfileList } from './graph';
+import { validationError } from './errors';
 import {
   defaultRateLimiter,
   noopRateLimiter,
@@ -15,35 +17,12 @@ import {
 import {
   createReadTransport,
   type FetchLike,
-  kvGetAgentFirstWrite,
-  kvGetAllKey,
-  kvGetKey,
-  kvHistoryFirstByPredecessor,
-  kvListAgent,
-  kvListAllPrefix,
   type ReadTransport,
 } from './read';
-import {
-  buildDelistMe,
-  buildEndorse,
-  buildFollow,
-  buildHeartbeat,
-  buildUnendorse,
-  buildUnfollow,
-  buildUpdateMe,
-  type EndorseOpts,
-  type UpdateMePatch,
-} from './social';
-import {
-  makeRng,
-  scoreBySharedTags,
-  shuffleWithinTiers,
-  sortByScoreThenActive,
-} from './suggest';
+import type { EndorseOpts, ProfilePatch } from './social';
 import type {
   ActivityResponse,
   Agent,
-  AgentSummary,
   CapabilityCount,
   Edge,
   EndorsementGraphSnapshot,
@@ -54,19 +33,15 @@ import type {
   KvEntry,
   Mutation,
   NetworkSummary,
-  SuggestedAgent,
   TagCount,
   WriteResponse,
 } from './types';
-import { validateKeySuffix } from './validate';
-import { getVrfSeed } from './vrf';
 import {
   type BalanceResponse,
   createWallet,
   createWalletClient,
   getBalance,
   type WalletClient,
-  writeEntries,
 } from './wallet';
 
 export interface ListAgentsOpts {
@@ -258,24 +233,13 @@ export class NearlyClient {
   private readonly read: ReadTransport;
   private readonly wallet: WalletClient;
   private readonly rateLimiter: RateLimiter;
+  private readonly ctx: ClientContext;
 
   constructor(config: NearlyClientConfig) {
-    if (!config.walletKey) {
-      throw new NearlyError({
-        code: 'VALIDATION_ERROR',
-        field: 'walletKey',
-        reason: 'empty walletKey',
-        message: 'NearlyClient: walletKey required',
-      });
-    }
-    if (!config.accountId) {
-      throw new NearlyError({
-        code: 'VALIDATION_ERROR',
-        field: 'accountId',
-        reason: 'empty accountId',
-        message: 'NearlyClient: accountId required',
-      });
-    }
+    if (!config.walletKey)
+      throw validationError('walletKey', 'empty walletKey');
+    if (!config.accountId)
+      throw validationError('accountId', 'empty accountId');
 
     const namespace = config.namespace ?? DEFAULT_NAMESPACE;
     const fetch = config.fetch;
@@ -306,6 +270,12 @@ export class NearlyClient {
       (config.rateLimiting === false
         ? noopRateLimiter()
         : defaultRateLimiter());
+    this.ctx = {
+      read: this.read,
+      wallet: this.wallet,
+      rateLimiter: this.rateLimiter,
+      accountId: this.accountId,
+    };
   }
 
   /**
@@ -360,18 +330,14 @@ export class NearlyClient {
    * Mutation and pass it in.
    */
   async execute(mutation: Mutation): Promise<void> {
-    const rl = this.rateLimiter.check(mutation.action, mutation.rateLimitKey);
-    if (!rl.ok) throw rateLimitedError(mutation.action, rl.retryAfter);
-
-    await writeEntries(this.wallet, mutation.entries);
-    this.rateLimiter.record(mutation.action, mutation.rateLimitKey);
+    return writes.execute(this.ctx, mutation);
   }
 
   /**
    * Bump `last_active`. Reads the current profile first (FastData overwrites
    * the full blob on write), then writes back with a refreshed timestamp.
    * First-write creates a default profile if none exists. Profile editing
-   * lives in v0.1's updateMe, not here.
+   * lives in v0.1's updateProfile, not here.
    *
    * **v0.0 is write-only.** This resolves with `{ agent }` — the profile
    * blob just written. It does NOT surface `delta.new_followers`,
@@ -382,10 +348,7 @@ export class NearlyClient {
    * HTTP or call `getActivity(since)` after the heartbeat lands (v0.1).
    */
   async heartbeat(): Promise<WriteResponse> {
-    const current = await this.readProfile();
-    const mutation = buildHeartbeat(this.accountId, current);
-    await this.execute(mutation);
-    return { agent: mutation.entries.profile as Agent };
+    return writes.heartbeat(this.ctx);
   }
 
   /**
@@ -393,17 +356,7 @@ export class NearlyClient {
    * edge already exists; otherwise writes a new graph/follow entry.
    */
   async follow(target: string, opts: FollowOpts = {}): Promise<FollowResult> {
-    const existing = await kvGetKey(
-      this.read,
-      this.accountId,
-      `graph/follow/${target}`,
-    );
-    if (existing) {
-      return { action: 'already_following', target };
-    }
-    const mutation = buildFollow(this.accountId, target, opts);
-    await this.execute(mutation);
-    return { action: 'followed', target };
+    return writes.follow(this.ctx, target, opts);
   }
 
   /**
@@ -412,17 +365,7 @@ export class NearlyClient {
    * the proxy's `handleUnfollow` short-circuit for parity.
    */
   async unfollow(target: string): Promise<UnfollowResult> {
-    const existing = await kvGetKey(
-      this.read,
-      this.accountId,
-      `graph/follow/${target}`,
-    );
-    if (!existing) {
-      return { action: 'not_following', target };
-    }
-    const mutation = buildUnfollow(this.accountId, target);
-    await this.execute(mutation);
-    return { action: 'unfollowed', target };
+    return writes.unfollow(this.ctx, target);
   }
 
   /**
@@ -438,11 +381,8 @@ export class NearlyClient {
    * after the write lands — the SDK bypasses the proxy's
    * `withLiveCounts` overlay the same way heartbeat does.
    */
-  async updateMe(patch: UpdateMePatch): Promise<WriteResponse> {
-    const current = await this.readProfile();
-    const mutation = buildUpdateMe(this.accountId, current, patch);
-    await this.execute(mutation);
-    return { agent: mutation.entries.profile as Agent };
+  async updateProfile(patch: ProfilePatch): Promise<WriteResponse> {
+    return writes.updateProfile(this.ctx, patch);
   }
 
   /**
@@ -452,53 +392,7 @@ export class NearlyClient {
    * does not interpret suffix structure — callers own the convention.
    */
   async endorse(target: string, opts: EndorseOpts): Promise<EndorseResult> {
-    // Partition per-suffix at the client layer: dedup (first-occurrence
-    // wins, order preserved), validate each, split into valid/skipped.
-    // This mirrors `handleEndorse` in the frontend, which partitions
-    // rather than failing the whole batch on one bad key_suffix.
-    //
-    // `buildEndorse` is the source of truth for entry construction and
-    // stays strict — we call it with the pre-filtered list and it
-    // re-validates as a safety net. Invoking `buildEndorse` first also
-    // handles self-endorse / empty-array / over-limit rejections as
-    // synchronous throws before any network work.
-    const keyPrefix = `endorsing/${target}/`;
-    const { valid, skipped } = partitionKeySuffixes(
-      opts.keySuffixes,
-      keyPrefix,
-    );
-
-    if (valid.length === 0) {
-      throw new NearlyError({
-        code: 'VALIDATION_ERROR',
-        field: 'keySuffixes',
-        reason: 'no valid key_suffixes',
-        message: `Validation failed for keySuffixes: no valid entries (${skipped.length} skipped)`,
-      });
-    }
-
-    const mutation = buildEndorse(this.accountId, target, {
-      ...opts,
-      keySuffixes: valid,
-    });
-
-    const targetProfile = await kvGetKey(this.read, target, 'profile');
-    if (!targetProfile) {
-      throw new NearlyError({
-        code: 'NOT_FOUND',
-        resource: `agent:${target}`,
-        message: `Cannot endorse ${target}: agent not found`,
-      });
-    }
-    await this.execute(mutation);
-    return {
-      action: 'endorsed',
-      target,
-      key_suffixes: Object.keys(mutation.entries).map((k) =>
-        k.slice(keyPrefix.length),
-      ),
-      ...(skipped.length > 0 && { skipped }),
-    };
+    return writes.endorse(this.ctx, target, opts);
   }
 
   /**
@@ -513,28 +407,7 @@ export class NearlyClient {
     target: string,
     keySuffixes: readonly string[],
   ): Promise<UnendorseResult> {
-    const keyPrefix = `endorsing/${target}/`;
-    const { valid, skipped } = partitionKeySuffixes(keySuffixes, keyPrefix);
-
-    if (valid.length === 0) {
-      throw new NearlyError({
-        code: 'VALIDATION_ERROR',
-        field: 'keySuffixes',
-        reason: 'no valid key_suffixes',
-        message: `Validation failed for keySuffixes: no valid entries (${skipped.length} skipped)`,
-      });
-    }
-
-    const mutation = buildUnendorse(this.accountId, target, valid);
-    await this.execute(mutation);
-    return {
-      action: 'unendorsed',
-      target,
-      key_suffixes: Object.keys(mutation.entries).map((k) =>
-        k.slice(keyPrefix.length),
-      ),
-      ...(skipped.length > 0 && { skipped }),
-    };
+    return writes.unendorse(this.ctx, target, keySuffixes);
   }
 
   // -----------------------------------------------------------------------
@@ -551,67 +424,7 @@ export class NearlyClient {
     targets: readonly string[],
     opts: FollowOpts = {},
   ): Promise<BatchFollowItem[]> {
-    if (targets.length === 0) return [];
-    if (targets.length > LIMITS.MAX_BATCH_TARGETS) {
-      throw new NearlyError({
-        code: 'VALIDATION_ERROR',
-        field: 'targets',
-        reason: `max ${LIMITS.MAX_BATCH_TARGETS}`,
-        message: `Too many targets (max ${LIMITS.MAX_BATCH_TARGETS})`,
-      });
-    }
-
-    const results: BatchFollowItem[] = [];
-    for (const target of targets) {
-      const guard = batchTargetError(
-        target,
-        this.accountId,
-        'SELF_FOLLOW',
-        'follow',
-      );
-      if (guard) {
-        results.push(guard);
-        continue;
-      }
-
-      const rl = this.rateLimiter.check('social.follow', this.accountId);
-      if (!rl.ok) {
-        results.push(
-          batchError(target, 'RATE_LIMITED', 'rate limit reached within batch'),
-        );
-        continue;
-      }
-
-      try {
-        const existing = await kvGetKey(
-          this.read,
-          this.accountId,
-          `graph/follow/${target}`,
-        );
-        if (existing) {
-          results.push({
-            account_id: target,
-            action: 'already_following',
-            target,
-          });
-          continue;
-        }
-      } catch {
-        results.push(batchError(target, 'STORAGE_ERROR', 'read failed'));
-        continue;
-      }
-
-      try {
-        const mutation = buildFollow(this.accountId, target, opts);
-        await writeEntries(this.wallet, mutation.entries);
-      } catch (err) {
-        results.push(categorizeBatchWriteError(err, target));
-        continue;
-      }
-      this.rateLimiter.record('social.follow', this.accountId);
-      results.push({ account_id: target, action: 'followed', target });
-    }
-    return results;
+    return batch.followMany(this.ctx, targets, opts);
   }
 
   /**
@@ -619,67 +432,7 @@ export class NearlyClient {
    * `followMany`. INSUFFICIENT_BALANCE aborts; all else is per-item.
    */
   async unfollowMany(targets: readonly string[]): Promise<BatchUnfollowItem[]> {
-    if (targets.length === 0) return [];
-    if (targets.length > LIMITS.MAX_BATCH_TARGETS) {
-      throw new NearlyError({
-        code: 'VALIDATION_ERROR',
-        field: 'targets',
-        reason: `max ${LIMITS.MAX_BATCH_TARGETS}`,
-        message: `Too many targets (max ${LIMITS.MAX_BATCH_TARGETS})`,
-      });
-    }
-
-    const results: BatchUnfollowItem[] = [];
-    for (const target of targets) {
-      const guard = batchTargetError(
-        target,
-        this.accountId,
-        'SELF_UNFOLLOW',
-        'unfollow',
-      );
-      if (guard) {
-        results.push(guard);
-        continue;
-      }
-
-      const rl = this.rateLimiter.check('social.unfollow', this.accountId);
-      if (!rl.ok) {
-        results.push(
-          batchError(target, 'RATE_LIMITED', 'rate limit reached within batch'),
-        );
-        continue;
-      }
-
-      try {
-        const existing = await kvGetKey(
-          this.read,
-          this.accountId,
-          `graph/follow/${target}`,
-        );
-        if (!existing) {
-          results.push({
-            account_id: target,
-            action: 'not_following',
-            target,
-          });
-          continue;
-        }
-      } catch {
-        results.push(batchError(target, 'STORAGE_ERROR', 'read failed'));
-        continue;
-      }
-
-      try {
-        const mutation = buildUnfollow(this.accountId, target);
-        await writeEntries(this.wallet, mutation.entries);
-      } catch (err) {
-        results.push(categorizeBatchWriteError(err, target));
-        continue;
-      }
-      this.rateLimiter.record('social.unfollow', this.accountId);
-      results.push({ account_id: target, action: 'unfollowed', target });
-    }
-    return results;
+    return batch.unfollowMany(this.ctx, targets);
   }
 
   /**
@@ -697,92 +450,7 @@ export class NearlyClient {
   async endorseMany(
     targets: readonly EndorseTarget[],
   ): Promise<BatchEndorseItem[]> {
-    if (targets.length === 0) return [];
-    if (targets.length > LIMITS.MAX_BATCH_TARGETS) {
-      throw new NearlyError({
-        code: 'VALIDATION_ERROR',
-        field: 'targets',
-        reason: `max ${LIMITS.MAX_BATCH_TARGETS}`,
-        message: `Too many targets (max ${LIMITS.MAX_BATCH_TARGETS})`,
-      });
-    }
-
-    const results: BatchEndorseItem[] = [];
-    for (const entry of targets) {
-      const target = entry.account_id;
-      const guard = batchTargetError(
-        target,
-        this.accountId,
-        'SELF_ENDORSE',
-        'endorse',
-      );
-      if (guard) {
-        results.push(guard);
-        continue;
-      }
-
-      const keyPrefix = `endorsing/${target}/`;
-      const { valid, skipped } = partitionKeySuffixes(
-        entry.keySuffixes,
-        keyPrefix,
-      );
-      if (valid.length === 0) {
-        results.push(
-          batchError(
-            target,
-            'VALIDATION_ERROR',
-            'no valid key_suffixes',
-            skipped,
-          ),
-        );
-        continue;
-      }
-
-      const rl = this.rateLimiter.check('social.endorse', this.accountId);
-      if (!rl.ok) {
-        results.push(
-          batchError(target, 'RATE_LIMITED', 'rate limit reached within batch'),
-        );
-        continue;
-      }
-
-      try {
-        const targetProfile = await kvGetKey(this.read, target, 'profile');
-        if (!targetProfile) {
-          results.push(
-            batchError(target, 'NOT_FOUND', `agent not found: ${target}`),
-          );
-          continue;
-        }
-      } catch {
-        results.push(batchError(target, 'STORAGE_ERROR', 'read failed'));
-        continue;
-      }
-
-      let mutation: ReturnType<typeof buildEndorse>;
-      try {
-        mutation = buildEndorse(this.accountId, target, {
-          keySuffixes: valid,
-          ...(entry.reason != null && { reason: entry.reason }),
-          ...(entry.contentHash != null && { contentHash: entry.contentHash }),
-        });
-        await writeEntries(this.wallet, mutation.entries);
-      } catch (err) {
-        results.push(categorizeBatchWriteError(err, target));
-        continue;
-      }
-      this.rateLimiter.record('social.endorse', this.accountId);
-      results.push({
-        account_id: target,
-        action: 'endorsed',
-        target,
-        key_suffixes: Object.keys(mutation.entries).map((k) =>
-          k.slice(keyPrefix.length),
-        ),
-        ...(skipped.length > 0 && { skipped }),
-      });
-    }
-    return results;
+    return batch.endorseMany(this.ctx, targets);
   }
 
   /**
@@ -793,75 +461,7 @@ export class NearlyClient {
   async unendorseMany(
     targets: readonly UnendorseTarget[],
   ): Promise<BatchUnendorseItem[]> {
-    if (targets.length === 0) return [];
-    if (targets.length > LIMITS.MAX_BATCH_TARGETS) {
-      throw new NearlyError({
-        code: 'VALIDATION_ERROR',
-        field: 'targets',
-        reason: `max ${LIMITS.MAX_BATCH_TARGETS}`,
-        message: `Too many targets (max ${LIMITS.MAX_BATCH_TARGETS})`,
-      });
-    }
-
-    const results: BatchUnendorseItem[] = [];
-    for (const entry of targets) {
-      const target = entry.account_id;
-      const guard = batchTargetError(
-        target,
-        this.accountId,
-        'SELF_UNENDORSE',
-        'unendorse',
-      );
-      if (guard) {
-        results.push(guard);
-        continue;
-      }
-
-      const keyPrefix = `endorsing/${target}/`;
-      const { valid, skipped } = partitionKeySuffixes(
-        entry.keySuffixes,
-        keyPrefix,
-      );
-      if (valid.length === 0) {
-        results.push(
-          batchError(
-            target,
-            'VALIDATION_ERROR',
-            'no valid key_suffixes',
-            skipped,
-          ),
-        );
-        continue;
-      }
-
-      const rl = this.rateLimiter.check('social.unendorse', this.accountId);
-      if (!rl.ok) {
-        results.push(
-          batchError(target, 'RATE_LIMITED', 'rate limit reached within batch'),
-        );
-        continue;
-      }
-
-      let mutation: ReturnType<typeof buildUnendorse>;
-      try {
-        mutation = buildUnendorse(this.accountId, target, valid);
-        await writeEntries(this.wallet, mutation.entries);
-      } catch (err) {
-        results.push(categorizeBatchWriteError(err, target));
-        continue;
-      }
-      this.rateLimiter.record('social.unendorse', this.accountId);
-      results.push({
-        account_id: target,
-        action: 'unendorsed',
-        target,
-        key_suffixes: Object.keys(mutation.entries).map((k) =>
-          k.slice(keyPrefix.length),
-        ),
-        ...(skipped.length > 0 && { skipped }),
-      });
-    }
-    return results;
+    return batch.unendorseMany(this.ctx, targets);
   }
 
   /**
@@ -875,29 +475,7 @@ export class NearlyClient {
    * delist).
    */
   async delist(): Promise<DelistResult | null> {
-    const current = await this.readProfile();
-    if (!current) return null;
-
-    const [followingEntries, endorsingEntries] = await Promise.all([
-      drain(kvListAgent(this.read, this.accountId, 'graph/follow/')),
-      drain(kvListAgent(this.read, this.accountId, 'endorsing/')),
-    ]);
-
-    const mutation = buildDelistMe(
-      current,
-      followingEntries.map((e) => e.key),
-      endorsingEntries.map((e) => e.key),
-    );
-    await this.execute(mutation);
-    return { action: 'delisted', account_id: this.accountId };
-  }
-
-  private async readProfile(): Promise<Agent | null> {
-    const entry = await kvGetKey(this.read, this.accountId, 'profile');
-    if (!entry) return null;
-    // foldProfile applies both trust-boundary overrides (account_id from
-    // predecessor, last_active from block_timestamp) in one place.
-    return foldProfile(entry);
+    return writes.delist(this.ctx);
   }
 
   /**
@@ -915,7 +493,7 @@ export class NearlyClient {
    * `GET /api/v1/agents/me` endpoint over HTTP.
    */
   async getMe(): Promise<Agent | null> {
-    return this.getAgent(this.accountId);
+    return reads.getMe(this.ctx);
   }
 
   /**
@@ -926,34 +504,7 @@ export class NearlyClient {
    * no profile exists for the account.
    */
   async getAgent(accountId: string): Promise<Agent | null> {
-    const [
-      latestEntry,
-      firstEntry,
-      followerEntries,
-      followingEntries,
-      endorseEntries,
-    ] = await Promise.all([
-      kvGetKey(this.read, accountId, 'profile'),
-      kvGetAgentFirstWrite(this.read, accountId, 'profile'),
-      drain(kvGetAllKey(this.read, `graph/follow/${accountId}`)),
-      drain(kvListAgent(this.read, accountId, 'graph/follow/')),
-      drain(kvListAllPrefix(this.read, `endorsing/${accountId}/`)),
-    ]);
-    if (!latestEntry) return null;
-    const agent = foldProfile(latestEntry);
-    if (!agent) return null;
-    if (firstEntry) {
-      agent.created_at = Math.floor(firstEntry.block_timestamp / 1e9);
-      agent.created_height = firstEntry.block_height;
-    }
-    agent.follower_count = followerEntries.length;
-    agent.following_count = followingEntries.length;
-    agent.endorsement_count = endorseEntries.length;
-    agent.endorsements = buildEndorsementCounts(
-      endorseEntries,
-      `endorsing/${accountId}/`,
-    );
-    return agent;
+    return reads.getAgent(this.ctx, accountId);
   }
 
   /**
@@ -972,60 +523,7 @@ export class NearlyClient {
    * into a sortable key either.
    */
   listAgents(opts: ListAgentsOpts = {}): AsyncIterable<Agent> {
-    const { sort = 'active', tag, capability, limit } = opts;
-    const read = this.read;
-
-    async function* iterate(): AsyncIterable<Agent> {
-      let profileEntries: KvEntry[];
-      if (capability) {
-        const capEntries = await drain(
-          kvGetAllKey(read, `cap/${capability.toLowerCase()}`),
-        );
-        profileEntries = await fetchProfilesByIds(
-          read,
-          capEntries.map((e) => e.predecessor_id),
-        );
-      } else if (tag) {
-        const tagEntries = await drain(
-          kvGetAllKey(read, `tag/${tag.toLowerCase()}`),
-        );
-        profileEntries = await fetchProfilesByIds(
-          read,
-          tagEntries.map((e) => e.predecessor_id),
-        );
-      } else {
-        profileEntries = await drain(kvGetAllKey(read, 'profile'));
-      }
-
-      const agents = foldProfileList(profileEntries);
-
-      if (sort === 'newest') {
-        // Join block-authoritative first-write timestamps for created_at
-        // and the monotonic created_height cursor. Matches the frontend's
-        // `handleListAgents` sort=newest path post block-height transition.
-        const firstMap = await kvHistoryFirstByPredecessor(read, 'profile');
-        for (const a of agents) {
-          const first = firstMap.get(a.account_id);
-          if (first) {
-            a.created_at = Math.floor(first.block_timestamp / 1e9);
-            a.created_height = first.block_height;
-          }
-        }
-      }
-
-      agents.sort(
-        sort === 'newest'
-          ? (a, b) => (b.created_at ?? 0) - (a.created_at ?? 0)
-          : (a, b) => (b.last_active ?? 0) - (a.last_active ?? 0),
-      );
-
-      const cap = limit ?? agents.length;
-      for (let i = 0; i < Math.min(cap, agents.length); i++) {
-        yield agents[i];
-      }
-    }
-
-    return iterate();
+    return reads.listAgents(this.ctx, opts);
   }
 
   /**
@@ -1038,21 +536,7 @@ export class NearlyClient {
     accountId: string,
     opts: ListRelationOpts = {},
   ): AsyncIterable<Agent> {
-    const read = this.read;
-    const { limit } = opts;
-
-    async function* iterate(): AsyncIterable<Agent> {
-      const followEntries = await drain(
-        kvGetAllKey(read, `graph/follow/${accountId}`),
-      );
-      const followerIds = followEntries.map((e) => e.predecessor_id);
-      const profileEntries = await fetchProfilesByIds(read, followerIds);
-      const agents = foldProfileList(profileEntries);
-      const cap = limit ?? agents.length;
-      for (let i = 0; i < Math.min(cap, agents.length); i++) yield agents[i];
-    }
-
-    return iterate();
+    return reads.getFollowers(this.ctx, accountId, opts);
   }
 
   /**
@@ -1064,23 +548,7 @@ export class NearlyClient {
     accountId: string,
     opts: ListRelationOpts = {},
   ): AsyncIterable<Agent> {
-    const read = this.read;
-    const { limit } = opts;
-
-    async function* iterate(): AsyncIterable<Agent> {
-      const edgeEntries = await drain(
-        kvListAgent(read, accountId, 'graph/follow/'),
-      );
-      // The target account ID is the tail of the composed key; the
-      // key_prefix is fixed convention so stripping it is unambiguous.
-      const targetIds = edgeEntries.map((e) => followTarget(e.key));
-      const profileEntries = await fetchProfilesByIds(read, targetIds);
-      const agents = foldProfileList(profileEntries);
-      const cap = limit ?? agents.length;
-      for (let i = 0; i < Math.min(cap, agents.length); i++) yield agents[i];
-    }
-
-    return iterate();
+    return reads.getFollowing(this.ctx, accountId, opts);
   }
 
   /**
@@ -1091,55 +559,7 @@ export class NearlyClient {
    * (matching the proxy), then outgoing-only edges.
    */
   getEdges(accountId: string, opts: GetEdgesOpts = {}): AsyncIterable<Edge> {
-    const read = this.read;
-    const { direction = 'both', limit } = opts;
-    const wantIncoming = direction === 'incoming' || direction === 'both';
-    const wantOutgoing = direction === 'outgoing' || direction === 'both';
-
-    async function* iterate(): AsyncIterable<Edge> {
-      const [incomingEntries, outgoingEntries] = await Promise.all([
-        wantIncoming
-          ? drain(kvGetAllKey(read, `graph/follow/${accountId}`))
-          : Promise.resolve([] as KvEntry[]),
-        wantOutgoing
-          ? drain(kvListAgent(read, accountId, 'graph/follow/'))
-          : Promise.resolve([] as KvEntry[]),
-      ]);
-
-      const incomingIds = incomingEntries.map((e) => e.predecessor_id);
-      const outgoingIds = outgoingEntries.map((e) => followTarget(e.key));
-      const allIds = [...new Set([...incomingIds, ...outgoingIds])];
-      const profileEntries = await fetchProfilesByIds(read, allIds);
-      const profileMap = new Map<string, Agent>();
-      for (const a of foldProfileList(profileEntries)) {
-        profileMap.set(a.account_id, a);
-      }
-
-      const edges: Edge[] = [];
-      const incomingByAccountId = new Map<string, Edge>();
-      for (const id of incomingIds) {
-        const a = profileMap.get(id);
-        if (!a) continue;
-        const edge: Edge = { ...a, direction: 'incoming' };
-        incomingByAccountId.set(a.account_id, edge);
-        edges.push(edge);
-      }
-      for (const id of outgoingIds) {
-        const a = profileMap.get(id);
-        if (!a) continue;
-        const existing = incomingByAccountId.get(a.account_id);
-        if (existing) {
-          existing.direction = 'mutual';
-        } else {
-          edges.push({ ...a, direction: 'outgoing' });
-        }
-      }
-
-      const cap = limit ?? edges.length;
-      for (let i = 0; i < Math.min(cap, edges.length); i++) yield edges[i];
-    }
-
-    return iterate();
+    return reads.getEdges(this.ctx, accountId, opts);
   }
 
   /**
@@ -1154,45 +574,7 @@ export class NearlyClient {
   async getEndorsers(
     accountId: string,
   ): Promise<Record<string, EndorserEntry[]>> {
-    const prefix = `endorsing/${accountId}/`;
-    const endorseEntries = await drain(kvListAllPrefix(this.read, prefix));
-    if (endorseEntries.length === 0) return {};
-
-    // Fetch one profile per unique endorser for the summary fields.
-    const endorserIds = [
-      ...new Set(endorseEntries.map((e) => e.predecessor_id)),
-    ];
-    const profileEntries = await fetchProfilesByIds(this.read, endorserIds);
-    const profileById = new Map<string, Agent>();
-    for (const a of foldProfileList(profileEntries)) {
-      profileById.set(a.account_id, a);
-    }
-
-    const result: Record<string, EndorserEntry[]> = {};
-    for (const e of endorseEntries) {
-      if (!e.key.startsWith(prefix)) continue;
-      const keySuffix = e.key.slice(prefix.length);
-      if (!keySuffix) continue;
-      const profile = profileById.get(e.predecessor_id);
-      if (!profile) continue;
-      const meta = (e.value ?? {}) as Record<string, unknown>;
-      if (!result[keySuffix]) result[keySuffix] = [];
-      result[keySuffix].push({
-        account_id: profile.account_id,
-        name: profile.name,
-        description: profile.description,
-        image: profile.image ?? null,
-        reason: typeof meta.reason === 'string' ? meta.reason : undefined,
-        content_hash:
-          typeof meta.content_hash === 'string' ? meta.content_hash : undefined,
-        // Block-authoritative "when endorsed" — caller cannot backdate.
-        // `at_height` is the canonical cursor; `at` is its seconds-based
-        // display companion.
-        at: Math.floor(e.block_timestamp / 1e9),
-        at_height: e.block_height,
-      });
-    }
-    return result;
+    return reads.getEndorsers(this.ctx, accountId);
   }
 
   /**
@@ -1211,67 +593,7 @@ export class NearlyClient {
   async getEndorsing(
     accountId: string,
   ): Promise<Record<string, EndorsingTargetGroup>> {
-    const entries = await drain(
-      kvListAgent(this.read, accountId, 'endorsing/'),
-    );
-    if (entries.length === 0) return {};
-
-    type ParsedEdge = {
-      target: string;
-      key_suffix: string;
-      entry: KvEntry;
-    };
-    const parsed: ParsedEdge[] = [];
-    const targets = new Set<string>();
-    for (const e of entries) {
-      if (!e.key.startsWith('endorsing/')) continue;
-      const tail = e.key.slice('endorsing/'.length);
-      const slash = tail.indexOf('/');
-      if (slash <= 0) continue;
-      const target = tail.slice(0, slash);
-      const keySuffix = tail.slice(slash + 1);
-      if (!keySuffix) continue;
-      parsed.push({ target, key_suffix: keySuffix, entry: e });
-      targets.add(target);
-    }
-    if (parsed.length === 0) return {};
-
-    const profileEntries = await fetchProfilesByIds(this.read, [...targets]);
-    const profileById = new Map<string, Agent>();
-    for (const a of foldProfileList(profileEntries)) {
-      profileById.set(a.account_id, a);
-    }
-
-    const result: Record<string, EndorsingTargetGroup> = {};
-    for (const edge of parsed) {
-      const profile = profileById.get(edge.target);
-      const summary: AgentSummary = profile
-        ? {
-            account_id: profile.account_id,
-            name: profile.name,
-            description: profile.description,
-            image: profile.image ?? null,
-          }
-        : {
-            account_id: edge.target,
-            name: null,
-            description: '',
-            image: null,
-          };
-      const meta = (edge.entry.value ?? {}) as Record<string, unknown>;
-      if (!result[edge.target]) {
-        result[edge.target] = { target: summary, entries: [] };
-      }
-      result[edge.target].entries.push({
-        key_suffix: edge.key_suffix,
-        reason: typeof meta.reason === 'string' ? meta.reason : undefined,
-        content_hash:
-          typeof meta.content_hash === 'string' ? meta.content_hash : undefined,
-        at: Math.floor(edge.entry.block_timestamp / 1e9),
-        at_height: edge.entry.block_height,
-      });
-    }
-    return result;
+    return reads.getEndorsing(this.ctx, accountId);
   }
 
   /**
@@ -1284,25 +606,7 @@ export class NearlyClient {
   async getEndorsementGraph(
     accountId: string,
   ): Promise<EndorsementGraphSnapshot> {
-    const [incoming, outgoing] = await Promise.all([
-      this.getEndorsers(accountId),
-      this.getEndorsing(accountId),
-    ]);
-
-    const incomingIds = new Set<string>();
-    for (const entries of Object.values(incoming)) {
-      for (const entry of entries) incomingIds.add(entry.account_id);
-    }
-
-    return {
-      account_id: accountId,
-      incoming,
-      outgoing,
-      degree: {
-        incoming: incomingIds.size,
-        outgoing: Object.keys(outgoing).length,
-      },
-    };
+    return reads.getEndorsementGraph(this.ctx, accountId);
   }
 
   /**
@@ -1313,15 +617,7 @@ export class NearlyClient {
    * heartbeats again and the index is rewritten).
    */
   listTags(): AsyncIterable<TagCount> {
-    const read = this.read;
-    async function* iterate(): AsyncIterable<TagCount> {
-      const entries = await drain(kvListAllPrefix(read, 'tag/'));
-      const counts = aggregateBySuffix(entries, 'tag/');
-      for (const { key, count } of counts) {
-        yield { tag: key, count };
-      }
-    }
-    return iterate();
+    return reads.listTags(this.ctx);
   }
 
   /**
@@ -1331,20 +627,7 @@ export class NearlyClient {
    * to preserve namespaces that contain dots (e.g. `skills.languages/rust`).
    */
   listCapabilities(): AsyncIterable<CapabilityCount> {
-    const read = this.read;
-    async function* iterate(): AsyncIterable<CapabilityCount> {
-      const entries = await drain(kvListAllPrefix(read, 'cap/'));
-      const counts = aggregateBySuffix(entries, 'cap/');
-      for (const { key, count } of counts) {
-        const slash = key.indexOf('/');
-        yield {
-          namespace: slash >= 0 ? key.slice(0, slash) : key,
-          value: slash >= 0 ? key.slice(slash + 1) : key,
-          count,
-        };
-      }
-    }
-    return iterate();
+    return reads.listCapabilities(this.ctx);
   }
 
   /**
@@ -1366,67 +649,7 @@ export class NearlyClient {
    * from the summary lists but still count toward cursor advancement.
    */
   async getActivity(opts: GetActivityOpts = {}): Promise<ActivityResponse> {
-    const accountId = opts.accountId ?? this.accountId;
-    const { cursor } = opts;
-    const [followerEntries, followingEntries] = await Promise.all([
-      drain(kvGetAllKey(this.read, `graph/follow/${accountId}`)),
-      drain(kvListAgent(this.read, accountId, 'graph/follow/')),
-    ]);
-
-    const afterCursor = (e: KvEntry): boolean =>
-      cursor === undefined || e.block_height > cursor;
-
-    let maxHeight = cursor ?? 0;
-    const newFollowerIds: string[] = [];
-    for (const e of followerEntries) {
-      if (afterCursor(e)) {
-        newFollowerIds.push(e.predecessor_id);
-        if (e.block_height > maxHeight) maxHeight = e.block_height;
-      }
-    }
-
-    const newFollowingIds: string[] = [];
-    for (const e of followingEntries) {
-      if (afterCursor(e)) {
-        newFollowingIds.push(followTarget(e.key));
-        if (e.block_height > maxHeight) maxHeight = e.block_height;
-      }
-    }
-
-    const allIds = [...new Set([...newFollowerIds, ...newFollowingIds])];
-    const profileEntries = await fetchProfilesByIds(this.read, allIds);
-    const profileById = new Map<string, Agent>();
-    for (const a of foldProfileList(profileEntries)) {
-      profileById.set(a.account_id, a);
-    }
-
-    const toSummary = (id: string): AgentSummary | null => {
-      const a = profileById.get(id);
-      if (!a) return null;
-      return {
-        account_id: a.account_id,
-        name: a.name,
-        description: a.description,
-        image: a.image,
-      };
-    };
-
-    const new_followers = newFollowerIds
-      .map(toSummary)
-      .filter((s): s is AgentSummary => s !== null);
-    const new_following = newFollowingIds
-      .map(toSummary)
-      .filter((s): s is AgentSummary => s !== null);
-
-    // Advance cursor off the raw entry high-water mark, not the post-
-    // profile-filter summary arrays. A window full of edges pointing at
-    // agents with no `profile` blob would drop every summary to zero while
-    // still advancing maxHeight; echoing the input cursor there strands
-    // callers in a re-read loop. Cursor stays on the input only when no
-    // raw entry advanced it at all. Mirrors handleGetActivity in the frontend.
-    const nextCursor = maxHeight > (cursor ?? 0) ? maxHeight : cursor;
-
-    return { cursor: nextCursor, new_followers, new_following };
+    return reads.getActivity(this.ctx, opts);
   }
 
   /**
@@ -1438,36 +661,7 @@ export class NearlyClient {
    * target profile does not exist.
    */
   async getNetwork(accountId?: string): Promise<NetworkSummary | null> {
-    const target = accountId ?? this.accountId;
-    const [latestEntry, firstEntry, followerEntries, followingEntries] =
-      await Promise.all([
-        kvGetKey(this.read, target, 'profile'),
-        kvGetAgentFirstWrite(this.read, target, 'profile'),
-        drain(kvGetAllKey(this.read, `graph/follow/${target}`)),
-        drain(kvListAgent(this.read, target, 'graph/follow/')),
-      ]);
-    if (!latestEntry) return null;
-    const agent = foldProfile(latestEntry);
-    if (!agent) return null;
-
-    const followerSet = new Set(followerEntries.map((e) => e.predecessor_id));
-    const followingIds = followingEntries.map((e) => followTarget(e.key));
-    let mutual_count = 0;
-    for (const id of followingIds) {
-      if (followerSet.has(id)) mutual_count++;
-    }
-
-    return {
-      follower_count: followerSet.size,
-      following_count: followingIds.length,
-      mutual_count,
-      last_active: agent.last_active,
-      last_active_height: agent.last_active_height,
-      created_at: firstEntry
-        ? Math.floor(firstEntry.block_timestamp / 1e9)
-        : undefined,
-      created_height: firstEntry ? firstEntry.block_height : undefined,
-    };
+    return reads.getNetwork(this.ctx, accountId);
   }
 
   /**
@@ -1499,56 +693,7 @@ export class NearlyClient {
   async getSuggested(
     opts: GetSuggestedOpts = {},
   ): Promise<GetSuggestedResponse> {
-    const limit = Math.min(opts.limit ?? 10, 50);
-
-    const [callerProfile, followEntries] = await Promise.all([
-      this.readProfile(),
-      drain(kvListAgent(this.read, this.accountId, 'graph/follow/')),
-    ]);
-
-    const callerTags = callerProfile?.tags ?? [];
-    const followSet = new Set(
-      followEntries.map((e) => e.key.replace('graph/follow/', '')),
-    );
-    followSet.add(this.accountId);
-
-    const profileEntries = await drain(kvGetAllKey(this.read, 'profile'));
-    const candidates = foldProfileList(profileEntries).filter(
-      (a) => !followSet.has(a.account_id),
-    );
-
-    const scored = sortByScoreThenActive(
-      scoreBySharedTags(callerTags, candidates),
-    );
-
-    // VRF seed is best-effort. A null proof leaves the score/last_active
-    // sort in place — matches the proxy's degraded-path semantics.
-    let vrf: Awaited<ReturnType<typeof getVrfSeed>> = null;
-    let vrfError: { code: string; message: string } | undefined;
-    try {
-      vrf = await getVrfSeed(this.wallet, this.accountId);
-    } catch (err) {
-      // Swallow AUTH_FAILED / INSUFFICIENT_BALANCE / PROTOCOL / NETWORK
-      // errors from the VRF path so a deterministic ranking still ships
-      // back. Capture the error shape so callers can diagnose why VRF
-      // failed. Rethrow anything that isn't a known NearlyError code so
-      // genuine programmer bugs aren't masked.
-      if (!(err instanceof NearlyError)) throw err;
-      vrfError = { code: err.shape.code, message: err.shape.message };
-    }
-
-    const rng = vrf ? makeRng(vrf.output_hex) : null;
-    shuffleWithinTiers(scored, rng);
-
-    const agents: SuggestedAgent[] = scored.slice(0, limit).map((s) => ({
-      ...s.agent,
-      reason:
-        s.shared.length > 0
-          ? `Shared tags: ${s.shared.join(', ')}`
-          : 'New on the network',
-    }));
-
-    return { agents, vrf, vrfError };
+    return reads.getSuggested(this.ctx, opts);
   }
 
   // -------------------------------------------------------------------------
@@ -1560,7 +705,7 @@ export class NearlyClient {
    * or null if the key is missing or tombstoned.
    */
   async kvGet(accountId: string, key: string): Promise<KvEntry | null> {
-    return kvGetKey(this.read, accountId, key);
+    return reads.kvGet(this.ctx, accountId, key);
   }
 
   /**
@@ -1572,7 +717,7 @@ export class NearlyClient {
     prefix: string,
     limit?: number,
   ): AsyncIterable<KvEntry> {
-    return kvListAgent(this.read, accountId, prefix, limit);
+    return reads.kvList(this.ctx, accountId, prefix, limit);
   }
 
   /**
@@ -1587,121 +732,7 @@ export class NearlyClient {
    * cheap and per-wallet on OutLayer's side, not rate-limited by the
    * SDK's write budgets.
    */
-  async getBalance(opts: { chain?: string } = {}): Promise<BalanceResponse> {
-    return getBalance(this.wallet, opts);
+  async getBalance(chain?: string): Promise<BalanceResponse> {
+    return getBalance(this.ctx.wallet, chain);
   }
-}
-
-/**
- * Aggregate entries by the tail after `prefix`, returning `{key, count}`
- * rows sorted by count descending. Shared between `listTags` and
- * `listCapabilities`, both of which count agent-count per distinct
- * index suffix.
- */
-function aggregateBySuffix(
-  entries: readonly KvEntry[],
-  prefix: string,
-): { key: string; count: number }[] {
-  const counts = buildEndorsementCounts(entries, prefix);
-  return Object.entries(counts)
-    .sort(([, a], [, b]) => b - a)
-    .map(([key, count]) => ({ key, count }));
-}
-
-function followTarget(key: string): string {
-  return key.slice('graph/follow/'.length);
-}
-
-// Build a batch per-item error. `skipped` applies to endorse/unendorse
-// all-invalid-suffix cases; omitted otherwise.
-function batchError(
-  target: string,
-  code: string,
-  error: string,
-  skipped?: SkippedKeySuffix[],
-): BatchItemError {
-  return {
-    account_id: target,
-    action: 'error',
-    code,
-    error,
-    ...(skipped && skipped.length > 0 && { skipped }),
-  };
-}
-
-// Gate shared by the four batch methods — self-target or empty target.
-function batchTargetError(
-  target: string,
-  callerAccountId: string,
-  selfCode: string,
-  verb: string,
-): BatchItemError | null {
-  if (target === callerAccountId) {
-    return batchError(target, selfCode, `cannot ${verb} yourself`);
-  }
-  if (!target) {
-    return batchError(target, 'VALIDATION_ERROR', 'account_id is required');
-  }
-  return null;
-}
-
-// Rethrows INSUFFICIENT_BALANCE so the caller aborts the whole batch;
-// all other write errors map to a per-item error.
-function categorizeBatchWriteError(
-  err: unknown,
-  target: string,
-): BatchItemError {
-  if (err instanceof NearlyError && err.shape.code === 'INSUFFICIENT_BALANCE') {
-    throw err;
-  }
-  return batchError(
-    target,
-    err instanceof NearlyError ? err.shape.code : 'STORAGE_ERROR',
-    err instanceof NearlyError ? err.shape.message : 'write failed',
-  );
-}
-
-function partitionKeySuffixes(
-  raw: readonly unknown[],
-  prefix: string,
-): { valid: string[]; skipped: SkippedKeySuffix[] } {
-  const valid: string[] = [];
-  const skipped: SkippedKeySuffix[] = [];
-  const seen = new Set<string>();
-  for (const ks of raw) {
-    if (typeof ks !== 'string') {
-      throw new NearlyError({
-        code: 'VALIDATION_ERROR',
-        field: 'keySuffixes',
-        reason: 'must be strings',
-        message: 'Validation failed for keySuffixes: must be strings',
-      });
-    }
-    if (seen.has(ks)) continue;
-    seen.add(ks);
-    const e = validateKeySuffix(ks, prefix);
-    if (e) skipped.push({ key_suffix: ks, reason: e.shape.message });
-    else valid.push(ks);
-  }
-  return { valid, skipped };
-}
-
-async function drain<T>(iter: AsyncIterable<T>): Promise<T[]> {
-  const out: T[] = [];
-  for await (const item of iter) out.push(item);
-  return out;
-}
-
-async function fetchProfilesByIds(
-  transport: ReadTransport,
-  accountIds: readonly string[],
-): Promise<KvEntry[]> {
-  if (accountIds.length === 0) return [];
-  // Deduplicate — a tag index never has duplicates per predecessor, but
-  // callers pass raw lists and the cost is cheap.
-  const uniq = [...new Set(accountIds)];
-  const results = await Promise.all(
-    uniq.map((id) => kvGetKey(transport, id, 'profile')),
-  );
-  return results.filter((e): e is KvEntry => e !== null);
 }

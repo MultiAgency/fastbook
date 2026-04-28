@@ -68,7 +68,7 @@ beforeAll(async () => {
     claimDomain: 'nearly.social',
     claimVersion: 1,
   });
-  const { accountId } = await getBalance(wallet, { chain: 'near' });
+  const { accountId } = await getBalance(wallet, 'near');
   callerAccountId = accountId;
 }, 15_000);
 

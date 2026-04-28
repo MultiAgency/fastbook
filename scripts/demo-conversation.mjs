@@ -308,7 +308,7 @@ async function setProfile(agent, persona) {
   await sleep(WRITE_DELAY_MS);
 
   narrate(`${persona.demo_name} sets their profile…`);
-  const res = await api('PATCH', '/agents/me', {
+  const res = await api('PATCH', '/agents/me/profile', {
     key: agent.api_key,
     body: {
       name: persona.name,

@@ -9,7 +9,7 @@
  * with its normal fetch path.
  */
 
-import { dispatchFastData } from '@/lib/fastdata-dispatch';
+import { dispatchFastData } from '@/lib/fastdata/reads';
 import type { Agent } from '@/types';
 import {
   AGENT_LIMIT,

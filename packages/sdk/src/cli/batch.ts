@@ -1,7 +1,7 @@
 import type { BatchItemError } from '../client';
-import type { ParsedGlobals } from './argv';
+import type { ParsedArgv, ParsedGlobals } from './argv';
 import { EXIT_PARTIAL_BATCH } from './exit';
-import { renderOutput, renderRows } from './format';
+import { renderKeyValue, renderOutput, renderRows } from './format';
 import type { CliStreams } from './streams';
 
 function isError<S extends { action: string }>(
@@ -38,4 +38,33 @@ export function renderBatchMutation<
     streams,
   );
   return results.some(isError) ? EXIT_PARTIAL_BATCH : 0;
+}
+
+export async function renderSingleOrBatch<
+  S,
+  B extends { account_id: string; action: string },
+>(opts: {
+  parsed: ParsedArgv;
+  streams: CliStreams;
+  targets: readonly string[];
+  single: (target: string) => Promise<S>;
+  many: (
+    targets: readonly string[],
+  ) => Promise<readonly (B | BatchItemError)[]>;
+  singleKeys: (result: S) => Array<[string, string]>;
+  detail: (row: B) => string;
+}): Promise<number> {
+  const { parsed, streams, targets, single, many, singleKeys, detail } = opts;
+  if (targets.length === 1) {
+    const result = await single(targets[0]);
+    renderOutput(
+      parsed.globals,
+      result,
+      () => renderKeyValue(singleKeys(result)),
+      streams,
+    );
+    return 0;
+  }
+  const results = await many(targets);
+  return renderBatchMutation(parsed.globals, results, streams, detail);
 }

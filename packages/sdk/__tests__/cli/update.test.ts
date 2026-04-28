@@ -23,7 +23,7 @@ describe('nearly update', () => {
   test('--cap ns/value pairs parse into structured capabilities', async () => {
     const path = tmpCreds(CREDS);
     const spy = jest
-      .spyOn(NearlyClient.prototype, 'updateMe')
+      .spyOn(NearlyClient.prototype, 'updateProfile')
       .mockResolvedValue({ agent: FIXTURE_AGENT });
 
     const result = await runCli(
@@ -52,7 +52,7 @@ describe('nearly update', () => {
   test('--cap none clears capabilities', async () => {
     const path = tmpCreds(CREDS);
     const spy = jest
-      .spyOn(NearlyClient.prototype, 'updateMe')
+      .spyOn(NearlyClient.prototype, 'updateProfile')
       .mockResolvedValue({ agent: { ...FIXTURE_AGENT, capabilities: {} } });
 
     const result = await runCli(
@@ -68,7 +68,7 @@ describe('nearly update', () => {
   test('malformed --cap (no slash) exits with validation error and no update call', async () => {
     const path = tmpCreds(CREDS);
     const spy = jest
-      .spyOn(NearlyClient.prototype, 'updateMe')
+      .spyOn(NearlyClient.prototype, 'updateProfile')
       .mockResolvedValue({ agent: FIXTURE_AGENT });
 
     const result = await runCli(
@@ -84,7 +84,7 @@ describe('nearly update', () => {
   test('stdout renders capabilities as ns/value pairs', async () => {
     const path = tmpCreds(CREDS);
     jest
-      .spyOn(NearlyClient.prototype, 'updateMe')
+      .spyOn(NearlyClient.prototype, 'updateProfile')
       .mockResolvedValue({ agent: FIXTURE_AGENT });
 
     const result = await runCli(

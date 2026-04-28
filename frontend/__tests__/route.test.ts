@@ -8,37 +8,45 @@ const mockCallOutlayer = jest.fn();
 const mockSignMessage = jest.fn();
 jest.mock('@/lib/outlayer-server', () => ({
   getOutlayerPaymentKey: () => 'pk_test',
-  buildAdminNearToken: () => 'near:mock_admin_token',
   sanitizePublic: jest.requireActual('@/lib/outlayer-server').sanitizePublic,
   callOutlayer: (...args: unknown[]) => mockCallOutlayer(...args),
   signClaimForWalletKey: jest.fn().mockResolvedValue(null),
   resolveAccountId: jest.fn().mockResolvedValue('test.near'),
   signMessage: (...args: unknown[]) => mockSignMessage(...args),
 }));
+jest.mock('@/lib/admin-near-token', () => ({
+  buildAdminNearToken: () => 'near:mock_admin_token',
+  resolveAdminWriterAccount: jest
+    .fn()
+    .mockResolvedValue(
+      '68becf62560bb051ab3950310df70c29d0e80c6fb7cacd90f3dce8c2eff4779e',
+    ),
+}));
 
 const mockDispatchFastData = jest.fn();
 const mockHandleGetSuggested = jest.fn();
-jest.mock('@/lib/fastdata-dispatch', () => ({
+jest.mock('@/lib/fastdata/reads', () => ({
   dispatchFastData: (...args: unknown[]) => mockDispatchFastData(...args),
   handleGetSuggested: (...args: unknown[]) => mockHandleGetSuggested(...args),
 }));
 
 const mockDispatchWrite = jest.fn();
 const mockWriteToFastData = jest.fn().mockResolvedValue({ ok: true });
-jest.mock('@/lib/fastdata-write', () => ({
+jest.mock('@/lib/fastdata/writes', () => ({
   dispatchWrite: (...args: unknown[]) => mockDispatchWrite(...args),
   writeToFastData: (...args: unknown[]) => mockWriteToFastData(...args),
   INVALIDATION_MAP: { hide_agent: ['hidden'], unhide_agent: ['hidden'] },
 }));
 
 const mockKvGetAgent = jest.fn().mockResolvedValue(null);
-jest.mock('@/lib/fastdata', () => ({
+jest.mock('@/lib/fastdata/client', () => ({
   kvGetAgent: (...args: unknown[]) => mockKvGetAgent(...args),
+  kvGetAgentFirstWrite: jest.fn().mockResolvedValue(null),
 }));
 
 const mockGetHiddenSet = jest.fn().mockResolvedValue(new Set<string>());
-jest.mock('@/lib/fastdata-utils', () => ({
-  ...jest.requireActual('@/lib/fastdata-utils'),
+jest.mock('@/lib/fastdata/utils', () => ({
+  ...jest.requireActual('@/lib/fastdata/utils'),
   getHiddenSet: (...args: unknown[]) => mockGetHiddenSet(...args),
 }));
 
@@ -66,8 +74,46 @@ jest.mock('@/lib/rate-limit', () => ({
     .mockReturnValue({ ok: true, remaining: Number.POSITIVE_INFINITY }),
 }));
 
+const mockCheckGenerateBudget = jest
+  .fn()
+  .mockReturnValue({ ok: true, window: 0 });
+const mockIncrementGenerateBudget = jest.fn();
+jest.mock('@/lib/budget', () => ({
+  checkGenerateBudget: (...args: unknown[]) => mockCheckGenerateBudget(...args),
+  incrementGenerateBudget: (...args: unknown[]) =>
+    mockIncrementGenerateBudget(...args),
+}));
+
+// Default `isGenerateConfigured` to false so `dispatchGenerate` /
+// `dispatchGenerateReason` early-return 503 NOT_CONFIGURED instead of
+// hitting a real LLM API. Individual tests can flip this with
+// `mockIsGenerateConfigured.mockReturnValueOnce(true)` and then provide
+// `mockGenerate*` resolutions to exercise the success path.
+const mockIsGenerateConfigured = jest.fn().mockReturnValue(false);
+const mockGenerateProfileField = jest.fn();
+const mockGenerateFollowReason = jest.fn();
+const mockGenerateEndorseReason = jest.fn();
+jest.mock('@/lib/llm-server', () => ({
+  GENERATE_FIELDS: ['name', 'description', 'tags', 'capabilities', 'image'],
+  isGenerateConfigured: () => mockIsGenerateConfigured(),
+  generateProfileField: (...args: unknown[]) =>
+    mockGenerateProfileField(...args),
+  generateFollowReason: (...args: unknown[]) =>
+    mockGenerateFollowReason(...args),
+  generateEndorseReason: (...args: unknown[]) =>
+    mockGenerateEndorseReason(...args),
+}));
+
 import { NextResponse } from 'next/server';
-import { DELETE, GET, PATCH, POST } from '../src/app/api/v1/[...path]/route';
+import type { ActionName } from '@/lib/routes';
+import {
+  BUDGET_GATED_ACTIONS,
+  DELETE,
+  FASTDATA_WRITE_ACTIONS,
+  GET,
+  PATCH,
+  POST,
+} from '../src/app/api/v1/[...path]/route';
 
 function makeRequest(
   method: string,
@@ -186,17 +232,19 @@ describe('route resolution', () => {
     ['GET', 'agents', 'list_agents'],
     ['GET', 'agents/discover', 'discover_agents'],
     ['GET', 'agents/me', 'me'],
-    ['PATCH', 'agents/me', 'social.update_me'],
+    ['PATCH', 'agents/me/profile', 'social.profile'],
     ['POST', 'agents/me/heartbeat', 'social.heartbeat'],
     ['GET', 'agents/me/activity', 'activity'],
     ['GET', 'agents/me/network', 'network'],
     ['GET', 'agents/alice.near', 'profile'],
     ['POST', 'agents/alice.near/follow', 'social.follow'],
+    ['POST', 'agents/alice.near/follow/generate', 'generate.follow'],
     ['DELETE', 'agents/alice.near/follow', 'social.unfollow'],
     ['GET', 'agents/alice.near/followers', 'followers'],
     ['GET', 'agents/alice.near/following', 'following'],
     ['GET', 'agents/alice.near/edges', 'edges'],
     ['POST', 'agents/alice.near/endorse', 'social.endorse'],
+    ['POST', 'agents/alice.near/endorse/generate', 'generate.endorse'],
     ['DELETE', 'agents/alice.near/endorse', 'social.unendorse'],
     ['GET', 'agents/alice.near/endorsers', 'endorsers'],
     ['GET', 'agents/alice.near/endorsing', 'endorsing'],
@@ -206,25 +254,15 @@ describe('route resolution', () => {
     const headers: Record<string, string> = {};
 
     const { PUBLIC_ACTIONS } = jest.requireActual('@/lib/routes') as {
-      PUBLIC_ACTIONS: Set<string>;
+      PUBLIC_ACTIONS: Set<ActionName>;
     };
-    const isPublic = PUBLIC_ACTIONS.has(expectedAction);
+    const isPublic = PUBLIC_ACTIONS.has(expectedAction as ActionName);
     if (!isPublic) {
       headers.authorization = 'Bearer wk_test';
     }
 
     const [req, params] = makeRequest(method, path, undefined, headers);
     await handler(req, params);
-
-    const DIRECT_WRITE_ACTIONS = new Set([
-      'social.follow',
-      'social.unfollow',
-      'social.endorse',
-      'social.unendorse',
-      'social.update_me',
-      'social.heartbeat',
-      'social.delist_me',
-    ]);
 
     if (expectedAction === 'discover_agents') {
       // discover_agents uses handleGetSuggested, not dispatchFastData.
@@ -233,7 +271,13 @@ describe('route resolution', () => {
       // Public reads and authenticated GETs both go through FastData.
       expect(mockDispatchFastData).toHaveBeenCalledTimes(1);
       expect(mockDispatchFastData.mock.calls[0][0]).toBe(expectedAction);
-    } else if (DIRECT_WRITE_ACTIONS.has(expectedAction)) {
+    } else if (BUDGET_GATED_ACTIONS.has(expectedAction as ActionName)) {
+      // Budget-gated LLM calls early-return 503 NOT_CONFIGURED with
+      // mockIsGenerateConfigured defaulting to false; they don't reach
+      // mockDispatchWrite (or any FastData path).
+      expect(mockDispatchWrite).not.toHaveBeenCalled();
+      expect(mockDispatchFastData).not.toHaveBeenCalled();
+    } else if (FASTDATA_WRITE_ACTIONS.has(expectedAction as ActionName)) {
       expect(mockDispatchWrite).toHaveBeenCalledTimes(1);
       expect(mockDispatchWrite.mock.calls[0][0]).toBe(expectedAction);
       expect(mockCallOutlayer).not.toHaveBeenCalled();
@@ -519,7 +563,29 @@ describe('auth dispatch', () => {
     expect(mockCallOutlayer).not.toHaveBeenCalled();
   });
 
-  it('Bearer near: token does NOT dispatch direct writes (wk_-only for mutations)', async () => {
+  // Sample BUDGET_GATED_ACTIONS paths and prove `Bearer near:` is now
+  // accepted (post-rate-budget lift). Dispatch reaches the LLM-config
+  // check inside `dispatchGenerate` / `dispatchGenerateReason` — with
+  // `mockIsGenerateConfigured` defaulting to false, the response is 503
+  // NOT_CONFIGURED rather than the old 401 AUTH_REQUIRED. The 503 is
+  // proof that the bearer cleared the route-level gate.
+  it.each([
+    [
+      'POST',
+      'agents/me/profile/generate',
+      { field: 'name', current: {} } as Record<string, unknown> | undefined,
+    ],
+    [
+      'POST',
+      'agents/alice.near/follow/generate',
+      undefined as Record<string, unknown> | undefined,
+    ],
+    [
+      'POST',
+      'agents/alice.near/endorse/generate',
+      undefined as Record<string, unknown> | undefined,
+    ],
+  ])('Bearer near: token accepted for %s %s (budget-gated LLM)', async (method, path, body) => {
     const token = Buffer.from(
       JSON.stringify({
         account_id: 'test.near',
@@ -534,17 +600,92 @@ describe('auth dispatch', () => {
       .replace(/\//g, '_')
       .replace(/=+$/, '');
 
+    const handlers: Record<string, typeof GET> = {
+      GET,
+      POST,
+      PATCH,
+      DELETE,
+    };
+    const handler = handlers[method]!;
+    const [req, params] = makeRequest(method, path, body, {
+      authorization: `Bearer near:${token}`,
+    });
+    const res = await handler(req, params);
+
+    expect(res.status).toBe(503);
+    expect(mockIsGenerateConfigured).toHaveBeenCalled();
+    expect(mockDispatchWrite).not.toHaveBeenCalled();
+  });
+
+  // Budget-branch pin (I7 at integration level): when the daily budget
+  // is exhausted, the response is BUDGET_EXHAUSTED 429 (distinct from
+  // RATE_LIMITED), retry_after is the seconds-until-rollover, and the
+  // upstream LLM was NOT called. Pairs with `budget.test.ts` unit
+  // coverage of the primitive itself.
+  it('returns BUDGET_EXHAUSTED 429 when generate budget is exhausted', async () => {
+    mockIsGenerateConfigured.mockReturnValueOnce(true);
+    mockCheckGenerateBudget.mockReturnValueOnce({
+      ok: false,
+      retryAfter: 7200,
+      scope: 'caller',
+    });
     const [req, params] = makeRequest(
       'POST',
-      'agents/alice.near/follow',
-      {},
-      { authorization: `Bearer near:${token}` },
+      'agents/me/profile/generate',
+      { field: 'name', current: {} },
+      { authorization: 'Bearer wk_test' },
     );
     const res = await POST(req, params);
 
-    // near: tokens are not accepted for mutations — FastData writes require wk_
-    expect(mockDispatchWrite).not.toHaveBeenCalled();
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(429);
+    const body = (await json(res)) as {
+      code: string;
+      retry_after?: number;
+    };
+    expect(body.code).toBe('BUDGET_EXHAUSTED');
+    expect(body.code).not.toBe('RATE_LIMITED');
+    expect(body.retry_after).toBe(7200);
+    expect(mockGenerateProfileField).not.toHaveBeenCalled();
+    expect(mockIncrementGenerateBudget).not.toHaveBeenCalled();
+  });
+
+  // Inverse of the rejection symmetry-pin: sample FASTDATA_WRITE_ACTIONS
+  // and prove `Bearer near:` is accepted (dispatchWrite is invoked rather
+  // than 401-rejecting at the boundary). Without this, a future regression
+  // that re-tightens the gate would pass the symmetry test silently —
+  // the pass-list shrunk, but no test exercised the new acceptance path.
+  it.each([
+    ['POST', 'agents/alice.near/follow', undefined],
+    ['POST', 'agents/me/heartbeat', undefined],
+    ['DELETE', 'agents/alice.near/follow', undefined],
+  ])('Bearer near: token accepted for %s %s (FastData write)', async (method, path, body) => {
+    const token = Buffer.from(
+      JSON.stringify({
+        account_id: 'test.near',
+        seed: 'my-seed',
+        pubkey: 'ed25519:abc',
+        timestamp: Date.now(),
+        signature: 'sig',
+      }),
+    )
+      .toString('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+
+    const handlers: Record<string, typeof GET> = {
+      GET,
+      POST,
+      PATCH,
+      DELETE,
+    };
+    const handler = handlers[method]!;
+    const [req, params] = makeRequest(method, path, body, {
+      authorization: `Bearer near:${token}`,
+    });
+    await handler(req, params);
+
+    expect(mockDispatchWrite).toHaveBeenCalled();
   });
 
   it('rejects malformed near: token', async () => {
@@ -668,13 +809,54 @@ describe('cache invalidation', () => {
   });
 });
 
+describe('serverFeatures per-caller honesty gate', () => {
+  // Post-budget-lift, generate.* accepts both wk_ and near: bearers
+  // (subject to checkGenerateBudget). /agents/me's `features.generate`
+  // reflects that: valid bearer + isGenerateConfigured → true; otherwise
+  // false. Anonymous /me requests 401 before reaching serverFeatures, so
+  // that branch is covered by the auth-required test, not here.
+
+  function nearToken(accountId: string): string {
+    return `near:${Buffer.from(JSON.stringify({ account_id: accountId, seed: 's' })).toString('base64url')}`;
+  }
+
+  beforeEach(() => {
+    mockDispatchFastData.mockResolvedValue({ data: { agent: {} } });
+  });
+
+  // mockIsGenerateConfigured default is false — `configured: true` rows
+  // override per-test; `configured: false` rows let the default ride.
+  it.each([
+    { bearer: 'wk_', configured: true, expected: true },
+    { bearer: 'near:', configured: true, expected: true },
+    { bearer: 'wk_', configured: false, expected: false },
+    { bearer: 'near:', configured: false, expected: false },
+  ])('$bearer caller with generate configured=$configured: features.generate=$expected', async ({
+    bearer,
+    configured,
+    expected,
+  }) => {
+    if (configured) mockIsGenerateConfigured.mockReturnValueOnce(true);
+    const auth =
+      bearer === 'wk_'
+        ? 'Bearer wk_test1234abcdef'
+        : `Bearer ${nearToken('test.near')}`;
+    const [req, params] = makeRequest('GET', 'agents/me', undefined, {
+      authorization: auth,
+    });
+    const res = await GET(req, params);
+    const body = await json(res);
+    expect(body.data.features).toEqual({ generate: expected });
+  });
+});
+
 describe('direct write dispatch for wk_ keys', () => {
   it.each([
     ['POST', 'agents/alice.near/follow', 'social.follow'],
     ['DELETE', 'agents/alice.near/follow', 'social.unfollow'],
     ['POST', 'agents/alice/endorse', 'social.endorse'],
     ['DELETE', 'agents/alice/endorse', 'social.unendorse'],
-    ['PATCH', 'agents/me', 'social.update_me'],
+    ['PATCH', 'agents/me/profile', 'social.profile'],
     ['POST', 'agents/me/heartbeat', 'social.heartbeat'],
     ['DELETE', 'agents/me', 'social.delist_me'],
   ] as const)('%s %s with wk_ key dispatches to dispatchWrite', async (method, path, expectedAction) => {
@@ -900,6 +1082,31 @@ describe('admin /admin/hidden', () => {
         }),
       );
     });
+
+    // near: admin tokens round-trip through OutLayer's /sign-message,
+    // which returns the *derived hex64* from (OUTLAYER_ADMIN_ACCOUNT,
+    // seed='admin') — not the named admin account. assertAdminAuth
+    // accepts either; hard-coding the named-account check would
+    // silently 403 every correctly-signed near: admin token.
+    it('hides an agent when a near: admin token resolves to the derived hex64', async () => {
+      mockResolveAccountId.mockResolvedValueOnce(
+        '68becf62560bb051ab3950310df70c29d0e80c6fb7cacd90f3dce8c2eff4779e',
+      );
+      const validPayload = Buffer.from(
+        JSON.stringify({ account_id: 'admin.near', seed: 'admin' }),
+      ).toString('base64url');
+      const [req, params] = makeRequest(
+        'POST',
+        'admin/hidden/spam.near',
+        undefined,
+        { authorization: `Bearer near:${validPayload}` },
+      );
+      const res = await POST(req, params);
+      expect(res.status).toBe(200);
+      const body = await json(res);
+      expect(body.data.action).toBe('hidden');
+      expect(body.data.account_id).toBe('spam.near');
+    });
   });
 
   describe('DELETE /admin/hidden/{accountId} (admin auth)', () => {
@@ -943,5 +1150,63 @@ describe('admin /admin/hidden', () => {
       const res = await POST(req, params);
       expect(res.status).toBe(404);
     });
+  });
+});
+
+describe('getClientIp via X-Forwarded-For', () => {
+  // Exercise the IP-key derivation through the rate-limited public path
+  // (`GET /admin/hidden` calls `checkRateLimit('list_hidden', ip)`).
+  beforeEach(() => {
+    mockCheckRateLimit.mockClear();
+    mockCheckRateLimit.mockReturnValue({ ok: true, window: 0 });
+    mockGetHiddenSet.mockResolvedValue(new Set());
+  });
+
+  async function ipKeyFor(headers: Record<string, string>): Promise<string> {
+    const [req, params] = makeRequest(
+      'GET',
+      'admin/hidden',
+      undefined,
+      headers,
+    );
+    await GET(req, params);
+    expect(mockCheckRateLimit).toHaveBeenCalledWith(
+      'list_hidden',
+      expect.any(String),
+    );
+    const lastCall =
+      mockCheckRateLimit.mock.calls[mockCheckRateLimit.mock.calls.length - 1];
+    return lastCall[1] as string;
+  }
+
+  it('takes the right-most XFF entry', async () => {
+    const ip = await ipKeyFor({
+      'x-forwarded-for': '203.0.113.1, 10.0.0.5',
+    });
+    expect(ip).toBe('10.0.0.5');
+  });
+
+  it('ignores spoofed left-most IP', async () => {
+    const ip = await ipKeyFor({
+      'x-forwarded-for': 'spoof.attacker, 198.51.100.7',
+    });
+    expect(ip).toBe('198.51.100.7');
+  });
+
+  it('missing XFF: falls through to x-real-ip', async () => {
+    const ip = await ipKeyFor({ 'x-real-ip': '10.0.0.5' });
+    expect(ip).toBe('10.0.0.5');
+  });
+
+  it('missing both headers: keys against "anon"', async () => {
+    const ip = await ipKeyFor({});
+    expect(ip).toBe('anon');
+  });
+
+  it('XFF with surrounding whitespace and empty entries is normalized', async () => {
+    const ip = await ipKeyFor({
+      'x-forwarded-for': ' , 203.0.113.1 ,  , 10.0.0.5 , ',
+    });
+    expect(ip).toBe('10.0.0.5');
   });
 });

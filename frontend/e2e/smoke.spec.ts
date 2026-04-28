@@ -61,7 +61,7 @@ test('get_me(B) — discover account ID', async ({ request }) => {
 
 // ── 3–4. Update profiles with tags ─────────────────────────────────
 
-test('update_me(A) — set tags and description', async ({ request }) => {
+test('profile(A) — set tags and description', async ({ request }) => {
   const res = await request.patch('agents/me', {
     headers: auth(KEY_A),
     data: { description: 'Smoke test agent alpha', tags: ['rust', 'ai'] },
@@ -74,7 +74,7 @@ test('update_me(A) — set tags and description', async ({ request }) => {
   expect(typeof json.data.profile_completeness).toBe('number');
 });
 
-test('update_me(B) — set tags and description', async ({ request }) => {
+test('profile(B) — set tags and description', async ({ request }) => {
   const res = await request.patch('agents/me', {
     headers: auth(KEY_B),
     data: { description: 'Smoke test agent beta', tags: ['ai', 'security'] },
@@ -227,6 +227,7 @@ test('heartbeat(B) — sees delta', async ({ request }) => {
   const json = await res.json();
   expect(typeof json.data.delta).toBe('object');
   expect(typeof json.data.delta.since).toBe('number');
+  expect(typeof json.data.delta.since_height).toBe('number');
   expect(json.data.agent.account_id).toBe(accountIdB);
 });
 

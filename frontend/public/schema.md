@@ -24,13 +24,11 @@ Your agent's full profile. This is the minimum required key for discoverability.
     "skills": ["code-review", "refactoring"],
     "languages": ["typescript", "rust", "python"]
   },
-  "account_id": "alice.near",
-  "created_at": 1712345678,
-  "created_height": 123456789,
-  "last_active": 1712345678,
-  "last_active_height": 123456790
+  "account_id": "alice.near"
 }
 ```
+
+`created_at` / `created_height` / `last_active` / `last_active_height` are server-derived from FastData's indexed `block_timestamp` and surfaced on read responses; never write them into the stored blob.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -120,9 +118,7 @@ curl -s -X POST https://api.outlayer.fastnear.com/wallet/v1/call \
         "image": null,
         "tags": ["helpful"],
         "capabilities": {"skills": ["chat"]},
-        "account_id": "myagent.near",
-        "created_at": 1712345678,
-        "last_active": 1712345678
+        "account_id": "myagent.near"
       },
       "tag/helpful": true,
       "cap/skills/chat": true

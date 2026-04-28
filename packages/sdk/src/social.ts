@@ -1,5 +1,5 @@
 import { LIMITS } from './constants';
-import { NearlyError } from './errors';
+import { NearlyError, validationError } from './errors';
 import { defaultAgent, extractCapabilityPairs } from './graph';
 import type { Agent, AgentCapabilities, FollowOpts, Mutation } from './types';
 import {
@@ -13,12 +13,12 @@ import {
 } from './validate';
 
 /**
- * Patch accepted by `buildUpdateMe` — the subset of Agent fields an
+ * Patch accepted by `buildProfile` — the subset of Agent fields an
  * agent can rewrite. Any field absent from the patch is left untouched
  * on the merged profile. Setting `name` or `image` to `null` clears the
  * field; strings replace the current value.
  */
-export interface UpdateMePatch {
+export interface ProfilePatch {
   name?: string | null;
   description?: string;
   image?: string | null;
@@ -111,12 +111,7 @@ export function buildFollow(
   opts: FollowOpts = {},
 ): Mutation {
   if (!target.trim()) {
-    throw new NearlyError({
-      code: 'VALIDATION_ERROR',
-      field: 'target',
-      reason: 'empty account_id',
-      message: 'Validation failed for target: empty account_id',
-    });
+    throw validationError('target', 'empty account_id');
   }
   if (target === callerAccountId) {
     throw new NearlyError({
@@ -139,21 +134,11 @@ export function buildFollow(
   };
 }
 
-/**
- * Build a profile-update mutation. Pure: merges `patch` onto `current`,
- * validates every touched field, and emits the full profile blob plus
- * the new tag/cap existence indexes. Removed tags and capability pairs
- * are null-written so they disappear from `listTags` / `listCapabilities`
- * aggregation — symmetric with the proxy's `handleUpdateMe`.
- *
- * First-write is supported: pass `current: null` and the merge starts
- * from a `defaultAgent` baseline, so a brand-new caller can rewrite
- * straight into their final profile state in one call.
- */
-export function buildUpdateMe(
+// First-write supported via `current: null` (merges onto `defaultAgent`).
+export function buildProfile(
   accountId: string,
   current: Agent | null,
-  patch: UpdateMePatch,
+  patch: ProfilePatch,
 ): Mutation {
   const base: Agent = {
     ...(current ?? defaultAgent(accountId)),
@@ -198,13 +183,10 @@ export function buildUpdateMe(
   }
 
   if (!changed) {
-    throw new NearlyError({
-      code: 'VALIDATION_ERROR',
-      field: 'patch',
-      reason: 'no valid fields to update',
-      message:
-        'Validation failed for patch: no valid fields to update (supported: name, description, image, tags, capabilities)',
-    });
+    throw validationError(
+      'patch',
+      'no valid fields to update (supported: name, description, image, tags, capabilities)',
+    );
   }
 
   const entries = profileEntries(next);
@@ -232,39 +214,49 @@ export function buildUpdateMe(
   }
 
   return {
-    action: 'social.update_me',
+    action: 'social.profile',
     entries,
     rateLimitKey: accountId,
   };
 }
 
-/**
- * Build an endorse mutation. Pure: writes one entry per `key_suffix`
- * at `endorsing/{target}/{key_suffix}` carrying the optional `reason`
- * and `content_hash`. The server does not interpret suffix structure —
- * callers own the convention (see skill.md §6).
- *
- * Validation: each `key_suffix` must be non-empty, unicode-safe, and
- * the full composed key must fit FastData's 1024-byte key limit.
- * Duplicate suffixes within one call are deduped (first occurrence
- * wins); the hard cap is `LIMITS.MAX_KEY_SUFFIXES`.
- *
- * Does not check whether the target profile exists — the client method
- * does that as a read before building. Self-endorse is rejected here
- * to keep the builder honest.
- */
+function buildEndorseEntries(
+  keySuffixes: readonly string[],
+  keyPrefix: string,
+  value: unknown,
+): Record<string, unknown> {
+  if (!Array.isArray(keySuffixes) || keySuffixes.length === 0) {
+    throw validationError('keySuffixes', 'array must not be empty');
+  }
+  if (keySuffixes.length > LIMITS.MAX_KEY_SUFFIXES) {
+    throw validationError(
+      'keySuffixes',
+      `too many (max ${LIMITS.MAX_KEY_SUFFIXES})`,
+    );
+  }
+  const seen = new Set<string>();
+  const entries: Record<string, unknown> = {};
+  for (const ks of keySuffixes) {
+    if (typeof ks !== 'string') {
+      throw validationError('keySuffixes', 'must be strings');
+    }
+    if (seen.has(ks)) continue;
+    seen.add(ks);
+    const e = validateKeySuffix(ks, keyPrefix);
+    if (e) throw e;
+    entries[`${keyPrefix}${ks}`] = value;
+  }
+  return entries;
+}
+
+// Existence check is the client method's job; this builder only validates shape.
 export function buildEndorse(
   callerAccountId: string,
   target: string,
   opts: EndorseOpts,
 ): Mutation {
   if (!target.trim()) {
-    throw new NearlyError({
-      code: 'VALIDATION_ERROR',
-      field: 'target',
-      reason: 'empty account_id',
-      message: 'Validation failed for target: empty account_id',
-    });
+    throw validationError('target', 'empty account_id');
   }
   if (target === callerAccountId) {
     throw new NearlyError({
@@ -274,48 +266,20 @@ export function buildEndorse(
   }
 
   const { keySuffixes, reason, contentHash } = opts;
-  if (!Array.isArray(keySuffixes) || keySuffixes.length === 0) {
-    throw new NearlyError({
-      code: 'VALIDATION_ERROR',
-      field: 'keySuffixes',
-      reason: 'array must not be empty',
-      message: 'Validation failed for keySuffixes: array must not be empty',
-    });
-  }
-  if (keySuffixes.length > LIMITS.MAX_KEY_SUFFIXES) {
-    throw new NearlyError({
-      code: 'VALIDATION_ERROR',
-      field: 'keySuffixes',
-      reason: `too many (max ${LIMITS.MAX_KEY_SUFFIXES})`,
-      message: `Validation failed for keySuffixes: too many (max ${LIMITS.MAX_KEY_SUFFIXES})`,
-    });
-  }
   if (reason !== undefined) {
     const e = validateReason(reason);
     if (e) throw e;
   }
 
-  const keyPrefix = `endorsing/${target}/`;
-  const seen = new Set<string>();
-  const entries: Record<string, unknown> = {};
-  for (const ks of keySuffixes) {
-    if (typeof ks !== 'string') {
-      throw new NearlyError({
-        code: 'VALIDATION_ERROR',
-        field: 'keySuffixes',
-        reason: 'must be strings',
-        message: 'Validation failed for keySuffixes: must be strings',
-      });
-    }
-    if (seen.has(ks)) continue;
-    seen.add(ks);
-    const e = validateKeySuffix(ks, keyPrefix);
-    if (e) throw e;
-    entries[`${keyPrefix}${ks}`] = {
-      ...(reason != null && { reason }),
-      ...(contentHash != null && { content_hash: contentHash }),
-    };
-  }
+  const value = {
+    ...(reason != null && { reason }),
+    ...(contentHash != null && { content_hash: contentHash }),
+  };
+  const entries = buildEndorseEntries(
+    keySuffixes,
+    `endorsing/${target}/`,
+    value,
+  );
 
   return {
     action: 'social.endorse',
@@ -337,12 +301,7 @@ export function buildUnendorse(
   keySuffixes: readonly string[],
 ): Mutation {
   if (!target.trim()) {
-    throw new NearlyError({
-      code: 'VALIDATION_ERROR',
-      field: 'target',
-      reason: 'empty account_id',
-      message: 'Validation failed for target: empty account_id',
-    });
+    throw validationError('target', 'empty account_id');
   }
   if (target === callerAccountId) {
     throw new NearlyError({
@@ -350,41 +309,12 @@ export function buildUnendorse(
       message: 'Cannot unendorse yourself',
     });
   }
-  if (!Array.isArray(keySuffixes) || keySuffixes.length === 0) {
-    throw new NearlyError({
-      code: 'VALIDATION_ERROR',
-      field: 'keySuffixes',
-      reason: 'array must not be empty',
-      message: 'Validation failed for keySuffixes: array must not be empty',
-    });
-  }
-  if (keySuffixes.length > LIMITS.MAX_KEY_SUFFIXES) {
-    throw new NearlyError({
-      code: 'VALIDATION_ERROR',
-      field: 'keySuffixes',
-      reason: `too many (max ${LIMITS.MAX_KEY_SUFFIXES})`,
-      message: `Validation failed for keySuffixes: too many (max ${LIMITS.MAX_KEY_SUFFIXES})`,
-    });
-  }
 
-  const keyPrefix = `endorsing/${target}/`;
-  const seen = new Set<string>();
-  const entries: Record<string, unknown> = {};
-  for (const ks of keySuffixes) {
-    if (typeof ks !== 'string') {
-      throw new NearlyError({
-        code: 'VALIDATION_ERROR',
-        field: 'keySuffixes',
-        reason: 'must be strings',
-        message: 'Validation failed for keySuffixes: must be strings',
-      });
-    }
-    if (seen.has(ks)) continue;
-    seen.add(ks);
-    const e = validateKeySuffix(ks, keyPrefix);
-    if (e) throw e;
-    entries[`${keyPrefix}${ks}`] = null;
-  }
+  const entries = buildEndorseEntries(
+    keySuffixes,
+    `endorsing/${target}/`,
+    null,
+  );
 
   return {
     action: 'social.unendorse',
@@ -404,12 +334,7 @@ export function buildUnfollow(
   target: string,
 ): Mutation {
   if (!target.trim()) {
-    throw new NearlyError({
-      code: 'VALIDATION_ERROR',
-      field: 'target',
-      reason: 'empty account_id',
-      message: 'Validation failed for target: empty account_id',
-    });
+    throw validationError('target', 'empty account_id');
   }
   if (target === callerAccountId) {
     throw new NearlyError({
@@ -450,23 +375,19 @@ export function buildDelistMe(
   }
   for (const key of outgoingFollowKeys) {
     if (!key.startsWith('graph/follow/')) {
-      throw new NearlyError({
-        code: 'VALIDATION_ERROR',
-        field: 'outgoingFollowKeys',
-        reason: `key must start with graph/follow/ (got ${key})`,
-        message: `Validation failed for outgoingFollowKeys: key must start with graph/follow/ (got ${key})`,
-      });
+      throw validationError(
+        'outgoingFollowKeys',
+        `key must start with graph/follow/ (got ${key})`,
+      );
     }
     entries[key] = null;
   }
   for (const key of outgoingEndorseKeys) {
     if (!key.startsWith('endorsing/')) {
-      throw new NearlyError({
-        code: 'VALIDATION_ERROR',
-        field: 'outgoingEndorseKeys',
-        reason: `key must start with endorsing/ (got ${key})`,
-        message: `Validation failed for outgoingEndorseKeys: key must start with endorsing/ (got ${key})`,
-      });
+      throw validationError(
+        'outgoingEndorseKeys',
+        `key must start with endorsing/ (got ${key})`,
+      );
     }
     entries[key] = null;
   }

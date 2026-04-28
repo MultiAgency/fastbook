@@ -1,6 +1,6 @@
 import { validationError } from '../../errors';
 import { extractCapabilityPairs } from '../../graph';
-import type { UpdateMePatch } from '../../social';
+import type { ProfilePatch } from '../../social';
 import type { AgentCapabilities } from '../../types';
 import { flagString, type ParsedArgv, toArray } from '../argv';
 import { buildClient } from '../client-factory';
@@ -36,7 +36,7 @@ export async function update(
 ): Promise<void> {
   const client = await buildClient(parsed.globals);
 
-  const patch: UpdateMePatch = {};
+  const patch: ProfilePatch = {};
   const name = flagString(parsed.flags.name);
   if (name !== undefined) patch.name = name;
   const description = flagString(parsed.flags.desc ?? parsed.flags.description);
@@ -57,7 +57,7 @@ export async function update(
     patch.capabilities = parseCaps(capFlags);
   }
 
-  const { agent } = await client.updateMe(patch);
+  const { agent } = await client.updateProfile(patch);
 
   renderOutput(
     parsed.globals,

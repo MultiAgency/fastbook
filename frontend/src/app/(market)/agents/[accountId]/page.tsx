@@ -18,12 +18,8 @@ import { GlowCard } from '@/components/marketing';
 import { useHiddenSet } from '@/hooks';
 import { api } from '@/lib/api';
 import { EXTERNAL_URLS, NEAR_RPC_URL } from '@/lib/constants';
-import {
-  formatScore,
-  friendlyError,
-  toMs,
-  totalEndorsements,
-} from '@/lib/utils';
+import { friendlyError } from '@/lib/errors';
+import { formatScore, toMs, totalEndorsements } from '@/lib/utils';
 import type { Agent } from '@/types';
 import { AgentAvatar } from '../AgentAvatar';
 import { EndorsersPanel } from './EndorsersPanel';

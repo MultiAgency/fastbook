@@ -1,6 +1,13 @@
+import { z } from 'zod';
 import { LIMITS } from './constants';
 import type { NearlyError } from './errors';
 import { validationError } from './errors';
+
+// All `validate*` functions in this file return `NearlyError | null` —
+// `null` means valid, a returned `NearlyError` means invalid. The polarity
+// is unintuitive (truthy result = failure, not success); guard against
+// inverting it when calling. `validateTags` is the exception: it returns
+// `{ validated, error }` because it normalizes input.
 
 /**
  * Reject control chars, bidi overrides, and zero-width chars.
@@ -34,28 +41,47 @@ function checkUnsafeUnicode(
   return null;
 }
 
+const ReasonSchema = z
+  .string()
+  .max(LIMITS.REASON_MAX, `max ${LIMITS.REASON_MAX} bytes`);
+
 export function validateReason(reason: string): NearlyError | null {
-  if (reason.length > LIMITS.REASON_MAX) {
-    return validationError('reason', `max ${LIMITS.REASON_MAX} bytes`);
+  const result = ReasonSchema.safeParse(reason);
+  if (!result.success) {
+    return validationError(
+      'reason',
+      result.error.issues[0]?.message ?? 'invalid',
+    );
   }
   return checkUnsafeUnicode('reason', reason, true);
 }
 
+const NameSchema = z
+  .string()
+  .max(LIMITS.AGENT_NAME_MAX, `max ${LIMITS.AGENT_NAME_MAX} characters`)
+  .refine((s) => s.trim().length > 0, 'must not be blank');
+
 export function validateName(name: string): NearlyError | null {
-  if (name.length > LIMITS.AGENT_NAME_MAX) {
-    return validationError('name', `max ${LIMITS.AGENT_NAME_MAX} characters`);
-  }
-  if (name.trim().length === 0) {
-    return validationError('name', 'must not be blank');
+  const result = NameSchema.safeParse(name);
+  if (!result.success) {
+    return validationError(
+      'name',
+      result.error.issues[0]?.message ?? 'invalid',
+    );
   }
   return checkUnsafeUnicode('name', name, false);
 }
 
+const DescriptionSchema = z
+  .string()
+  .max(LIMITS.DESCRIPTION_MAX, `max ${LIMITS.DESCRIPTION_MAX} bytes`);
+
 export function validateDescription(desc: string): NearlyError | null {
-  if (desc.length > LIMITS.DESCRIPTION_MAX) {
+  const result = DescriptionSchema.safeParse(desc);
+  if (!result.success) {
     return validationError(
       'description',
-      `max ${LIMITS.DESCRIPTION_MAX} bytes`,
+      result.error.issues[0]?.message ?? 'invalid',
     );
   }
   return checkUnsafeUnicode('description', desc, true);
@@ -124,35 +150,67 @@ function isPrivateHost(host: string): boolean {
   return false;
 }
 
-export function validateImageUrl(url: string): NearlyError | null {
-  if (url.length > LIMITS.IMAGE_URL_MAX) {
-    return validationError('image', `max ${LIMITS.IMAGE_URL_MAX} bytes`);
-  }
-  if (!url.startsWith('https://')) {
-    return validationError('image', 'must use https://');
-  }
+function extractHostname(url: string): string {
   const afterScheme = url.slice('https://'.length);
   const authority = afterScheme.split('/')[0] ?? '';
-  if (authority.includes('@')) {
-    return validationError('image', 'must not contain credentials');
-  }
-  let hostname: string;
   if (authority.startsWith('[')) {
-    hostname = (authority.split(']')[0] ?? '').slice(1);
-  } else {
-    hostname = authority.split(':')[0] ?? '';
+    return (authority.split(']')[0] ?? '').slice(1);
   }
-  if (!hostname) {
-    return validationError('image', 'must have a valid host');
-  }
-  if (isPrivateHost(hostname)) {
+  return authority.split(':')[0] ?? '';
+}
+
+const ImageUrlSchema = z
+  .string()
+  .max(LIMITS.IMAGE_URL_MAX, `max ${LIMITS.IMAGE_URL_MAX} bytes`)
+  .superRefine((url, ctx) => {
+    if (!url.startsWith('https://')) {
+      ctx.addIssue({ code: 'custom', message: 'must use https://' });
+      return;
+    }
+    const authority = url.slice('https://'.length).split('/')[0] ?? '';
+    if (authority.includes('@')) {
+      ctx.addIssue({ code: 'custom', message: 'must not contain credentials' });
+      return;
+    }
+    const hostname = extractHostname(url);
+    if (!hostname) {
+      ctx.addIssue({ code: 'custom', message: 'must have a valid host' });
+      return;
+    }
+    if (isPrivateHost(hostname)) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'must not point to local or internal hosts',
+      });
+    }
+  });
+
+export function validateImageUrl(url: string): NearlyError | null {
+  const result = ImageUrlSchema.safeParse(url);
+  if (!result.success) {
     return validationError(
       'image',
-      'must not point to local or internal hosts',
+      result.error.issues[0]?.message ?? 'invalid',
     );
   }
   return checkUnsafeUnicode('image', url, false);
 }
+
+const TagsArraySchema = z
+  .array(z.string())
+  .max(LIMITS.MAX_TAGS, `max ${LIMITS.MAX_TAGS} tags`);
+
+const SingleTagSchema = z
+  .string()
+  .min(1, 'tag must not be empty')
+  .max(
+    LIMITS.MAX_TAG_LEN,
+    `tag must be at most ${LIMITS.MAX_TAG_LEN} characters`,
+  )
+  .refine(
+    (t) => /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(t),
+    'tags must be lowercase alphanumeric with interior hyphens (no leading or trailing hyphens)',
+  );
 
 /**
  * Matches the frontend's `validateTags` wire shape exactly — round-trip
@@ -163,37 +221,27 @@ export function validateTags(
 ):
   | { validated: string[]; error: null }
   | { validated: string[]; error: NearlyError } {
-  if (tags.length > LIMITS.MAX_TAGS) {
+  const arrResult = TagsArraySchema.safeParse(tags);
+  if (!arrResult.success) {
     return {
       validated: [],
-      error: validationError('tags', `max ${LIMITS.MAX_TAGS} tags`),
+      error: validationError(
+        'tags',
+        arrResult.error.issues[0]?.message ?? 'invalid',
+      ),
     };
   }
   const seen = new Set<string>();
   const validated: string[] = [];
   for (const tag of tags) {
     const t = tag.toLowerCase();
-    if (!t) {
-      return {
-        validated: [],
-        error: validationError('tags', 'tag must not be empty'),
-      };
-    }
-    if (t.length > LIMITS.MAX_TAG_LEN) {
+    const tagResult = SingleTagSchema.safeParse(t);
+    if (!tagResult.success) {
       return {
         validated: [],
         error: validationError(
           'tags',
-          `tag must be at most ${LIMITS.MAX_TAG_LEN} characters`,
-        ),
-      };
-    }
-    if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(t)) {
-      return {
-        validated: [],
-        error: validationError(
-          'tags',
-          'tags must be lowercase alphanumeric with interior hyphens (no leading or trailing hyphens)',
+          tagResult.error.issues[0]?.message ?? 'invalid',
         ),
       };
     }
@@ -218,8 +266,11 @@ function validateCapabilitiesContent(
   if (typeof val === 'string') {
     const u = checkUnsafeUnicode('capabilities', val, false);
     if (u) return u;
-    if (val.includes(':')) {
-      return validationError('capabilities', 'value must not contain colons');
+    if (val.includes(':') || val.includes('/')) {
+      return validationError(
+        'capabilities',
+        'value must not contain colons or slashes',
+      );
     }
   } else if (Array.isArray(val)) {
     for (const item of val) {
@@ -230,8 +281,11 @@ function validateCapabilitiesContent(
     for (const [key, child] of Object.entries(val)) {
       const u = checkUnsafeUnicode('capabilities', key, false);
       if (u) return u;
-      if (key.includes(':')) {
-        return validationError('capabilities', 'key must not contain colons');
+      if (key.includes(':') || key.includes('/')) {
+        return validationError(
+          'capabilities',
+          'key must not contain colons or slashes',
+        );
       }
       const e = validateCapabilitiesContent(child, depth + 1);
       if (e) return e;
@@ -240,19 +294,34 @@ function validateCapabilitiesContent(
   return null;
 }
 
+const CapabilitiesSchema = z
+  .record(z.string(), z.unknown())
+  .superRefine((caps, ctx) => {
+    if (JSON.stringify(caps).length > LIMITS.CAPABILITIES_MAX) {
+      ctx.addIssue({
+        code: 'custom',
+        message: `max ${LIMITS.CAPABILITIES_MAX} bytes`,
+      });
+    }
+  });
+
 export function validateCapabilities(caps: unknown): NearlyError | null {
-  if (typeof caps !== 'object' || caps === null || Array.isArray(caps)) {
-    return validationError('capabilities', 'must be a JSON object');
-  }
-  const serialized = JSON.stringify(caps);
-  if (serialized.length > LIMITS.CAPABILITIES_MAX) {
-    return validationError(
-      'capabilities',
-      `max ${LIMITS.CAPABILITIES_MAX} bytes`,
-    );
+  const result = CapabilitiesSchema.safeParse(caps);
+  if (!result.success) {
+    const issue = result.error.issues[0];
+    const message =
+      issue?.code === 'custom'
+        ? (issue.message ?? 'invalid')
+        : 'must be a JSON object';
+    return validationError('capabilities', message);
   }
   return validateCapabilitiesContent(caps, 0);
 }
+
+const KeySuffixSchema = z
+  .string()
+  .min(1, 'must not be empty')
+  .refine((s) => !s.startsWith('/'), 'must not start with /');
 
 /**
  * Generic — any handler composing a FastData key from a convention
@@ -262,14 +331,19 @@ export function validateKeySuffix(
   keySuffix: string,
   keyPrefix: string,
 ): NearlyError | null {
-  if (!keySuffix) return validationError('key_suffix', 'must not be empty');
-  if (keySuffix.startsWith('/'))
-    return validationError('key_suffix', 'must not start with /');
+  const result = KeySuffixSchema.safeParse(keySuffix);
+  if (!result.success) {
+    return validationError(
+      'key_suffix',
+      result.error.issues[0]?.message ?? 'invalid',
+    );
+  }
   const u = checkUnsafeUnicode('key_suffix', keySuffix, false);
   if (u) return u;
   const fullKey = `${keyPrefix}${keySuffix}`;
-  if (fullKey.includes('\0'))
+  if (fullKey.includes('\0')) {
     return validationError('key_suffix', 'key must not contain null bytes');
+  }
   // TextEncoder is browser+Node native; avoids Node-only Buffer.
   const byteLen = new TextEncoder().encode(fullKey).length;
   if (byteLen > LIMITS.FASTDATA_MAX_KEY_BYTES) {

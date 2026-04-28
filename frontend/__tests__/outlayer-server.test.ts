@@ -6,6 +6,7 @@ const mockFetch = jest.fn();
 global.fetch = mockFetch;
 
 import {
+  BoundedAccountCache,
   callOutlayer,
   decodeOutlayerResponse,
   resolveAccountId,
@@ -266,5 +267,108 @@ describe('resolveAccountId', () => {
     expect(String(mockFetch.mock.calls[0][0])).toContain(
       '/wallet/v1/sign-message',
     );
+  });
+
+  it('caches wk_ resolution: second call with same key hits cache, no network', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ account_id: 'dave.near', balance: '0' }),
+    } as unknown as Response);
+
+    const first = await resolveAccountId('wk_cache_hit_test');
+    const second = await resolveAccountId('wk_cache_hit_test');
+    expect(first).toBe('dave.near');
+    expect(second).toBe('dave.near');
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not cache near: tokens — distinct tokens both hit sign-message', async () => {
+    const signResponse = (accountId: string) =>
+      ({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            account_id: accountId,
+            public_key: 'ed25519:pk',
+            signature: 'ed25519:sig',
+            nonce: 'bm9uY2U=',
+          }),
+      }) as unknown as Response;
+    mockFetch
+      .mockResolvedValueOnce(signResponse('eve.near'))
+      .mockResolvedValueOnce(signResponse('eve.near'));
+
+    const first = await resolveAccountId('near:token_one');
+    const second = await resolveAccountId('near:token_two');
+    expect(first).toBe('eve.near');
+    expect(second).toBe('eve.near');
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(String(mockFetch.mock.calls[0][0])).toContain(
+      '/wallet/v1/sign-message',
+    );
+    expect(String(mockFetch.mock.calls[1][0])).toContain(
+      '/wallet/v1/sign-message',
+    );
+  });
+});
+
+describe('BoundedAccountCache', () => {
+  it('returns undefined for missing keys', () => {
+    const cache = new BoundedAccountCache(3);
+    expect(cache.get('wk_missing')).toBeUndefined();
+  });
+
+  it('stores and retrieves values', () => {
+    const cache = new BoundedAccountCache(3);
+    cache.set('wk_a', 'alice.near');
+    expect(cache.get('wk_a')).toBe('alice.near');
+  });
+
+  it('evicts the oldest entry when size exceeds the cap', () => {
+    const cache = new BoundedAccountCache(3);
+    cache.set('wk_a', 'alice.near');
+    cache.set('wk_b', 'bob.near');
+    cache.set('wk_c', 'carol.near');
+    cache.set('wk_d', 'dave.near');
+    expect(cache.size).toBe(3);
+    expect(cache.get('wk_a')).toBeUndefined();
+    expect(cache.get('wk_d')).toBe('dave.near');
+  });
+
+  it('refreshes insertion order on get — read keeps a key resident', () => {
+    const cache = new BoundedAccountCache(3);
+    cache.set('wk_a', 'alice.near');
+    cache.set('wk_b', 'bob.near');
+    cache.set('wk_c', 'carol.near');
+    // Touch wk_a so it becomes the freshest entry.
+    expect(cache.get('wk_a')).toBe('alice.near');
+    cache.set('wk_d', 'dave.near');
+    // wk_b is now the oldest and evicted; wk_a survives.
+    expect(cache.get('wk_a')).toBe('alice.near');
+    expect(cache.get('wk_b')).toBeUndefined();
+    expect(cache.get('wk_c')).toBe('carol.near');
+    expect(cache.get('wk_d')).toBe('dave.near');
+  });
+
+  it('refreshes insertion order on re-set with the same key', () => {
+    const cache = new BoundedAccountCache(2);
+    cache.set('wk_a', 'alice.near');
+    cache.set('wk_b', 'bob.near');
+    // Re-set wk_a; it becomes the freshest.
+    cache.set('wk_a', 'alice.near');
+    cache.set('wk_c', 'carol.near');
+    // wk_b was the oldest after the re-set, so it gets evicted.
+    expect(cache.get('wk_a')).toBe('alice.near');
+    expect(cache.get('wk_b')).toBeUndefined();
+    expect(cache.get('wk_c')).toBe('carol.near');
+  });
+
+  it('handles cap=1 (degenerate but valid)', () => {
+    const cache = new BoundedAccountCache(1);
+    cache.set('wk_a', 'alice.near');
+    cache.set('wk_b', 'bob.near');
+    expect(cache.size).toBe(1);
+    expect(cache.get('wk_a')).toBeUndefined();
+    expect(cache.get('wk_b')).toBe('bob.near');
   });
 });

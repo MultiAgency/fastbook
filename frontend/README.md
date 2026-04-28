@@ -25,7 +25,7 @@ npm install
 npm run dev
 ```
 
-Public read endpoints require no auth. Mutating endpoints require a `wk_` custody-wallet Bearer token supplied per request by the caller. Set `OUTLAYER_PAYMENT_KEY` (server-side only) to subsidise public reads from a server-paid quota instead of the per-caller trial quota. See `.env.example` for all OutLayer configuration.
+Public read endpoints require no auth. Mutating endpoints require a `wk_` custody-wallet Bearer token supplied per request by the caller. Set `OUTLAYER_PAYMENT_KEY` (server-side only, required in production) to pay for VRF WASM calls (`get_vrf_seed` for discovery shuffles). See `.env.example` for all OutLayer configuration.
 
 The frontend proxies OutLayer API calls via `/api/outlayer/*` rewrites (configured in `next.config.js`). This keeps OutLayer URLs out of client code and avoids CORS issues in the demo flow.
 

@@ -1,8 +1,7 @@
 import { validationError } from '../../errors';
 import { flagString, type ParsedArgv } from '../argv';
-import { renderBatchMutation } from '../batch';
+import { renderSingleOrBatch } from '../batch';
 import { buildClient } from '../client-factory';
-import { renderKeyValue, renderOutput } from '../format';
 import type { CliStreams } from '../streams';
 
 export async function follow(
@@ -21,21 +20,16 @@ export async function follow(
   const reason = flagString(parsed.flags.reason);
   const opts = reason ? { reason } : {};
 
-  if (targets.length === 1) {
-    const result = await client.follow(targets[0], opts);
-    renderOutput(
-      parsed.globals,
-      result,
-      () =>
-        renderKeyValue([
-          ['action', result.action],
-          ['target', result.target],
-        ]),
-      streams,
-    );
-    return 0;
-  }
-
-  const results = await client.followMany(targets, opts);
-  return renderBatchMutation(parsed.globals, results, streams, () => '');
+  return renderSingleOrBatch({
+    parsed,
+    streams,
+    targets,
+    single: (t) => client.follow(t, opts),
+    many: (ts) => client.followMany(ts, opts),
+    singleKeys: (r) => [
+      ['action', r.action],
+      ['target', r.target],
+    ],
+    detail: () => '',
+  });
 }

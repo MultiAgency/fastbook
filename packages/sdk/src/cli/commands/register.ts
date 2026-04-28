@@ -9,37 +9,7 @@ import { flagString } from '../argv';
 import { renderJson, renderKeyValue } from '../format';
 import type { CliStreams } from '../streams';
 
-/**
- * `nearly register` — provision an OutLayer custody wallet.
- *
- * Two modes against the same endpoint (`POST /register`), disambiguated
- * by the flag shape (no `--mode` switch):
- *
- *   `nearly register`
- *       Anonymous. Empty body, receives a `wk_` key, saves
- *       `{account_id, api_key}` to the credentials file.
- *
- *   `nearly register --deterministic --account-id <name> \\
- *                   --seed <str> --key-file <path>`
- *       Deterministic. Reads the caller's `ed25519:<base58>` NEAR
- *       private key from `--key-file`, signs `register:<seed>:<ts>`
- *       locally, POSTs the signed body. **By default also mints a
- *       delegate `wk_`** via `PUT /wallet/v1/api-key` so the caller
- *       gets a usable credential for subsequent Nearly operations.
- *       Prints `{wallet_id, near_account_id, wallet_key}`.
- *       Credentials are NOT persisted to the credentials file — the
- *       caller owns key management, but the `wk_` is surfaced so it
- *       can be fed to `nearly` / `ApiClient` / an env var immediately.
- *
- *       `--no-mint-key` skips the delegate-key mint step; output is
- *       provisioning-only `{wallet_id, near_account_id}` matching the
- *       pre-minting behavior. Use for externally-managed wallets.
- *
- * The private key is never accepted via argv (`--private-key` / `--key`
- * are explicit errors, not just undocumented) because shell history and
- * `ps`-visible args are a common leak path. `--key-file` is the only
- * supported source.
- */
+// --private-key / --key via argv are explicit errors; shell history + ps-visible args leak. Use --key-file.
 export async function register(
   parsed: ParsedArgv,
   streams: CliStreams,
@@ -162,11 +132,6 @@ async function runDeterministic(
     privateKey,
   });
 
-  // Default behavior: also mint a delegate `wk_`. `--no-mint-key` preserves
-  // the provisioning-only surface. If mint fails after provision succeeds,
-  // surface that asymmetry clearly — the caller has a wallet at OutLayer
-  // but no usable `wk_` yet, and a retry mints the same `wk_` (derivation
-  // is deterministic) without re-registering.
   let minted: Awaited<ReturnType<typeof mintDelegateKey>> | null = null;
   let mintError: unknown = null;
   if (!skipMint) {
@@ -223,19 +188,12 @@ async function runDeterministic(
     rows.push(['wallet_key', minted.walletKey]);
   }
   streams.stdout(renderKeyValue(rows));
-
-  if (minted) {
-    streams.stderr(
-      'Deterministic wallet provisioned and delegate wk_ minted. Save the wallet_key securely — it is the only mutable credential for this derived wallet.\n',
-    );
-  } else if (mintError) {
-    streams.stderr(
-      'Deterministic wallet provisioned, but delegate-key minting failed. The wallet exists at OutLayer; retry `nearly register --deterministic` with the same inputs to mint.\n',
-    );
-    throw mintError;
-  } else {
-    streams.stderr(
-      'Deterministic wallet provisioned (--no-mint-key). No delegate wk_ issued — manage your NEAR key externally.\n',
-    );
-  }
+  streams.stderr(
+    minted
+      ? 'Deterministic wallet provisioned and delegate wk_ minted. Save the wallet_key securely — it is the only mutable credential for this derived wallet.\n'
+      : mintError
+        ? 'Deterministic wallet provisioned, but delegate-key minting failed. The wallet exists at OutLayer; retry `nearly register --deterministic` with the same inputs to mint.\n'
+        : 'Deterministic wallet provisioned (--no-mint-key). No delegate wk_ issued — manage your NEAR key externally.\n',
+  );
+  if (mintError) throw mintError;
 }

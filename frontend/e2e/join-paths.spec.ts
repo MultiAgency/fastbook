@@ -67,7 +67,7 @@ test.describe('/join — path 1: new wallet', () => {
   test('Create Wallet → account + wk_ surface + Fund step appears', async ({
     page,
   }) => {
-    await page.getByRole('button', { name: /Create New Wallet/ }).click();
+    await page.getByRole('button', { name: /Create Agent Wallet/ }).click();
 
     await expect(page.getByText('Your NEAR Account')).toBeVisible({
       timeout: STEP_TIMEOUT,
@@ -241,11 +241,10 @@ test.describe('/join — path 3: External NEAR (deterministic)', () => {
 });
 
 test.describe('/join — storage hygiene (cross-path)', () => {
-  // CLAUDE.md + the ExternalNearPath.test.tsx unit coverage already
-  // pin that no key material lands in localStorage/sessionStorage. This
-  // end-to-end sweep runs each mutating path and confirms the same
-  // invariant holds against the live browser runtime, not the jsdom
-  // approximation.
+  // The ExternalNearPath.test.tsx unit coverage already pins that no key
+  // material lands in localStorage/sessionStorage. This end-to-end sweep
+  // runs each mutating path and confirms the same invariant holds against
+  // the live browser runtime, not the jsdom approximation.
   test.beforeEach(async ({ page }) => {
     await page.route('**/api/outlayer/register', (route) =>
       route.fulfill({
@@ -286,7 +285,7 @@ test.describe('/join — storage hygiene (cross-path)', () => {
   }) => {
     // Path 1
     await page.goto('/join');
-    await page.getByRole('button', { name: /Create New Wallet/ }).click();
+    await page.getByRole('button', { name: /Create Agent Wallet/ }).click();
     await expect(page.getByText('Your NEAR Account')).toBeVisible({
       timeout: STEP_TIMEOUT,
     });

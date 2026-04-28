@@ -2,7 +2,7 @@
 
 import { ArrowRight, Loader2 } from 'lucide-react';
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
-import { type KvEntry, kvGetAgent } from '@/lib/fastdata';
+import { type KvEntry, kvGetAgent } from '@/lib/fastdata/client';
 import { cn } from '@/lib/utils';
 
 const DEFAULT_ACCOUNT = 'info.near';

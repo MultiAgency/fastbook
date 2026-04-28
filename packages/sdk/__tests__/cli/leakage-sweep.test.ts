@@ -120,7 +120,7 @@ const CASES: Case[] = [
   },
   { argv: ['unfollow', 'bob.near'], method: 'unfollow' },
   { argv: ['unfollow', 'a.near', 'b.near'], method: 'unfollowMany' },
-  { argv: ['update', '--name', 'Sweep'], method: 'updateMe' },
+  { argv: ['update', '--name', 'Sweep'], method: 'updateProfile' },
 ];
 
 const WK_PATTERN = /wk_[A-Za-z0-9_]+/;
@@ -270,7 +270,7 @@ describe('ed25519-key leakage sweep (register --deterministic)', () => {
 // time instead of deferring the drift to a post-deploy wk_ leak. `register`
 // is tested separately above (its stub is on the static factory, not a
 // prototype method) so it's allowed to sit outside `CASES`. Same pattern as
-// `INVALIDATION_MAP completeness` in `frontend/__tests__/fastdata-write.test.ts`.
+// `INVALIDATION_MAP completeness` in `frontend/__tests__/fastdata/writes.test.ts`.
 describe('CASES completeness vs COMMANDS registry', () => {
   const CASES_COMMANDS = new Set(CASES.map((c) => c.argv[0]));
   const REGISTRY_COMMANDS = new Set(Object.keys(COMMANDS));

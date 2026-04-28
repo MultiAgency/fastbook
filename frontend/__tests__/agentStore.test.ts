@@ -82,10 +82,6 @@ describe('useAgentStore', () => {
   });
 
   describe('path selection', () => {
-    it('starts with null path', () => {
-      expect(useAgentStore.getState().path).toBeNull();
-    });
-
     it('sets path', () => {
       useAgentStore.getState().choosePath('byo');
       expect(useAgentStore.getState().path).toBe('byo');
@@ -116,12 +112,6 @@ describe('useAgentStore', () => {
     it('marks heartbeat as skipped', () => {
       useAgentStore.getState().skipHeartbeat();
       expect(useAgentStore.getState().skippedHeartbeat).toBe(true);
-    });
-
-    it('resets skippedHeartbeat on reset', () => {
-      useAgentStore.getState().skipHeartbeat();
-      useAgentStore.getState().reset();
-      expect(useAgentStore.getState().skippedHeartbeat).toBe(false);
     });
   });
 

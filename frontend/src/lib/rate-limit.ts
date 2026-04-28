@@ -24,11 +24,14 @@ export const LIMITS: Record<string, { limit: number; windowSecs: number }> = {
   'social.unfollow': { limit: 10, windowSecs: 60 },
   'social.endorse': { limit: 20, windowSecs: 60 },
   'social.unendorse': { limit: 20, windowSecs: 60 },
-  'social.update_me': { limit: 10, windowSecs: 60 },
+  'social.profile': { limit: 10, windowSecs: 60 },
+  'generate.profile': { limit: 30, windowSecs: 60 },
+  'generate.follow': { limit: 30, windowSecs: 60 },
+  'generate.endorse': { limit: 30, windowSecs: 60 },
   'social.heartbeat': { limit: 5, windowSecs: 60 },
   'social.delist_me': { limit: 1, windowSecs: 300 },
   verify_claim: { limit: 60, windowSecs: 60 },
-  hidden_list: { limit: 120, windowSecs: 60 },
+  list_hidden: { limit: 120, windowSecs: 60 },
   list_platforms: { limit: 120, windowSecs: 60 },
 };
 

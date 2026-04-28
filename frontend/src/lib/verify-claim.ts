@@ -24,13 +24,14 @@ const IMPLICIT_ACCOUNT_RE = /^[0-9a-f]{64}$/;
 /** NEP-413 Borsh tag = 2^31 + 413 = 2147484061 = 0x8000019D (little-endian). */
 const CLAIM_TAG = new Uint8Array([0x9d, 0x01, 0x00, 0x80]);
 
-// ---------------------------------------------------------------------------
-// Nonce store — per-process, best-effort.
-// ---------------------------------------------------------------------------
-
 const nonceStore = new Map<string, number>();
 let nonceCalls = 0;
 const NONCE_EVICTION_INTERVAL = 500;
+// Hard cap on entries — when reached, an immediate sweep runs ahead of the
+// next insertion. Bounds memory under bursts of valid signatures arriving
+// faster than the 500-call sweep interval. Replay protection isn't
+// affected: still-fresh entries survive the sweep, expired ones don't.
+const NONCE_MAX_ENTRIES = 50_000;
 
 function nonceKey(recipient: string, nonce: string): string {
   return `${recipient}:${nonce}`;
@@ -38,7 +39,10 @@ function nonceKey(recipient: string, nonce: string): string {
 
 function seenNonce(recipient: string, nonce: string, ttlMs: number): boolean {
   const now = Date.now();
-  if (++nonceCalls >= NONCE_EVICTION_INTERVAL) {
+  if (
+    ++nonceCalls >= NONCE_EVICTION_INTERVAL ||
+    nonceStore.size >= NONCE_MAX_ENTRIES
+  ) {
     nonceCalls = 0;
     for (const [k, expiresAt] of nonceStore) {
       if (expiresAt <= now) nonceStore.delete(k);
@@ -60,10 +64,6 @@ export function __resetNonceStoreForTests(): void {
   nonceStore.clear();
   nonceCalls = 0;
 }
-
-// ---------------------------------------------------------------------------
-// Base58 decoder (Bitcoin alphabet) — NEAR's wire format for keys/signatures.
-// ---------------------------------------------------------------------------
 
 const B58_ALPHABET =
   '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
@@ -98,10 +98,6 @@ function base58Decode(str: string): Uint8Array | null {
   }
   return out;
 }
-
-// ---------------------------------------------------------------------------
-// Borsh encode — fixed NEP-413 payload shape only.
-// ---------------------------------------------------------------------------
 
 function u32Le(n: number): Uint8Array {
   const b = new Uint8Array(4);
@@ -146,10 +142,6 @@ function buildClaimPayload(
   ]);
 }
 
-// ---------------------------------------------------------------------------
-// Claim verification
-// ---------------------------------------------------------------------------
-
 function fail(
   reason: VerifyClaimFailure['reason'],
   detail?: string,
@@ -164,14 +156,19 @@ function fail(
 }
 
 function isClaimShape(c: unknown): c is VerifiableClaim {
-  if (typeof c !== 'object' || c === null) return false;
-  const r = c as Record<string, unknown>;
   return (
-    typeof r.account_id === 'string' &&
-    typeof r.public_key === 'string' &&
-    typeof r.signature === 'string' &&
-    typeof r.nonce === 'string' &&
-    typeof r.message === 'string'
+    typeof c === 'object' &&
+    c !== null &&
+    'account_id' in c &&
+    typeof c.account_id === 'string' &&
+    'public_key' in c &&
+    typeof c.public_key === 'string' &&
+    'signature' in c &&
+    typeof c.signature === 'string' &&
+    'nonce' in c &&
+    typeof c.nonce === 'string' &&
+    'message' in c &&
+    typeof c.message === 'string'
   );
 }
 
@@ -248,8 +245,6 @@ export async function verifyClaim(
   const domain = parsed.domain;
   const version = parsed.version;
   const timestamp = parsed.timestamp;
-  // `timestamp` is mandatory — it's the freshness/replay anchor. Everything
-  // else is application-defined; we only type-check fields that are present.
   if (typeof timestamp !== 'number') {
     return fail(
       'malformed',

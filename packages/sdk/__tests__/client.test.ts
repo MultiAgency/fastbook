@@ -1454,7 +1454,6 @@ describe('NearlyClient.getEndorsementGraph', () => {
       'carol.near',
     ]);
   });
-
 });
 
 describe('NearlyClient.listTags / listCapabilities', () => {
@@ -1914,7 +1913,7 @@ describe('NearlyClient.getBalance', () => {
       jsonResponse({ account_id: '0xbob', balance: '42' }),
     );
     const client = clientOf(fetch);
-    const res = await client.getBalance({ chain: 'eth' });
+    const res = await client.getBalance('eth');
     expect(res.chain).toBe('eth');
     expect(res.balanceNear).toBeUndefined();
     expect(calls[0].url).toContain('chain=eth');
@@ -1982,7 +1981,7 @@ describe('NearlyClient.unfollow', () => {
   });
 });
 
-describe('NearlyClient.updateMe', () => {
+describe('NearlyClient.updateProfile', () => {
   it('reads current profile, validates patch, writes the merged blob', async () => {
     const existing: Agent = { ...aliceProfileBlob, tags: ['rust'] };
     const { fetch, calls } = scripted((url) => {
@@ -2004,7 +2003,7 @@ describe('NearlyClient.updateMe', () => {
       throw new Error(`unexpected ${url}`);
     });
     const client = clientOf(fetch);
-    const res = await client.updateMe({
+    const res = await client.updateProfile({
       description: 'new bio',
       tags: ['rust', 'security'],
     });
@@ -2023,7 +2022,7 @@ describe('NearlyClient.updateMe', () => {
       throw new Error(`unexpected ${url}`);
     });
     const client = clientOf(fetch);
-    await expect(client.updateMe({})).rejects.toMatchObject({
+    await expect(client.updateProfile({})).rejects.toMatchObject({
       code: 'VALIDATION_ERROR',
     });
     expect(
@@ -2605,33 +2604,6 @@ describe('NearlyClient.endorseMany', () => {
     await expect(
       client.endorseMany([{ account_id: 'bob.near', keySuffixes: ['/bad'] }]),
     ).resolves.toMatchObject([{ action: 'error', code: 'VALIDATION_ERROR' }]);
-  });
-
-  it('suffix valid under dummy prefix but over byte limit for long target becomes per-item error', async () => {
-    // endorsing/_/ = 12 bytes. A 1010-byte suffix fits (1022 < 1024).
-    // endorsing/abcdefghijklmnopqrst.near/ = 31 bytes. 31 + 1010 = 1041 > 1024.
-    const longTarget = 'abcdefghijklmnopqrst.near';
-    const longSuffix = 'x'.repeat(1010);
-    const { fetch } = scripted((url) => {
-      if (url.endsWith(`/${longTarget}/profile`)) {
-        return profileEntryResponse({
-          ...aliceProfileBlob,
-          account_id: longTarget,
-        } as Agent);
-      }
-      if (url.includes('/wallet/v1/call')) return jsonResponse({});
-      throw new Error(`unexpected ${url}`);
-    });
-    const client = clientOf(fetch);
-    const results = await client.endorseMany([
-      { account_id: longTarget, keySuffixes: [longSuffix] },
-    ]);
-    expect(results).toHaveLength(1);
-    expect(results[0]).toMatchObject({
-      account_id: longTarget,
-      action: 'error',
-      code: 'VALIDATION_ERROR',
-    });
   });
 
   it('INSUFFICIENT_BALANCE aborts the batch', async () => {

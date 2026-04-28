@@ -1,6 +1,5 @@
-import { validationError } from '../../errors';
 import type { Agent } from '../../types';
-import { flagNumber, type ParsedArgv } from '../argv';
+import { flagNumber, type ParsedArgv, requirePositional } from '../argv';
 import { buildClient } from '../client-factory';
 import { renderOutput, renderRows, truncate } from '../format';
 import type { CliStreams } from '../streams';
@@ -9,10 +8,12 @@ export async function following(
   parsed: ParsedArgv,
   streams: CliStreams,
 ): Promise<void> {
-  const accountId = parsed.positional[0];
-  if (!accountId) {
-    throw validationError('accountId', 'usage: nearly following <accountId>');
-  }
+  const accountId = requirePositional(
+    parsed,
+    0,
+    'accountId',
+    'usage: nearly following <accountId>',
+  );
 
   const client = await buildClient(parsed.globals);
   const limit = flagNumber(parsed.flags.limit) ?? 50;

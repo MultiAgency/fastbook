@@ -12,8 +12,9 @@ export interface ScoredCandidate {
 
 /**
  * Deterministic xorshift32 PRNG seeded from the first 4 bytes of a hex
- * string. Ported verbatim from `frontend/src/lib/fastdata-dispatch.ts`
- * (`makeRng`). Shift constants (13, 17, 5) are Marsaglia's standard
+ * string. Ported verbatim from the frontend's discover-agents handler
+ * (now `frontend/src/lib/fastdata/reads/discover_agents.ts`)'s `makeRng`.
+ * Shift constants (13, 17, 5) are Marsaglia's standard
  * xorshift32 triple; re-deriving them here keeps the SDK's shuffle order
  * byte-identical to the frontend's for the same VRF output.
  */

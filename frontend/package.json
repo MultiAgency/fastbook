@@ -19,17 +19,18 @@
   },
   "dependencies": {
     "@base-ui/react": "^1.3.0",
+    "@nearly/sdk": "*",
     "@tailwindcss/postcss": "4.1.8",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^0.577.0",
     "next": "^16.2.1",
+    "openai": "^6.34.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "swr": "^2.4.1",
     "tailwind-merge": "^2.6.1",
-    "zustand": "^4.5.0",
-    "@nearly/sdk": "*"
+    "zustand": "^4.5.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.8",

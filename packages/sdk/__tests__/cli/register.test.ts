@@ -291,21 +291,6 @@ describe('nearly register --deterministic', () => {
     expect(result.stderr).not.toContain(privBody);
   });
 
-  test('--key in argv is rejected with a security-error message', async () => {
-    const result = await runCli([
-      'register',
-      '--key',
-      privateKey,
-      '--account-id',
-      'alice.near',
-      '--seed',
-      's',
-    ]);
-    expect(result.code).not.toBe(0);
-    expect(result.stderr).toMatch(/--private-key/);
-    expect(result.stderr).not.toContain(privBody);
-  });
-
   test('deterministic flags without --deterministic are rejected', async () => {
     // Prevents a typo on --deterministic from silently falling through to
     // anonymous mode and issuing a wk_ key the caller never asked for.

@@ -23,10 +23,8 @@ export const MS_EPOCH_THRESHOLD = 1e12;
 export const OUTLAYER_API_URL =
   process.env.NEXT_PUBLIC_OUTLAYER_API_URL ||
   'https://api.outlayer.fastnear.com';
-export const OUTLAYER_PROJECT_OWNER =
-  process.env.NEXT_PUBLIC_OUTLAYER_PROJECT_OWNER || 'hack.near';
-export const OUTLAYER_PROJECT_NAME =
-  process.env.NEXT_PUBLIC_OUTLAYER_PROJECT_NAME || 'nearly';
+export const OUTLAYER_PROJECT_OWNER = 'hack.near';
+export const OUTLAYER_PROJECT_NAME = 'nearly';
 
 export const OUTLAYER_ADMIN_ACCOUNT = process.env.OUTLAYER_ADMIN_ACCOUNT || '';
 
@@ -38,18 +36,12 @@ export const API_TIMEOUT_MS = 10_000;
 export const NEAR_RPC_URL = 'https://rpc.mainnet.near.org';
 
 /** NEP-413 claim freshness window — timestamps outside this window are rejected. */
-export const CLAIM_FRESHNESS_MS = (() => {
-  const raw = process.env.CLAIM_FRESHNESS_MS;
-  if (!raw) return 300_000;
-  const n = Number(raw);
-  return Number.isFinite(n) && n > 0 ? n : 300_000;
-})();
+export const CLAIM_FRESHNESS_MS = 300_000;
 
 /** Minimum NEAR to send for custody wallet gas. */
 export const FUND_AMOUNT_NEAR = '0.01';
 
-export const FASTDATA_KV_URL =
-  process.env.FASTDATA_KV_URL || 'https://kv.main.fastnear.com';
+export const FASTDATA_KV_URL = 'https://kv.main.fastnear.com';
 export const FASTDATA_NAMESPACE =
   process.env.FASTDATA_NAMESPACE || 'contextual.near';
 // FastData tuning constants (single source of truth for pagination & batching).
@@ -58,8 +50,7 @@ export const FASTDATA_MULTI_BATCH_SIZE = 100;
 /** Entries per page in kvList auto-pagination. */
 export const FASTDATA_PAGE_SIZE = 200;
 
-export const MARKET_API_URL =
-  process.env.NEAR_MARKET_API_URL || 'https://market.near.ai/v1';
+export const MARKET_API_URL = 'https://market.near.ai/v1';
 
 export const EXTERNAL_URLS = {
   NEAR_EXPLORER: (accountId: string) =>

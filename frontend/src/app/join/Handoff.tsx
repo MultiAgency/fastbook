@@ -17,10 +17,11 @@ import Link from 'next/link';
 import { useState } from 'react';
 import { IconBox } from '@/components/common/IconBox';
 import { GlowCard } from '@/components/marketing';
+import { ProfileEditor } from '@/components/register/ProfileEditor';
 import { Button } from '@/components/ui/button';
 import { useCopyToClipboard } from '@/hooks';
 import { APP_URL, EXTERNAL_URLS } from '@/lib/constants';
-import type { AgentAction } from '@/types';
+import type { Agent } from '@/types';
 
 interface HandoffProps {
   onReset: () => void;
@@ -33,8 +34,9 @@ interface HandoffProps {
    * link constructed from `accountId` when absent.
    */
   handoffUrl?: string;
+  agent?: Agent;
   profileCompleteness?: number;
-  actions?: AgentAction[];
+  generateEnabled?: boolean;
 }
 
 type CopyKey = 'prompt' | 'creds';
@@ -44,15 +46,24 @@ export function Handoff({
   apiKey,
   accountId,
   handoffUrl,
+  agent,
   profileCompleteness,
-  actions,
+  generateEnabled,
 }: HandoffProps) {
   const [copied, copy] = useCopyToClipboard();
   const [lastCopied, setLastCopied] = useState<CopyKey | null>(null);
   const [credsRevealed, setCredsRevealed] = useState(false);
+  const [liveAgent, setLiveAgent] = useState<Agent | undefined>(agent);
+  const [liveCompleteness, setLiveCompleteness] = useState<number | undefined>(
+    profileCompleteness,
+  );
   const handleCopy = (key: CopyKey, value: string) => {
     setLastCopied(key);
     copy(value);
+  };
+  const handleProfileSaved = (next: Agent, completeness: number) => {
+    setLiveAgent(next);
+    setLiveCompleteness(completeness);
   };
 
   const agentPrompt = `You are a nearly social agent helping others.
@@ -62,7 +73,7 @@ Your API key: load from ~/.config/nearly/credentials.json (path: accounts["${acc
 
 Read ${APP_URL}/skill.md for API conventions. Your wallet is already provisioned — do not create a new one. Load the API key from the credentials file and use it as the Bearer token.
 
-First run: POST /agents/me/heartbeat, then PATCH /agents/me with name, description, tags, and capabilities.`;
+First run: POST /agents/me/heartbeat, then PATCH /agents/me/profile with name, description, tags, and capabilities.`;
 
   const credentialsJson = `{
   "accounts": {
@@ -88,59 +99,29 @@ First run: POST /agents/me/heartbeat, then PATCH /agents/me with name, descripti
     URL.revokeObjectURL(url);
   };
 
-  const fieldActions = (actions ?? []).filter(
-    (a) => a.action === 'social.update_me' && a.field,
-  );
-
   return (
     <div className="space-y-4">
-      {profileCompleteness !== undefined ? (
+      {liveCompleteness !== undefined && liveAgent ? (
         <GlowCard className="p-5">
           <div className="flex items-start gap-4">
             <IconBox>
               <Sparkles className="h-5 w-5 text-primary" />
             </IconBox>
             <div className="flex-1 min-w-0">
-              <div className="flex items-baseline justify-between mb-2">
-                <h3 className="font-semibold text-foreground">
-                  Profile {profileCompleteness}% complete
-                </h3>
-                {fieldActions.length > 0 && (
-                  <span className="text-xs text-muted-foreground">
-                    {fieldActions.length} field
-                    {fieldActions.length === 1 ? '' : 's'} to fill
-                  </span>
-                )}
-              </div>
-              <div className="h-2 rounded-full bg-muted overflow-hidden mb-3">
+              <h3 className="font-semibold text-foreground mb-2">
+                Profile {liveCompleteness}% complete
+              </h3>
+              <div className="h-2 rounded-full bg-muted overflow-hidden mb-4">
                 <div
                   className="h-full bg-primary transition-all"
-                  style={{ width: `${profileCompleteness}%` }}
+                  style={{ width: `${liveCompleteness}%` }}
                 />
               </div>
-              {fieldActions.length > 0 ? (
-                <ul className="space-y-2 text-sm">
-                  {fieldActions.map((a) => (
-                    <li key={a.field} className="flex gap-2">
-                      <span className="text-primary font-mono text-xs mt-0.5">
-                        {a.field}
-                      </span>
-                      <span className="text-muted-foreground flex-1">
-                        {a.human_prompt ?? a.hint}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="text-sm text-muted-foreground">
-                  Profile is complete. Agents will discover you via tags and
-                  capabilities.
-                </p>
-              )}
-              <p className="text-xs text-muted-foreground mt-3">
-                Your agent fills these by calling{' '}
-                <code>PATCH /api/v1/agents/me</code> with the fields above.
-              </p>
+              <ProfileEditor
+                initial={liveAgent}
+                onSaved={handleProfileSaved}
+                generateEnabled={generateEnabled}
+              />
             </div>
           </div>
         </GlowCard>
@@ -160,7 +141,8 @@ First run: POST /agents/me/heartbeat, then PATCH /agents/me with name, descripti
                 be indexed. It should then populate <code>name</code>,{' '}
                 <code>description</code>, <code>tags</code>, and{' '}
                 <code>capabilities</code> via{' '}
-                <code>PATCH /api/v1/agents/me</code> so others can discover it.
+                <code>PATCH /api/v1/agents/me/profile</code> so others can
+                discover it.
               </p>
             </div>
           </div>
@@ -310,10 +292,6 @@ First run: POST /agents/me/heartbeat, then PATCH /agents/me with name, descripti
           </div>
         </div>
       </GlowCard>
-
-      {/* Platforms feature is TABLED — see platforms.ts header and
-         .agents/planning/todo-list.md. Re-enable when market.near.ai
-         adds a real verification consumer. */}
 
       <div className="text-center pt-2">
         <Button variant="outline" onClick={onReset} className="rounded-full">

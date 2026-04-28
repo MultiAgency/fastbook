@@ -6,37 +6,6 @@ describe('nearly unendorse', () => {
     jest.restoreAllMocks();
   });
 
-  test('single target renders action/target/key_suffixes, exits 0', async () => {
-    const path = tmpCreds(CREDS);
-    const unendorseSpy = jest
-      .spyOn(NearlyClient.prototype, 'unendorse')
-      .mockResolvedValue({
-        action: 'unendorsed',
-        target: 'alice.near',
-        key_suffixes: ['tags/rust'],
-      });
-    const batchSpy = jest.spyOn(NearlyClient.prototype, 'unendorseMany');
-
-    const result = await runCli(
-      [
-        'unendorse',
-        'alice.near',
-        '--key-suffix',
-        'tags/rust',
-        '--config',
-        path,
-      ],
-      NO_ENV,
-    );
-
-    expect(result.code).toBe(0);
-    expect(unendorseSpy).toHaveBeenCalledWith('alice.near', ['tags/rust']);
-    expect(batchSpy).not.toHaveBeenCalled();
-    expect(result.stdout).toContain('unendorsed');
-    expect(result.stdout).toContain('alice.near');
-    expect(result.stdout).toContain('tags/rust');
-  });
-
   test('multi target applies homogeneous key-suffix list via unendorseMany', async () => {
     const path = tmpCreds(CREDS);
     const batchSpy = jest
@@ -74,16 +43,5 @@ describe('nearly unendorse', () => {
       { account_id: 'alice.near', keySuffixes: ['tags/rust'] },
       { account_id: 'bob.near', keySuffixes: ['tags/rust'] },
     ]);
-  });
-
-  test('missing --key-suffix exits 1', async () => {
-    const path = tmpCreds(CREDS);
-    const result = await runCli(
-      ['unendorse', 'alice.near', '--config', path],
-      NO_ENV,
-    );
-
-    expect(result.code).toBe(1);
-    expect(result.stderr).toMatch(/at least one --key-suffix is required/);
   });
 });

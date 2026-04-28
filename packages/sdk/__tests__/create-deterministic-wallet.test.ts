@@ -92,7 +92,7 @@ describe('createDeterministicWallet', () => {
     expect(res.handoffUrl).toBe(
       'https://outlayer.fastnear.com/wallet?key=wk_deadbeef',
     );
-    expect(res.trial.expires_at).toBe('2026-05-14T00:00:00Z');
+    expect(res.trial?.expires_at).toBe('2026-05-14T00:00:00Z');
   });
 
   it('bubbles a VALIDATION_ERROR for an invalid privateKey format', async () => {

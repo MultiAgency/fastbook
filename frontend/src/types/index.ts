@@ -44,8 +44,10 @@ import type {
   EndorserEntry,
   EndorsingTargetGroup,
   KvEntry,
+  SuggestedAgent,
   TagCount,
   VerifiableClaim,
+  VrfProof,
 } from '@nearly/sdk';
 
 export type {
@@ -58,20 +60,11 @@ export type {
   EndorserEntry,
   EndorsingTargetGroup,
   KvEntry,
+  SuggestedAgent,
   TagCount,
   VerifiableClaim,
+  VrfProof,
 };
-
-export interface SuggestedAgent extends Agent {
-  reason?: string;
-}
-
-export interface VrfProof {
-  output_hex: string;
-  signature_hex: string;
-  alpha: string;
-  vrf_public_key: string;
-}
 
 export interface PlatformResult {
   success: boolean;
@@ -79,79 +72,53 @@ export interface PlatformResult {
   error?: string;
 }
 
-/**
- * An action the server suggests the agent take next. Attached to
- * `me` / `heartbeat` / `update_me` responses as `data.actions[]`.
- *
- * Designed to be forwarded to a human collaborator: each entry carries a
- * natural-language prompt, example values, and a one-sentence consequence
- * so the agent can surface the ask without rewriting API docs into prose.
- *
- * The server does not track whether a suggestion was already made — agents
- * handle backoff and de-duplication on their own conversation state.
- */
+/** Server-suggested next action. See `openapi.json#/components/schemas/AgentAction` for the canonical contract. */
 export interface AgentAction {
-  /** Which Nearly action this suggestion maps to. */
   action:
-    | 'social.update_me'
+    | 'social.profile'
     | 'social.heartbeat'
     | 'discover_agents'
     | 'social.delist_me';
-  /** How urgent the agent's nudge to its human should be.
-   *  `high`   — prompt the human now.
-   *  `medium` — raise on the next natural pause.
-   *  `low`    — mention only if asked "anything else?". */
   priority: 'high' | 'medium' | 'low';
-  /** Profile field this action addresses. Absent for actions that aren't
-   *  field-scoped (e.g. `discover_agents`, `delist_me`). */
   field?: 'name' | 'description' | 'tags' | 'capabilities' | 'image';
-  /** Natural-language prompt the agent can speak (or paraphrase) to its
-   *  human collaborator. Addresses the human in first person ("What should
-   *  I call myself?"), not the agent ("Set your display name"). */
   human_prompt?: string;
-  /** Concrete sample values. Typed per field — scalar strings for
-   *  name/description/image, string arrays for tags, nested objects for
-   *  capabilities. Agents splat these into update_me calls or render to
-   *  humans as examples. Documented shape per field in openapi.json. */
   examples?: unknown[];
-  /** One-sentence description of what the agent loses by not acting.
-   *  For motivating the human. */
   consequence?: string;
-  /** Terse machine-readable hint describing the API call. For agent code
-   *  paths that skip prose. */
   hint: string;
+}
+
+export interface ServerFeatures {
+  generate?: boolean;
 }
 
 export interface GetMeResponse {
   agent: Agent;
   profile_completeness: number;
   actions?: AgentAction[];
+  features?: ServerFeatures;
 }
 
-export interface UpdateMeResponse {
+export interface UpdateProfileResponse {
   agent: Agent;
   profile_completeness: number;
   actions?: AgentAction[];
+  features?: ServerFeatures;
 }
 
 export interface HeartbeatResponse {
   agent: Agent;
   profile_completeness: number;
   delta: {
+    /** Wall-clock seconds of the caller's previous `last_active`. Display convenience for "X minutes ago" UX. 0 on first heartbeat. */
     since: number;
-    /**
-     * Block-height companion of `since`. The block height of the caller's
-     * previous profile write (or 0 on first heartbeat). Consumers should
-     * prefer `since_height` when cursoring across heartbeats — step 4 of
-     * the wall-clock → block-height transition migrates the delta-query
-     * contract to cursor on block height exclusively.
-     */
+    /** Block height of the caller's previous profile write. Cursor for `new_followers`: only edges with `block_height > since_height` are surfaced. 0 on first heartbeat. */
     since_height: number;
     new_followers: AgentSummary[];
     new_followers_count: number;
     new_following_count: number;
   };
   actions?: AgentAction[];
+  features?: ServerFeatures;
 }
 
 export interface GetProfileResponse {

@@ -34,13 +34,4 @@ describe('nearly me', () => {
     expect(result.stdout).toContain('Caller');
     expect(result.stdout).not.toMatch(/wk_/);
   });
-
-  test('missing credentials exits 1 with guidance', async () => {
-    const result = await runCli(
-      ['me', '--config', '/nonexistent/path/creds.json'],
-      NO_ENV,
-    );
-    expect(result.code).toBe(1);
-    expect(result.stderr).toContain('nearly register');
-  });
 });

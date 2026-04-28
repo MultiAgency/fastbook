@@ -4,7 +4,7 @@
  * SDK ↔ frontend envelope parity regression test.
  *
  * For each of the 7 social mutation actions, this test asserts that the
- * frontend handler in `fastdata-write.ts` and the SDK builder in
+ * frontend handler in `fastdata/writes/<action>.ts` and the SDK builder in
  * `packages/sdk/src/social.ts` produce byte-for-byte equivalent `entries`
  * maps when given the same input. The frontend handlers already delegate
  * to the SDK builders (migration complete), so this test serves as an
@@ -15,7 +15,7 @@
  * - The `entries` map passed to `writeToFastData` (as observed via the
  *   mocked `fetchWithTimeout`'s outbound body) is deep-equal to what
  *   the corresponding SDK builder returns in `Mutation.entries`.
- * - Tombstone semantics for `update_me` when the patch drops a tag AND
+ * - Tombstone semantics for `profile` when the patch drops a tag AND
  *   a capability — the highest-risk parity case.
  *
  * What it does NOT assert:
@@ -34,12 +34,12 @@ import {
   buildHeartbeat,
   buildKvDelete,
   buildKvPut,
+  buildProfile,
   buildUnendorse,
   buildUnfollow,
-  buildUpdateMe,
 } from '@nearly/sdk';
 import { NextRequest } from 'next/server';
-import * as fastdata from '@/lib/fastdata';
+import * as fastdata from '@/lib/fastdata/client';
 import {
   handleDelistMe,
   handleEndorse,
@@ -47,14 +47,14 @@ import {
   handleHeartbeat,
   handleUnendorse,
   handleUnfollow,
-  handleUpdateMe,
-} from '@/lib/fastdata-write';
+  handleUpdateProfile,
+} from '@/lib/fastdata/writes';
 import * as fetchLib from '@/lib/fetch';
 import * as outlayerServer from '@/lib/outlayer-server';
 import * as rateLimit from '@/lib/rate-limit';
-import { mockAgent, profileEntry } from './fixtures';
+import { mockAgent, profileEntry, resolveAccountId, WK } from './fixtures';
 
-jest.mock('@/lib/fastdata');
+jest.mock('@/lib/fastdata/client');
 jest.mock('@/lib/fetch');
 jest.mock('@/lib/rate-limit');
 
@@ -66,6 +66,8 @@ jest.mock('@/lib/outlayer-server', () => ({
   ...jest.requireActual('@/lib/outlayer-server'),
   resolveAccountId: jest.fn().mockResolvedValue('admin.near'),
   signClaimForWalletKey: jest.fn().mockResolvedValue(null),
+}));
+jest.mock('@/lib/admin-near-token', () => ({
   buildAdminNearToken: jest.fn().mockReturnValue('near:mock_admin_token'),
   resolveAdminWriterAccount: jest.fn().mockResolvedValue(null),
 }));
@@ -79,7 +81,7 @@ jest.mock('@/lib/cache', () => ({
   getCached: jest.fn().mockReturnValue(undefined),
   setCache: jest.fn(),
 }));
-jest.mock('@/lib/fastdata-dispatch', () => ({
+jest.mock('@/lib/fastdata/reads', () => ({
   dispatchFastData: jest.fn(),
   handleGetSuggested: jest.fn(),
 }));
@@ -103,10 +105,8 @@ const mockFetchWithTimeout = fetchLib.fetchWithTimeout as jest.MockedFunction<
   typeof fetchLib.fetchWithTimeout
 >;
 
-const WK = 'wk_testkey';
 const CALLER = 'alice.near';
 const TARGET = 'bob.near';
-const resolveAccountId = jest.fn();
 
 // Seeds the default kvGetAgent mock so only the caller's profile resolves.
 // Shared across describes that need a caller-only seed; cases that also
@@ -389,7 +389,7 @@ describe('SDK envelope parity — social.heartbeat', () => {
   it('first-write: caller has no profile, both sides fall back to defaultAgent', async () => {
     // No profile entry for the caller — `resolveCallerOrInit` falls through
     // to `defaultAgent(accountId)`. Pins that the frontend's `defaultAgent`
-    // in `fastdata-write.ts` stays byte-equal to the SDK's `defaultAgent`
+    // in `fastdata/writes/_shared.ts` stays byte-equal to the SDK's `defaultAgent`
     // in `packages/sdk/src/graph.ts` — if they ever drift, the stripped
     // profile blob diverges and this test fails.
     mockKvGetAgent.mockImplementation(async () => null);
@@ -434,7 +434,7 @@ describe('SDK envelope parity — social.heartbeat', () => {
   });
 });
 
-describe('SDK envelope parity — social.update_me', () => {
+describe('SDK envelope parity — social.profile', () => {
   it('image clear: patch { image: null } strips the field on both sides', async () => {
     // Seed the caller with a non-null image so the clear path is observable
     // (the default `mockAgent` already has `image: null`, which would make
@@ -447,7 +447,7 @@ describe('SDK envelope parity — social.update_me', () => {
     seedCallerProfile(agent);
 
     const patch = { image: null };
-    await handleUpdateMe(WK, patch, resolveAccountId);
+    await handleUpdateProfile(WK, patch, resolveAccountId);
     const frontend = captureWriteEntries();
     expect(frontend).not.toBeNull();
 
@@ -457,7 +457,7 @@ describe('SDK envelope parity — social.update_me', () => {
       last_active: 2000,
       last_active_height: 2000,
     };
-    const sdk = buildUpdateMe(CALLER, hydratedAgent, patch);
+    const sdk = buildProfile(CALLER, hydratedAgent, patch);
     expect(frontend).toEqual(sdk.entries);
   });
 
@@ -479,7 +479,7 @@ describe('SDK envelope parity — social.update_me', () => {
       capabilities: { skills: ['audit'] }, // drops 'will-vanish'
     };
 
-    await handleUpdateMe(WK, patch, resolveAccountId);
+    await handleUpdateProfile(WK, patch, resolveAccountId);
     const frontend = captureWriteEntries();
     expect(frontend).not.toBeNull();
 
@@ -490,7 +490,7 @@ describe('SDK envelope parity — social.update_me', () => {
       last_active: 2000,
       last_active_height: 2000,
     };
-    const sdk = buildUpdateMe(CALLER, hydratedAgent, patch);
+    const sdk = buildProfile(CALLER, hydratedAgent, patch);
     expect(frontend).toEqual(sdk.entries);
   });
 });
@@ -560,7 +560,7 @@ describe('SDK envelope parity — social.delist_me', () => {
 // KV primitive parity — admin hide / unhide
 // ---------------------------------------------------------------------------
 //
-// The 7 social describes above cover `fastdata-write.ts`'s handlers. The
+// The 7 social describes above cover `fastdata/writes/`'s handlers. The
 // admin hide/unhide path in `route.ts::handleAdmin` is the only other caller
 // that constructs a write envelope in the frontend tree, and since Tier 4 it
 // delegates shape to `buildKvPut` / `buildKvDelete` from `@nearly/sdk/kv`.

@@ -1,3 +1,4 @@
+import type { ProfilePatch } from '@nearly/sdk';
 import type {
   Agent,
   Edge,
@@ -10,6 +11,7 @@ import type {
   PlatformResult,
   SuggestedResponse,
   TagsResponse,
+  UpdateProfileResponse,
 } from '@/types';
 import { API_TIMEOUT_MS, LIMITS } from './constants';
 import { fetchWithRetry, fetchWithTimeout } from './fetch';
@@ -48,16 +50,26 @@ async function parseErrorBody(response: Response): Promise<{
   }
 }
 
+interface ApiErrorOpts {
+  statusCode: number;
+  message: string;
+  code?: string;
+  hint?: string;
+  retryAfter?: number;
+}
+
 class ApiError extends Error {
-  constructor(
-    public statusCode: number,
-    message: string,
-    public code?: string,
-    public hint?: string,
-    public retryAfter?: number,
-  ) {
-    super(message);
+  statusCode: number;
+  code?: string;
+  hint?: string;
+  retryAfter?: number;
+  constructor(opts: ApiErrorOpts) {
+    super(opts.message);
     this.name = 'ApiError';
+    this.statusCode = opts.statusCode;
+    this.code = opts.code;
+    this.hint = opts.hint;
+    this.retryAfter = opts.retryAfter;
   }
 }
 
@@ -85,7 +97,7 @@ class ApiClient {
       if (this.apiKey) {
         headers.Authorization = `Bearer ${this.apiKey}`;
       } else {
-        throw new ApiError(401, 'API key not set');
+        throw new ApiError({ statusCode: 401, message: 'API key not set' });
       }
     }
 
@@ -110,18 +122,26 @@ class ApiClient {
     if (!response.ok) {
       const { message, code, hint, retryAfter } =
         await parseErrorBody(response);
-      throw new ApiError(response.status, message, code, hint, retryAfter);
+      throw new ApiError({
+        statusCode: response.status,
+        message,
+        code,
+        hint,
+        retryAfter,
+      });
     }
 
     const result = await response.json();
     if (!result.success) {
-      throw new ApiError(
-        wasmCodeToStatus(result.code),
-        result.error || 'Request failed',
-        result.code,
-        result.hint,
-        typeof result.retry_after === 'number' ? result.retry_after : undefined,
-      );
+      const retryAfter =
+        typeof result.retry_after === 'number' ? result.retry_after : undefined;
+      throw new ApiError({
+        statusCode: wasmCodeToStatus(result.code),
+        message: result.error || 'Request failed',
+        code: result.code,
+        hint: result.hint,
+        retryAfter,
+      });
     }
 
     return { data: result.data };
@@ -134,7 +154,7 @@ class ApiClient {
   ): Promise<T> {
     const { data } = await this.requestRaw(action, args, authMode);
     if (data === undefined || data === null) {
-      throw new ApiError(502, 'Empty response data');
+      throw new ApiError({ statusCode: 502, message: 'Empty response data' });
     }
     return data as T;
   }
@@ -194,6 +214,34 @@ class ApiClient {
 
   async heartbeat() {
     return this.request<HeartbeatResponse>('social.heartbeat', {});
+  }
+
+  async updateProfile(patch: ProfilePatch) {
+    return this.request<UpdateProfileResponse>(
+      'social.profile',
+      patch as Record<string, unknown>,
+    );
+  }
+
+  async generateProfile(field: string, current: Partial<ProfilePatch>) {
+    return this.request<{
+      field: string;
+      value: string | string[] | Record<string, unknown> | null;
+    }>('generate.profile', { field, current });
+  }
+
+  async generateFollowReason(accountId: string, reason?: string) {
+    return this.request<{ reason: string | null }>(
+      'generate.follow',
+      reason !== undefined ? { accountId, reason } : { accountId },
+    );
+  }
+
+  async generateEndorseReason(accountId: string, reason?: string) {
+    return this.request<{ reason: string | null }>(
+      'generate.endorse',
+      reason !== undefined ? { accountId, reason } : { accountId },
+    );
   }
 
   private async listByRelation(

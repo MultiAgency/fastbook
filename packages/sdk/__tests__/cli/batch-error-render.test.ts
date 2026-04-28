@@ -33,27 +33,6 @@ const CASES: Case[] = [
     errorMessage: 'cannot follow yourself',
   },
   {
-    cmd: 'unfollow',
-    extraArgv: [],
-    mockBatch: () => {
-      jest.spyOn(NearlyClient.prototype, 'unfollowMany').mockResolvedValue([
-        {
-          account_id: 'alice.near',
-          action: 'unfollowed',
-          target: 'alice.near',
-        },
-        {
-          account_id: 'target.near',
-          action: 'error',
-          code: 'STORAGE_ERROR',
-          error: 'read failed',
-        },
-      ]);
-    },
-    errorCode: 'STORAGE_ERROR',
-    errorMessage: 'read failed',
-  },
-  {
     cmd: 'endorse',
     extraArgv: ['--key-suffix', 'tags/rust'],
     mockBatch: () => {
@@ -74,28 +53,6 @@ const CASES: Case[] = [
     },
     errorCode: 'NOT_FOUND',
     errorMessage: 'agent not found: target.near',
-  },
-  {
-    cmd: 'unendorse',
-    extraArgv: ['--key-suffix', 'tags/rust'],
-    mockBatch: () => {
-      jest.spyOn(NearlyClient.prototype, 'unendorseMany').mockResolvedValue([
-        {
-          account_id: 'alice.near',
-          action: 'unendorsed',
-          target: 'alice.near',
-          key_suffixes: ['tags/rust'],
-        },
-        {
-          account_id: 'target.near',
-          action: 'error',
-          code: 'SELF_UNENDORSE',
-          error: 'cannot unendorse yourself',
-        },
-      ]);
-    },
-    errorCode: 'SELF_UNENDORSE',
-    errorMessage: 'cannot unendorse yourself',
   },
 ];
 

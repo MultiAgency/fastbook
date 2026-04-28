@@ -172,7 +172,7 @@ describe('getBalance', () => {
     const { fetch, calls } = scripted(() =>
       jsonResponse({ account_id: 'bob.eth', balance: '1000000000000000000' }),
     );
-    const res = await getBalance(walletOf(fetch), { chain: 'eth' });
+    const res = await getBalance(walletOf(fetch), 'eth');
     expect(res.chain).toBe('eth');
     expect(res.balance).toBe('1000000000000000000');
     expect(res.balanceNear).toBeUndefined();

@@ -1,8 +1,7 @@
 import { validationError } from '../../errors';
 import { flagString, type ParsedArgv, toArray } from '../argv';
-import { renderBatchMutation } from '../batch';
+import { renderSingleOrBatch } from '../batch';
 import { buildClient } from '../client-factory';
-import { renderKeyValue, renderOutput } from '../format';
 import type { CliStreams } from '../streams';
 
 export async function endorse(
@@ -27,38 +26,25 @@ export async function endorse(
 
   const reason = flagString(parsed.flags.reason);
   const contentHash = flagString(parsed.flags['content-hash']);
+  const opts = {
+    keySuffixes,
+    ...(reason ? { reason } : {}),
+    ...(contentHash ? { contentHash } : {}),
+  };
 
   const client = await buildClient(parsed.globals);
-
-  if (targets.length === 1) {
-    const result = await client.endorse(targets[0], {
-      keySuffixes,
-      ...(reason ? { reason } : {}),
-      ...(contentHash ? { contentHash } : {}),
-    });
-    renderOutput(
-      parsed.globals,
-      result,
-      () =>
-        renderKeyValue([
-          ['action', result.action],
-          ['target', result.target],
-          ['key_suffixes', result.key_suffixes.join(', ')],
-        ]),
-      streams,
-    );
-    return 0;
-  }
-
-  const results = await client.endorseMany(
-    targets.map((account_id) => ({
-      account_id,
-      keySuffixes,
-      ...(reason ? { reason } : {}),
-      ...(contentHash ? { contentHash } : {}),
-    })),
-  );
-  return renderBatchMutation(parsed.globals, results, streams, (r) =>
-    r.key_suffixes.join(', '),
-  );
+  return renderSingleOrBatch({
+    parsed,
+    streams,
+    targets,
+    single: (t) => client.endorse(t, opts),
+    many: (ts) =>
+      client.endorseMany(ts.map((account_id) => ({ account_id, ...opts }))),
+    singleKeys: (r) => [
+      ['action', r.action],
+      ['target', r.target],
+      ['key_suffixes', r.key_suffixes.join(', ')],
+    ],
+    detail: (r) => r.key_suffixes.join(', '),
+  });
 }

@@ -1,8 +1,7 @@
 import { validationError } from '../../errors';
 import type { ParsedArgv } from '../argv';
-import { renderBatchMutation } from '../batch';
+import { renderSingleOrBatch } from '../batch';
 import { buildClient } from '../client-factory';
-import { renderKeyValue, renderOutput } from '../format';
 import type { CliStreams } from '../streams';
 
 export async function unfollow(
@@ -18,22 +17,16 @@ export async function unfollow(
   }
 
   const client = await buildClient(parsed.globals);
-
-  if (targets.length === 1) {
-    const result = await client.unfollow(targets[0]);
-    renderOutput(
-      parsed.globals,
-      result,
-      () =>
-        renderKeyValue([
-          ['action', result.action],
-          ['target', result.target],
-        ]),
-      streams,
-    );
-    return 0;
-  }
-
-  const results = await client.unfollowMany(targets);
-  return renderBatchMutation(parsed.globals, results, streams, () => '');
+  return renderSingleOrBatch({
+    parsed,
+    streams,
+    targets,
+    single: (t) => client.unfollow(t),
+    many: (ts) => client.unfollowMany(ts),
+    singleKeys: (r) => [
+      ['action', r.action],
+      ['target', r.target],
+    ],
+    detail: () => '',
+  });
 }

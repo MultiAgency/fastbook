@@ -121,9 +121,12 @@ export function extractCapabilityPairs(caps: unknown): [string, string][] {
   return pairs;
 }
 
-// ---------------------------------------------------------------------------
-// Profile completeness
-// ---------------------------------------------------------------------------
+export type GapField =
+  | 'name'
+  | 'description'
+  | 'tags'
+  | 'capabilities'
+  | 'image';
 
 /** Profile fields that are missing or insufficient. Single source of truth
  *  for presence detection: `profileCompleteness()` scores from this, and
@@ -136,8 +139,8 @@ export function profileGaps(agent: {
   image?: string | null | unknown;
   tags?: string[] | unknown;
   capabilities?: Record<string, unknown> | unknown;
-}): string[] {
-  const gaps: string[] = [];
+}): GapField[] {
+  const gaps: GapField[] = [];
   if (!agent.name || typeof agent.name !== 'string') gaps.push('name');
   if (
     !agent.description ||
@@ -210,10 +213,6 @@ export function profileCompleteness(
 
   return score;
 }
-
-// ---------------------------------------------------------------------------
-// Multi-hop endorsement graph traversal
-// ---------------------------------------------------------------------------
 
 export interface EndorsementGraphNode {
   account_id: string;

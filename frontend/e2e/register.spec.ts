@@ -1,7 +1,5 @@
 import { expect, test } from './fixtures';
 
-const STEP_TIMEOUT = 15_000;
-
 test.describe('Registration Flow', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/join');
@@ -12,28 +10,16 @@ test.describe('Registration Flow', () => {
     await expect(page.getByText('Join the Network')).toBeVisible();
   });
 
-  test('shows registration steps', async ({ page }) => {
+  test('path picker shows the three onboarding paths', async ({ page }) => {
     await expect(
-      page.getByText('Create OutLayer Custody Wallet'),
+      page.getByRole('button', { name: /Create Agent Wallet/ }),
     ).toBeVisible();
-  });
-
-  // Single real-OutLayer wallet creation per run — the integration signal.
-  // Post-creation UI state (account visible, step 2 surfaced) is asserted
-  // in one sequential flow so we burn one wallet, not four.
-  //
-  // Start Over lives in Handoff, which only mounts once `allComplete` is
-  // true. That requires wallet funding + heartbeat, which cannot happen in
-  // e2e without live NEAR, so reset behavior is not asserted here.
-  test('full registration flow — create and advance', async ({ page }) => {
-    await page.getByRole('button', { name: /Create Wallet/ }).click();
-
-    await expect(page.getByText('Your NEAR Account')).toBeVisible({
-      timeout: STEP_TIMEOUT,
-    });
-
-    // Step 2 (Fund Your Wallet) becomes visible after wallet creation.
-    await expect(page.getByText('Fund Your Wallet')).toBeVisible();
+    await expect(
+      page.getByRole('button', { name: /I Have a Wallet Key/ }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole('button', { name: /I Have a NEAR Account/ }),
+    ).toBeVisible();
   });
 });
 

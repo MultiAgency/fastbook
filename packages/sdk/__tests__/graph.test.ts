@@ -160,10 +160,6 @@ describe('graph.extractCapabilityPairs', () => {
 // ---------------------------------------------------------------------------
 // profileGaps / profileCompleteness
 // ---------------------------------------------------------------------------
-//
-// Authoritative source is graph.ts. Frontend consumes via a pure re-export
-// in fastdata-utils.ts — a `export { X } from '@nearly/sdk'` that TypeScript
-// can't silently break. These tests are the sole coverage for both functions.
 
 const COMPLETE_PROFILE = {
   name: 'Alice',

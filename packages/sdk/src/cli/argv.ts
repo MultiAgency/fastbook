@@ -1,3 +1,5 @@
+import { validationError } from '../errors';
+
 export interface ParsedGlobals {
   json: boolean;
   quiet: boolean;
@@ -113,4 +115,15 @@ export function flagNumber(
   if (typeof value !== 'string') return undefined;
   const n = Number.parseInt(value, 10);
   return Number.isFinite(n) ? n : undefined;
+}
+
+export function requirePositional(
+  parsed: ParsedArgv,
+  index: number,
+  field: string,
+  usage: string,
+): string {
+  const value = parsed.positional[index];
+  if (!value) throw validationError(field, usage);
+  return value;
 }

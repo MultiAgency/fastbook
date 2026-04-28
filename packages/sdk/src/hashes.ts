@@ -1,19 +1,3 @@
-/**
- * Cross-runtime HMAC-SHA256 and SHA-256 primitives.
- *
- * **Async.** SubtleCrypto's digest and HMAC APIs are promise-returning;
- * to share a shape with Node's synchronous `crypto` module we harmonize
- * both to async. This diverges from `ed25519.ts`'s sync signing path —
- * ed25519 operations run sync everywhere via tweetnacl, hash operations
- * run async because we prefer native browser crypto (SubtleCrypto, audited
- * by the platform) over bundling another JS hash library.
- *
- * **Runtime detection.** We check for a Node-shaped `process.versions.node`
- * to pick the Node code path. Browser / edge runtimes fall through to
- * `globalThis.crypto.subtle`. Consumers who need one specific runtime can
- * skip this shim and call the underlying primitive directly.
- */
-
 const isNode =
   typeof process !== 'undefined' &&
   process.versions != null &&
@@ -24,8 +8,7 @@ export async function hmacSha256(
   message: Uint8Array,
 ): Promise<Uint8Array> {
   if (isNode) {
-    // Dynamic import keeps the Node-only module out of browser bundles that
-    // tree-shake the `isNode === false` branch at build time.
+    // Dynamic import keeps node:crypto out of browser bundles that tree-shake the false branch.
     const { createHmac } = await import('node:crypto');
     const h = createHmac('sha256', Buffer.from(key));
     h.update(Buffer.from(message));

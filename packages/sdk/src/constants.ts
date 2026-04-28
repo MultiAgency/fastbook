@@ -40,7 +40,7 @@ export const RATE_LIMITS: Record<
   'social.follow': { limit: 10, windowSecs: 60 },
   'social.unfollow': { limit: 10, windowSecs: 60 },
   'social.heartbeat': { limit: 5, windowSecs: 60 },
-  'social.update_me': { limit: 10, windowSecs: 60 },
+  'social.profile': { limit: 10, windowSecs: 60 },
   'social.endorse': { limit: 20, windowSecs: 60 },
   'social.unendorse': { limit: 20, windowSecs: 60 },
   'social.delist_me': { limit: 1, windowSecs: 300 },

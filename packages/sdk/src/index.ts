@@ -38,6 +38,7 @@ export {
 export type {
   EndorsementGraphNode,
   EndorsementGraphReader,
+  GapField,
   WalkOpts,
 } from './graph';
 export {
@@ -53,15 +54,15 @@ export {
 export { buildKvDelete, buildKvPut } from './kv';
 export type { RateLimiter } from './rateLimit';
 export { defaultRateLimiter, noopRateLimiter } from './rateLimit';
-export type { EndorseOpts, UpdateMePatch } from './social';
+export type { EndorseOpts, ProfilePatch } from './social';
 export {
   buildDelistMe,
   buildEndorse,
   buildFollow,
   buildHeartbeat,
+  buildProfile,
   buildUnendorse,
   buildUnfollow,
-  buildUpdateMe,
 } from './social';
 export type { ScoredCandidate } from './suggest';
 export {
@@ -70,15 +71,6 @@ export {
   shuffleWithinTiers,
   sortByScoreThenActive,
 } from './suggest';
-export {
-  validateCapabilities,
-  validateDescription,
-  validateImageUrl,
-  validateKeySuffix,
-  validateName,
-  validateReason,
-  validateTags,
-} from './validate';
 export type {
   ActivityResponse,
   Agent,
@@ -106,6 +98,15 @@ export type {
   VrfProof,
   WriteResponse,
 } from './types';
+export {
+  validateCapabilities,
+  validateDescription,
+  validateImageUrl,
+  validateKeySuffix,
+  validateName,
+  validateReason,
+  validateTags,
+} from './validate';
 export type {
   BalanceResponse,
   DeterministicRegisterResponse,

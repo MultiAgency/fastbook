@@ -251,11 +251,14 @@ describe('LIMITS completeness', () => {
     'social.unfollow',
     'social.endorse',
     'social.unendorse',
-    'social.update_me',
+    'social.profile',
+    'generate.profile',
+    'generate.follow',
+    'generate.endorse',
     'social.heartbeat',
     'social.delist_me',
     'verify_claim',
-    'hidden_list',
+    'list_hidden',
     'list_platforms',
   ];
 

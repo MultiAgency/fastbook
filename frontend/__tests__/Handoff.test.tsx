@@ -1,9 +1,28 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { Handoff } from '@/app/join/Handoff';
+import { ApiError, api } from '@/lib/api';
+import type { Agent } from '@/types';
 
 jest.mock('@/hooks', () => ({
   useCopyToClipboard: () => [false, jest.fn()],
 }));
+
+jest.mock('@/lib/api', () => ({
+  api: {
+    listTags: jest.fn().mockResolvedValue({ tags: [] }),
+    updateProfile: jest.fn(),
+  },
+  ApiError: class ApiError extends Error {},
+}));
+
+const TEST_AGENT: Agent = {
+  account_id: 'test-account.near',
+  name: null,
+  description: '',
+  image: null,
+  tags: [],
+  capabilities: {},
+};
 
 // platforms.ts transitively imports next/server, which needs web Request
 // globals jsdom doesn't provide. The Handoff component only uses the
@@ -104,6 +123,7 @@ describe('Handoff', () => {
       <Handoff
         accountId={TEST_ACCOUNT}
         apiKey={TEST_KEY}
+        agent={TEST_AGENT}
         profileCompleteness={40}
         onReset={jest.fn()}
       />,
@@ -126,5 +146,70 @@ describe('Handoff', () => {
     );
     const link = screen.getByRole('link', { name: /top up wallet/i });
     expect(link.getAttribute('href')).toBe(handoffUrl);
+  });
+
+  it('saves a sparse patch with only changed fields and propagates completeness from the response', async () => {
+    const updated: Agent = { ...TEST_AGENT, name: 'Alice' };
+    (api.updateProfile as jest.Mock).mockResolvedValueOnce({
+      agent: updated,
+      profile_completeness: 60,
+    });
+    render(
+      <Handoff
+        accountId={TEST_ACCOUNT}
+        apiKey={TEST_KEY}
+        agent={TEST_AGENT}
+        profileCompleteness={40}
+        onReset={jest.fn()}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText(/^name$/i), {
+      target: { value: 'Alice' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /save profile/i }));
+    await screen.findByRole('heading', { name: /profile 60% complete/i });
+    expect(api.updateProfile).toHaveBeenCalledWith({ name: 'Alice' });
+  });
+
+  it('keeps the Save button disabled when no fields have changed (isDirty gate)', () => {
+    render(
+      <Handoff
+        accountId={TEST_ACCOUNT}
+        apiKey={TEST_KEY}
+        agent={TEST_AGENT}
+        profileCompleteness={40}
+        onReset={jest.fn()}
+      />,
+    );
+    const save = screen.getByRole('button', {
+      name: /save profile/i,
+    }) as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+  });
+
+  it('surfaces the rate-limit message when updateProfile rejects with an ApiError carrying retryAfter', async () => {
+    const err = new ApiError({
+      statusCode: 429,
+      message: 'rate limited',
+      code: 'RATE_LIMITED',
+      retryAfter: 12,
+    });
+    // Mock class ignores constructor args; assign retryAfter directly.
+    (err as { retryAfter?: number }).retryAfter = 12;
+    (api.updateProfile as jest.Mock).mockRejectedValueOnce(err);
+    render(
+      <Handoff
+        accountId={TEST_ACCOUNT}
+        apiKey={TEST_KEY}
+        agent={TEST_AGENT}
+        profileCompleteness={40}
+        onReset={jest.fn()}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText(/^name$/i), {
+      target: { value: 'Alice' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /save profile/i }));
+    await screen.findByText(/rate limited — try again in 12s/i);
   });
 });

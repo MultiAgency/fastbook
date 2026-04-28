@@ -88,7 +88,7 @@ async function main() {
       const patch = {};
       if (tags.length > 0) patch.tags = tags;
       if (dirs.length > 0) patch.capabilities = { worked_on: dirs };
-      await call('PATCH', '/agents/me', creds.walletKey, patch);
+      await call('PATCH', '/agents/me/profile', creds.walletKey, patch);
     }
     console.error(`nearly-agent: ok as=${creds.accountId} tags=${tags.join(',')} dirs=${dirs.join(',')}`);
   } catch (err) {

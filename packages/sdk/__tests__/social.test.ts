@@ -3,9 +3,9 @@ import {
   buildEndorse,
   buildFollow,
   buildHeartbeat,
+  buildProfile,
   buildUnendorse,
   buildUnfollow,
-  buildUpdateMe,
 } from '../src/social';
 import type { Agent } from '../src/types';
 import { aliceProfileBlob } from './fixtures/entries';
@@ -109,17 +109,16 @@ describe('buildFollow', () => {
     const entry = m.entries['graph/follow/bob.near'] as Record<string, unknown>;
     expect('reason' in entry).toBe(false);
   });
-
 });
 
-describe('buildUpdateMe', () => {
+describe('buildProfile', () => {
   it('merges patch onto current and re-emits tag/cap indexes', () => {
     const current = aliceAgent({ tags: ['rust'] });
-    const m = buildUpdateMe('alice.near', current, {
+    const m = buildProfile('alice.near', current, {
       description: 'updated bio',
       tags: ['rust', 'security'],
     });
-    expect(m.action).toBe('social.update_me');
+    expect(m.action).toBe('social.profile');
     expect(m.rateLimitKey).toBe('alice.near');
     const profile = m.entries.profile as Record<string, unknown>;
     expect(profile.description).toBe('updated bio');
@@ -130,7 +129,7 @@ describe('buildUpdateMe', () => {
 
   it('null-writes dropped tags so they vanish from listTags', () => {
     const current = aliceAgent({ tags: ['rust', 'ai', 'defi'] });
-    const m = buildUpdateMe('alice.near', current, { tags: ['rust'] });
+    const m = buildProfile('alice.near', current, { tags: ['rust'] });
     expect(m.entries['tag/rust']).toBe(true);
     // Dropped tags become null-writes.
     expect(m.entries['tag/ai']).toBeNull();
@@ -141,7 +140,7 @@ describe('buildUpdateMe', () => {
     const current = aliceAgent({
       capabilities: { skills: ['code-review', 'fuzzing'] },
     });
-    const m = buildUpdateMe('alice.near', current, {
+    const m = buildProfile('alice.near', current, {
       capabilities: { skills: ['code-review'] },
     });
     expect(m.entries['cap/skills/code-review']).toBe(true);
@@ -149,7 +148,7 @@ describe('buildUpdateMe', () => {
   });
 
   it('falls through to defaultAgent on first write (current null)', () => {
-    const m = buildUpdateMe('new.near', null, { name: 'Newbie' });
+    const m = buildProfile('new.near', null, { name: 'Newbie' });
     const profile = m.entries.profile as Record<string, unknown>;
     expect(profile.account_id).toBe('new.near');
     expect(profile.name).toBe('Newbie');
@@ -157,7 +156,7 @@ describe('buildUpdateMe', () => {
   });
 
   it('rejects an empty patch as VALIDATION_ERROR', () => {
-    expect(() => buildUpdateMe('alice.near', aliceAgent(), {})).toThrow(
+    expect(() => buildProfile('alice.near', aliceAgent(), {})).toThrow(
       /no valid fields/,
     );
   });
@@ -166,19 +165,19 @@ describe('buildUpdateMe', () => {
     // validateTags lowercases first (so 'Rust' → 'rust' is fine), then
     // enforces the shape. A leading hyphen fails the regex.
     expect(() =>
-      buildUpdateMe('alice.near', aliceAgent(), { tags: ['-rust'] }),
+      buildProfile('alice.near', aliceAgent(), { tags: ['-rust'] }),
     ).toThrow(/lowercase/);
   });
 
   it('rejects blank name', () => {
     expect(() =>
-      buildUpdateMe('alice.near', aliceAgent(), { name: '   ' }),
+      buildProfile('alice.near', aliceAgent(), { name: '   ' }),
     ).toThrow(/blank/);
   });
 
   it('allows clearing name / image to null', () => {
     const current = aliceAgent({ name: 'Alice', image: 'https://e.g/a.png' });
-    const m = buildUpdateMe('alice.near', current, {
+    const m = buildProfile('alice.near', current, {
       name: null,
       image: null,
     });
@@ -189,7 +188,7 @@ describe('buildUpdateMe', () => {
 
   it('rejects http:// image URLs', () => {
     expect(() =>
-      buildUpdateMe('alice.near', aliceAgent(), {
+      buildProfile('alice.near', aliceAgent(), {
         image: 'http://example.com/a.png',
       }),
     ).toThrow(/https/);
@@ -197,7 +196,7 @@ describe('buildUpdateMe', () => {
 
   it('rejects image URLs pointing at private hosts', () => {
     expect(() =>
-      buildUpdateMe('alice.near', aliceAgent(), {
+      buildProfile('alice.near', aliceAgent(), {
         image: 'https://127.0.0.1/a.png',
       }),
     ).toThrow(/local or internal/);

@@ -166,12 +166,12 @@ describe('validateImageUrl', () => {
   });
 
   it('rejects IPv4-mapped IPv6 for private ranges', () => {
-    expect(
-      validateImageUrl('https://[::ffff:10.0.0.1]/img.png')?.code,
-    ).toBe('VALIDATION_ERROR');
-    expect(
-      validateImageUrl('https://[::ffff:192.168.1.1]/img.png')?.code,
-    ).toBe('VALIDATION_ERROR');
+    expect(validateImageUrl('https://[::ffff:10.0.0.1]/img.png')?.code).toBe(
+      'VALIDATION_ERROR',
+    );
+    expect(validateImageUrl('https://[::ffff:192.168.1.1]/img.png')?.code).toBe(
+      'VALIDATION_ERROR',
+    );
     expect(
       validateImageUrl('https://[::ffff:169.254.169.254]/img.png')?.code,
     ).toBe('VALIDATION_ERROR');
@@ -190,9 +190,9 @@ describe('validateImageUrl', () => {
   });
 
   it('rejects URL with zero-width chars', () => {
-    expect(
-      validateImageUrl('https://exam​ple.com/img.png')?.code,
-    ).toBe('VALIDATION_ERROR');
+    expect(validateImageUrl('https://exam​ple.com/img.png')?.code).toBe(
+      'VALIDATION_ERROR',
+    );
   });
 });
 
@@ -279,6 +279,18 @@ describe('validateCapabilities', () => {
     );
   });
 
+  it('rejects slashes in values', () => {
+    expect(validateCapabilities({ key: 'bad/value' })?.code).toBe(
+      'VALIDATION_ERROR',
+    );
+  });
+
+  it('rejects slashes in keys', () => {
+    expect(validateCapabilities({ 'bad/key': 'value' })?.code).toBe(
+      'VALIDATION_ERROR',
+    );
+  });
+
   it('rejects exceeding max nesting depth', () => {
     let nested: unknown = 'leaf';
     for (let i = 0; i <= LIMITS.MAX_CAPABILITY_DEPTH; i++) {
@@ -299,9 +311,9 @@ describe('validateCapabilities', () => {
   });
 
   it('rejects unsafe unicode in nested array values', () => {
-    expect(
-      validateCapabilities({ skills: ['ok', 'bad​value'] })?.code,
-    ).toBe('VALIDATION_ERROR');
+    expect(validateCapabilities({ skills: ['ok', 'bad​value'] })?.code).toBe(
+      'VALIDATION_ERROR',
+    );
   });
 
   it('rejects unsafe unicode in keys', () => {

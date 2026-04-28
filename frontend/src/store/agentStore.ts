@@ -18,32 +18,13 @@ interface AgentStore {
   stepStatus: Record<StepNumber, StepStatus>;
   stepErrors: Record<StepNumber, string | null>;
 
-  /** BYO wallet verification status. */
   byoStatus: StepStatus;
   byoError: string | null;
 
-  /**
-   * External-NEAR (deterministic) path. Caller supplies their own NEAR
-   * account + ed25519 key; signing happens in the browser; OutLayer
-   * returns a derived wallet (`walletId` + hex64 `nearAccountId`).
-   *
-   * When the user opts into delegate-key minting (default), the flow
-   * also mints a session-scoped `wk_` via `PUT /wallet/v1/api-key` and
-   * activates it on the `ApiClient` singleton — the user gets a working
-   * agent in one step. The `wk_` is never persisted to browser storage;
-   * page reload re-derives it by re-running the flow with the same
-   * inputs.
-   *
-   * When the user opts out (`--no-mint-key` equivalent), only
-   * provisioning runs and `externalNearWalletKey` stays null — matches
-   * the second-reopen "manage externally" shape.
-   */
+  // External-NEAR (deterministic) path. Sets accountId always; sets apiKey only when delegate wk_ is minted.
   externalNearStatus: StepStatus;
   externalNearError: string | null;
   externalNearWalletId: string | null;
-  externalNearNearAccountId: string | null;
-  /** Minted delegate `wk_`, session-scoped. Null in provisioning-only mode. */
-  externalNearWalletKey: string | null;
 
   /** Heartbeat lifecycle — shared by both paths. */
   heartbeatStatus: StepStatus;
@@ -95,8 +76,6 @@ const initialState = {
   externalNearStatus: 'idle' as StepStatus,
   externalNearError: null as string | null,
   externalNearWalletId: null as string | null,
-  externalNearNearAccountId: null as string | null,
-  externalNearWalletKey: null as string | null,
   heartbeatStatus: 'idle' as StepStatus,
   heartbeatError: null as string | null,
   heartbeatData: null as HeartbeatResponse | null,
@@ -155,12 +134,8 @@ export const useAgentStore = create<AgentStore>()((set) => {
         externalNearStatus: 'success',
         externalNearError: null,
         externalNearWalletId: walletId,
-        externalNearNearAccountId: nearAccountId,
-        externalNearWalletKey: walletKey,
-        // When a delegate wk_ was minted, also populate the shared
-        // apiKey/accountId fields so the post-funding heartbeat flow
-        // (shared with new/byo paths) can use the same credentials.
-        ...(walletKey ? { apiKey: walletKey, accountId: nearAccountId } : {}),
+        accountId: nearAccountId,
+        apiKey: walletKey,
       }),
 
     // post-funding (both paths)

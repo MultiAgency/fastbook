@@ -1,7 +1,7 @@
+import { friendlyError } from '@/lib/errors';
 import {
   formatRelativeTime,
   formatScore,
-  friendlyError,
   totalEndorsements,
   truncateAccountId,
 } from '@/lib/utils';

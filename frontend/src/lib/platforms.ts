@@ -1,32 +1,3 @@
-// STATUS: TABLED — DO NOT EXTEND WITHOUT REVISITING THE PLAN
-//
-// The cross-platform registration story is on hold pending resolution of the
-// market.near.ai no-crypto-link gap: market.near.ai creates a
-// platform-controlled NEAR account with no shared signing root back to the
-// caller's OutLayer wk_ wallet, so a "registration" shuffles identity
-// references without establishing verifiable cross-platform ownership.
-// Until that's fixed upstream, market.near.ai registration through this
-// module is theatre — it lands in market's DB but doesn't prove anything
-// nearly.social couldn't already prove by exposing the profile + VRF.
-//
-// The near.fm path in PLATFORM_CONFIGS uses outlayer-signing, which *is*
-// meaningful (the NEP-413 claim proves wk_ ownership of the NEAR account to
-// near.fm's backend). That component stays. If the feature gets trimmed
-// later, near.fm's signing flow is the piece worth preserving.
-//
-// Do not:
-//   - Remove this module or its UI cards in Handoff.tsx without a plan doc
-//   - Extend the market.near.ai path further — it's already over-engineered
-//     for what it actually delivers
-//   - Introduce a new PLATFORM_CONFIGS entry without naming its signing root
-//
-// Do:
-//   - Skip step 9 in scripts/smoke.sh (empty `platforms: []` body) to avoid
-//     orphan mappings from test runs
-//   - See .agents/planning/todo-list.md for the deferred decision
-//   - Revisit when market.near.ai adds a real verification consumer (see
-//     memory: project_market_verifiable_claim.md)
-
 import type { NextResponse } from 'next/server';
 import { errJson, successJson } from '@/lib/api-response';
 import { MARKET_API_URL, OUTLAYER_API_URL } from '@/lib/constants';
@@ -63,8 +34,7 @@ interface PlatformContext {
   verifiable_claim?: VerifiableClaim;
 }
 
-// ---------------------------------------------------------------------------
-// Config-driven platform definitions
+// Config-driven platform definitions.
 //
 // To add a new platform:
 //   1. Add a meta entry to PLATFORM_META above (display fields + requiresWalletKey).
@@ -72,7 +42,6 @@ interface PlatformContext {
 //      credential fields). Add a local env-backed constant for the URL if needed.
 //   Everything else is generic: join page cards, auto-registration, credential
 //   surfacing, and persistence all derive from these two arrays.
-// ---------------------------------------------------------------------------
 
 type PlatformId = (typeof PLATFORM_META)[number]['id'];
 
@@ -115,7 +84,7 @@ interface OutlayerSigningConfig {
 export type PlatformConfig = DirectPostConfig | OutlayerSigningConfig;
 
 const REGISTER_TIMEOUT_MS = 5_000;
-const NEARFM_API_URL = process.env.NEARFM_API_URL || 'https://api.near.fm';
+const NEARFM_API_URL = 'https://api.near.fm';
 
 const PLATFORM_CONFIGS: readonly PlatformConfig[] = [
   {
@@ -143,10 +112,6 @@ const PLATFORM_CONFIGS: readonly PlatformConfig[] = [
     },
   },
 ];
-
-// ---------------------------------------------------------------------------
-// Registration executors
-// ---------------------------------------------------------------------------
 
 function getNestedValue(obj: Record<string, unknown>, path: string): unknown {
   return path.split('.').reduce<unknown>((acc, key) => {
@@ -304,20 +269,13 @@ function executePlatform(
   }
 }
 
-// ---------------------------------------------------------------------------
-// Registry & orchestration
-// ---------------------------------------------------------------------------
-
 const CONFIG_BY_ID = new Map(PLATFORM_CONFIGS.map((c) => [c.id, c]));
 
 function availablePlatformIds(): string[] {
   return PLATFORM_CONFIGS.map((c) => c.id);
 }
 
-/**
- * Run platform registrations concurrently. Returns results keyed by platform ID.
- */
-export async function tryPlatformRegistrations(
+async function tryPlatformRegistrations(
   ctx: PlatformContext,
   requestedIds?: string[],
 ): Promise<{
@@ -361,10 +319,6 @@ export async function tryPlatformRegistrations(
 
   return { platforms: results, warnings };
 }
-
-// ---------------------------------------------------------------------------
-// Server-side platform orchestration (moved from route.ts)
-// ---------------------------------------------------------------------------
 
 function buildPlatformContext(
   agent: {

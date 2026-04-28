@@ -4,5 +4,8 @@
   "engines": {
     "node": ">=22.0.0"
   },
-  "workspaces": ["frontend", "packages/sdk"]
+  "workspaces": ["frontend", "packages/sdk"],
+  "overrides": {
+    "postcss": "^8.5.10"
+  }
 }

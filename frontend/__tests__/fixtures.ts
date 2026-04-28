@@ -1,4 +1,7 @@
-import type { KvEntry } from '@/lib/fastdata';
+import type { KvEntry } from '@/lib/fastdata/client';
+
+export const WK = 'wk_testkey';
+export const resolveAccountId = jest.fn();
 
 export function mockAgent(accountId: string) {
   return {
